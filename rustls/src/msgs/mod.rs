@@ -50,6 +50,8 @@ pub(crate) use client_hello::{
 };
 
 mod codec;
+#[cfg(feature = "dtls")]
+pub use codec::U48;
 pub(crate) use codec::{
     CERTIFICATE_MAX_SIZE_LIMIT, Codec, ListLength, MaybeEmpty, NonEmpty, Reader, SizedPayload,
     TlsListElement, hex, put_u16, put_u64,
@@ -119,6 +121,8 @@ pub mod fuzzing {
             Message::try_from(&EncodedMessage {
                 typ: msg.typ,
                 version: msg.version,
+                #[cfg(feature = "dtls")]
+                epoch_and_sequence: msg.epoch_and_sequence,
                 payload: Payload::Owned(msg.payload.to_vec()),
             })
             .ok();
@@ -153,6 +157,8 @@ pub mod fuzzing {
 #[derive(Debug)]
 pub(crate) struct Message<'a> {
     pub version: ProtocolVersion,
+    #[cfg(feature = "dtls")]
+    pub epoch_and_sequence: Option<EpochAndSequence>,
     pub payload: MessagePayload<'a>,
 }
 
@@ -230,9 +236,17 @@ impl<'a> TryFrom<&'a EncodedMessage<Payload<'a>>> for Message<'a> {
     }
 }
 
+pub(crate) struct MessageHeader {
+    pub(crate) typ: ContentType,
+    pub(crate) version: ProtocolVersion,
+    #[cfg(feature = "dtls")]
+    pub(crate) epoch_and_sequence: Option<EpochAndSequence>,
+    pub(crate) len: u16,
+}
+
 pub(crate) fn read_opaque_message_header(
     r: &mut Reader<'_>,
-) -> Result<(ContentType, ProtocolVersion, u16), MessageError> {
+) -> Result<MessageHeader, MessageError> {
     let typ = ContentType::read(r).map_err(|_| MessageError::TooShortForHeader)?;
     // Don't accept any new content-types.
     if ContentTypeName::try_from(typ).is_err() {
@@ -240,10 +254,22 @@ pub(crate) fn read_opaque_message_header(
     }
 
     let version = ProtocolVersion::read(r).map_err(|_| MessageError::TooShortForHeader)?;
-    // Accept only versions 0x03XX for any XX.
-    if version.0 & 0xff00 != 0x0300 {
+    // Accept only versions 0x03XX for any XX, or 0xfe if DTLS is in use
+    let allowed_version_high_bytes = if cfg!(feature = "dtls") {
+        [0x0300, 0xfe00].as_slice()
+    } else {
+        [0x0300].as_slice()
+    };
+    if !allowed_version_high_bytes.contains(&(version.0 & 0xff00)) {
         return Err(MessageError::UnknownProtocolVersion);
     }
+
+    #[cfg(feature = "dtls")]
+    let epoch_and_sequence = if version.is_datagram_tls() {
+        Some(EpochAndSequence::read(r).map_err(|_| MessageError::TooShortForHeader)?)
+    } else {
+        None
+    };
 
     let len = u16::read(r).map_err(|_| MessageError::TooShortForHeader)?;
 
@@ -259,7 +285,13 @@ pub(crate) fn read_opaque_message_header(
         return Err(MessageError::MessageTooLarge);
     }
 
-    Ok((typ, version, len))
+    Ok(MessageHeader {
+        typ,
+        version,
+        #[cfg(feature = "dtls")]
+        epoch_and_sequence,
+        len,
+    })
 }
 
 #[non_exhaustive]
@@ -356,6 +388,9 @@ impl From<Message<'_>> for EncodedMessage<Payload<'_>> {
         Self {
             typ,
             version: msg.version,
+            // TODO(timg): possibly the epoch should be 0?
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: msg.epoch_and_sequence,
             payload,
         }
     }
@@ -683,6 +718,58 @@ impl Codec<'_> for ChangeCipherSpecPayload {
 
         r.expect_empty("ChangeCipherSpecPayload")
             .map(|_| Self {})
+    }
+}
+
+/// Epoch and sequence numbers used in [Datagram TLS 1.2][1] and [1.3][2].
+///
+/// [1]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1
+/// [2]: https://datatracker.ietf.org/doc/html/rfc9147#section-4
+#[cfg(feature = "dtls")]
+#[derive(Debug, Clone, Copy)]
+pub struct EpochAndSequence {
+    /// The epoch number.
+    pub epoch: u16,
+    /// The sequence number of the record within the epoch. This is
+    /// actually a 48-bit integer.
+    pub sequence_number: U48,
+}
+
+#[cfg(feature = "dtls")]
+impl EpochAndSequence {
+    /// Concatenate the epoch and sequence number into a 64 bit sequence number
+    /// suitable for use in AEAD or MAC.
+    pub fn as_sequence_number(self) -> u64 {
+        (self.epoch as u64) << 48 + self.sequence_number.0
+    }
+
+    /// Decompose a 64 bit sequence number into DTLS epoch and sequence numbers.
+    pub fn from_sequence_number(seq: u64) -> Self {
+        let epoch = (seq & 0xffff_0000_0000_0000) >> 48;
+        assert!(epoch <= u16::MAX as u64);
+
+        Self {
+            epoch: epoch as u16,
+            sequence_number: U48(seq & 0x0000_ffff_ffff_ffff),
+        }
+    }
+}
+
+#[cfg(feature = "dtls")]
+impl Codec<'_> for EpochAndSequence {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.epoch.encode(bytes);
+        self.sequence_number.encode(bytes);
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        let epoch = u16::read(r)?;
+        let sequence_number = U48::read(r)?;
+
+        Ok(Self {
+            epoch,
+            sequence_number,
+        })
     }
 }
 

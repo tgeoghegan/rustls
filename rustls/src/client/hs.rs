@@ -32,6 +32,8 @@ use crate::msgs::{
     PskKeyExchangeModes, Random, ServerHelloPayload, ServerNamePayload, SessionId,
     SupportedEcPointFormats, SupportedProtocolVersions, TransportParameters,
 };
+#[cfg(feature = "dtls")]
+use crate::msgs::{EpochAndSequence, U48};
 use crate::sealed::Sealed;
 use crate::suites::{PartiallyExtractedSecrets, Suite, SupportedCipherSuite};
 use crate::sync::Arc;
@@ -816,18 +818,33 @@ fn emit_client_hello_for_retry(
     };
 
     let ch = Message {
-        version: match retryreq {
+        version: match (input.protocol, retryreq) {
+            #[cfg(feature = "dtls")]
+            // <https://datatracker.ietf.org/doc/html/rfc9147#section-4>:
+            // "This value MUST be set to {254, 253} for all records..."
+            (Protocol::Udp, Some(_)) => ProtocolVersion::DTLSv1_2,
+            // "... other than the initial ClientHello [...], where it may also
+            // be {254, 255} for compatibility purposes."
+            #[cfg(feature = "dtls")]
+            (Protocol::Udp, None) => ProtocolVersion::DTLSv1_0,
             // <https://datatracker.ietf.org/doc/html/rfc8446#section-5.1>:
             // "This value MUST be set to 0x0303 for all records generated
             //  by a TLS 1.3 implementation ..."
-            Some(_) => ProtocolVersion::TLSv1_2,
+            (_, Some(_)) => ProtocolVersion::TLSv1_2,
             // "... other than an initial ClientHello (i.e., one not
             // generated after a HelloRetryRequest), where it MAY also be
             // 0x0301 for compatibility purposes"
             //
             // (retryreq == None means we're in the "initial ClientHello" case)
-            None => ProtocolVersion::TLSv1_0,
+            (_, None) => ProtocolVersion::TLSv1_0,
         },
+        #[cfg(feature = "dtls")]
+        epoch_and_sequence: Some(EpochAndSequence {
+            // Always epoch 0 for handshake messages
+            epoch: 0,
+            // TODO(timg): plumb sequence number somehow
+            sequence_number: U48(0),
+        }),
         payload: MessagePayload::handshake(chp),
     };
 

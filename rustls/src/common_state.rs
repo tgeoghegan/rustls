@@ -16,6 +16,8 @@ use crate::hash_hs::HandshakeHash;
 use crate::msgs::{
     AlertLevel, Codec, Delocator, HandshakeMessagePayload, Locator, Message, MessagePayload,
 };
+#[cfg(feature = "dtls")]
+use crate::msgs::{EpochAndSequence, U48};
 use crate::quic::{self, QuicOutput};
 use crate::suites::SupportedCipherSuite;
 
@@ -350,6 +352,9 @@ pub(crate) enum Protocol {
     Tcp,
     /// QUIC, standardized in RFC9001
     Quic(quic::Version),
+    /// Datagram TLS, standardized in RFC6347 (1.2) and RFC9147 (1.3)
+    #[cfg(feature = "dtls")]
+    Udp,
 }
 
 impl Protocol {
@@ -358,12 +363,12 @@ impl Protocol {
     }
 }
 
-pub(crate) struct HandshakeFlight<'a, const TLS13: bool> {
+pub(crate) struct HandshakeFlight<'a, const TLS13: bool, const DTLS: bool> {
     pub(crate) transcript: &'a mut HandshakeHash,
     body: Vec<u8>,
 }
 
-impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
+impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
     pub(crate) fn new(transcript: &'a mut HandshakeHash) -> Self {
         Self {
             transcript,
@@ -380,16 +385,26 @@ impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
 
     pub(crate) fn finish(self, output: &mut dyn Output<'_>) {
         let m = Message {
-            version: match TLS13 {
-                true => ProtocolVersion::TLSv1_3,
-                false => ProtocolVersion::TLSv1_2,
+            version: match (TLS13, DTLS) {
+                (true, true) => ProtocolVersion::DTLSv1_3,
+                (true, false) => ProtocolVersion::TLSv1_3,
+                (false, true) => ProtocolVersion::DTLSv1_2,
+                (false, false) => ProtocolVersion::TLSv1_2,
             },
             payload: MessagePayload::HandshakeFlight(Payload::new(self.body)),
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: Some(EpochAndSequence {
+                epoch: 0,
+                // TODO(timg): plumb epoch and sequence here somehow
+                sequence_number: U48(0),
+            }),
         };
 
         output.send_msg(m, TLS13);
     }
 }
 
-pub(crate) type HandshakeFlightTls12<'a> = HandshakeFlight<'a, false>;
-pub(crate) type HandshakeFlightTls13<'a> = HandshakeFlight<'a, true>;
+pub(crate) type HandshakeFlightTls12<'a> = HandshakeFlight<'a, false, false>;
+pub(crate) type HandshakeFlightDtls12<'a> = HandshakeFlight<'a, false, true>;
+pub(crate) type HandshakeFlightTls13<'a> = HandshakeFlight<'a, true, false>;
+pub(crate) type HandshakeFlightDtls13<'a> = HandshakeFlight<'a, true, true>;

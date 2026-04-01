@@ -5,7 +5,11 @@ use core::ops::{Deref, DerefMut, Range};
 use crate::crypto::cipher::EncryptionState;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
-use crate::msgs::{Codec, HEADER_SIZE, MAX_FRAGMENT_LEN, Reader, hex, read_opaque_message_header};
+#[cfg(feature = "dtls")]
+use crate::msgs::EpochAndSequence;
+use crate::msgs::{
+    Codec, HEADER_SIZE, MAX_FRAGMENT_LEN, MessageHeader, Reader, hex, read_opaque_message_header,
+};
 
 /// A TLS message with encoded (but not necessarily encrypted) payload.
 #[expect(clippy::exhaustive_structs)]
@@ -15,6 +19,9 @@ pub struct EncodedMessage<P> {
     pub typ: ContentType,
     /// The protocol version of this message.
     pub version: ProtocolVersion,
+    /// The epoch and sequence number, if DTLS is in use.
+    #[cfg(feature = "dtls")]
+    pub epoch_and_sequence: Option<EpochAndSequence>,
     /// The payload of this message.
     pub payload: P,
 }
@@ -24,6 +31,24 @@ impl<P> EncodedMessage<P> {
     pub fn new(typ: ContentType, version: ProtocolVersion, payload: P) -> Self {
         Self {
             typ,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
+            version,
+            payload,
+        }
+    }
+
+    /// Create a new `EncodedMessage` suitable for use with DTLS.
+    #[cfg(feature = "dtls")]
+    pub fn new_dtls(
+        typ: ContentType,
+        epoch_and_sequence: EpochAndSequence,
+        version: ProtocolVersion,
+        payload: P,
+    ) -> Self {
+        Self {
+            typ,
+            epoch_and_sequence: Some(epoch_and_sequence),
             version,
             payload,
         }
@@ -36,7 +61,13 @@ impl<'a> EncodedMessage<Payload<'a>> {
     /// `MessageError` allows callers to distinguish between valid prefixes (might
     /// become valid if we read more data) and invalid data.
     pub(crate) fn read(r: &mut Reader<'a>) -> Result<Self, MessageError> {
-        let (typ, version, len) = read_opaque_message_header(r)?;
+        let MessageHeader {
+            typ,
+            version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence,
+            len,
+        } = read_opaque_message_header(r)?;
 
         let content = r
             .take(len as usize)
@@ -45,6 +76,8 @@ impl<'a> EncodedMessage<Payload<'a>> {
         Ok(Self {
             typ,
             version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence,
             payload: Payload::Borrowed(content),
         })
     }
@@ -54,6 +87,8 @@ impl<'a> EncodedMessage<Payload<'a>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: self.epoch_and_sequence,
             payload: OutboundOpaque::from(self.payload.bytes()),
         }
     }
@@ -63,6 +98,8 @@ impl<'a> EncodedMessage<Payload<'a>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: self.epoch_and_sequence,
             payload: self.payload.bytes().into(),
         }
     }
@@ -72,6 +109,8 @@ impl<'a> EncodedMessage<Payload<'a>> {
         Self {
             typ: self.typ,
             version: self.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: self.epoch_and_sequence,
             payload: self.payload.into_owned(),
         }
     }
@@ -125,6 +164,8 @@ impl<'a> EncodedMessage<InboundOpaque<'a>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: self.epoch_and_sequence,
             payload: &self.payload.into_inner()[range],
         }
     }
@@ -138,6 +179,8 @@ impl<'a> EncodedMessage<InboundOpaque<'a>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: self.epoch_and_sequence,
             payload: self.payload.into_inner(),
         }
     }
@@ -150,6 +193,8 @@ impl EncodedMessage<OutboundPlain<'_>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: self.epoch_and_sequence,
             payload,
         }
     }

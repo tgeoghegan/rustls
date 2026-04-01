@@ -14,6 +14,8 @@ use crate::crypto::cipher::{Decrypted, DecryptionState, EncodedMessage, Payload}
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error, PeerMisbehaved};
 use crate::log::{trace, warn};
+#[cfg(feature = "dtls")]
+use crate::msgs::EpochAndSequence;
 use crate::msgs::{
     AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, Delocator,
     HandshakeAlignedProof, Locator, Message, MessagePayload, TlsInputBuffer,
@@ -609,6 +611,8 @@ impl Input<'_> {
 struct InboundUnborrowedMessage {
     typ: ContentType,
     version: ProtocolVersion,
+    #[cfg(feature = "dtls")]
+    epoch_and_sequence: Option<EpochAndSequence>,
     bounds: Range<usize>,
 }
 
@@ -617,6 +621,8 @@ impl InboundUnborrowedMessage {
         Self {
             typ: msg.typ,
             version: msg.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: msg.epoch_and_sequence,
             bounds: locator.locate(msg.payload),
         }
     }
@@ -625,6 +631,8 @@ impl InboundUnborrowedMessage {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: self.epoch_and_sequence,
             payload: delocator.slice_from_range(&self.bounds),
         }
     }

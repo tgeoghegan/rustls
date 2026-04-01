@@ -190,6 +190,12 @@ enum_builder! {
     }
 }
 
+impl ProtocolVersion {
+    pub fn is_datagram_tls(self) -> bool {
+        self == Self::DTLSv1_0 || self == Self::DTLSv1_2 || self == Self::DTLSv1_3
+    }
+}
+
 enum_builder! {
     /// The "TLS Certificate Compression Algorithm IDs" TLS protocol enum.
     /// Values in this enum are taken from [RFC8879].

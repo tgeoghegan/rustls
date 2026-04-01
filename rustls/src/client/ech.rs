@@ -26,6 +26,8 @@ use crate::msgs::{
     MessagePayload, PresharedKeyBinder, PresharedKeyOffer, Random, Reader, ServerHelloPayload,
     ServerNamePayload, SizedPayload,
 };
+#[cfg(feature = "dtls")]
+use crate::msgs::{EpochAndSequence, U48};
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::{
     KeyScheduleEarlyClient, KeyScheduleHandshakeStart, server_ech_hrr_confirmation_secret,
@@ -728,18 +730,29 @@ impl EchState {
 
         // Construct the inner hello message that will be used for the transcript.
         let inner_hello_msg = Message {
-            version: match retryreq {
+            version: match (self.protocol, retryreq) {
+                #[cfg(feature = "dtls")]
+                (Protocol::Udp, Some(_)) => ProtocolVersion::DTLSv1_2,
+                #[cfg(feature = "dtls")]
+                (Protocol::Udp, None) => ProtocolVersion::DTLSv1_0,
                 // <https://datatracker.ietf.org/doc/html/rfc8446#section-5.1>:
                 // "This value MUST be set to 0x0303 for all records generated
                 //  by a TLS 1.3 implementation ..."
-                Some(_) => ProtocolVersion::TLSv1_2,
+                (_, Some(_)) => ProtocolVersion::TLSv1_2,
                 // "... other than an initial ClientHello (i.e., one not
                 // generated after a HelloRetryRequest), where it MAY also be
                 // 0x0301 for compatibility purposes"
                 //
                 // (retryreq == None means we're in the "initial ClientHello" case)
-                None => ProtocolVersion::TLSv1_0,
+                (_, None) => ProtocolVersion::TLSv1_0,
             },
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: Some(EpochAndSequence {
+                // Epoch always 0 for client handshake messages
+                epoch: 0,
+                // TODO(timg): plumb sequence number somehow
+                sequence_number: U48(0),
+            }),
             payload: MessagePayload::handshake(HandshakeMessagePayload(
                 HandshakePayload::ClientHello(inner_hello),
             )),
@@ -803,6 +816,9 @@ impl EchState {
 
         Message {
             version: ProtocolVersion::TLSv1_3,
+            // TODO(timg): ECH for DTLS
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload: MessagePayload::Handshake {
                 encoded: Payload::Owned(encoded),
                 parsed: HandshakeMessagePayload(HandshakePayload::ServerHello(
@@ -823,6 +839,9 @@ impl EchState {
         hmp.payload_encode(&mut hmp_encoded, Encoding::EchConfirmation);
         Message {
             version: ProtocolVersion::TLSv1_3,
+            // TODO(timg): ECH for DTLS
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload: MessagePayload::Handshake {
                 encoded: Payload::new(hmp_encoded),
                 parsed: hmp,
@@ -868,6 +887,9 @@ mod tests {
         };
         let message = Message {
             version: ProtocolVersion::TLSv1_3,
+            // TODO(timg): ECH for DTLS
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
                 HandshakePayload::ServerHello(server_hello.clone()),
             )),

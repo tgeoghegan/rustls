@@ -12,6 +12,8 @@ mod buffers;
 use buffers::Coalescer;
 pub(crate) use buffers::{Delocator, Locator, TlsInputBuffer, VecInput};
 
+use super::MessageHeader;
+
 pub fn fuzz_deframer(data: &[u8]) {
     let mut buf = data.to_vec();
     let mut deframer = Deframer::default();
@@ -52,7 +54,13 @@ impl Deframer {
     pub(crate) fn deframe<'a>(&mut self, buf: &'a mut [u8]) -> Option<Result<Deframed<'a>, Error>> {
         let mut reader = Reader::new(buf.get(self.processed..)?);
 
-        let (typ, version, len) = match read_opaque_message_header(&mut reader) {
+        let MessageHeader {
+            typ,
+            version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence,
+            len,
+        } = match read_opaque_message_header(&mut reader) {
             Ok(header) => header,
             Err(err) => {
                 let err = match err {
@@ -79,6 +87,8 @@ impl Deframer {
             message: EncodedMessage {
                 typ,
                 version,
+                #[cfg(feature = "dtls")]
+                epoch_and_sequence,
                 payload: InboundOpaque(&mut head[bounds.start + HEADER_SIZE..]),
             },
             bounds,

@@ -21,7 +21,12 @@ pub(crate) use record_layer::{Decrypted, DecryptionState, EncryptionState, PreEn
 /// Factory trait for building `MessageEncrypter` and `MessageDecrypter` for a TLS1.3 cipher suite.
 pub trait Tls13AeadAlgorithm: Send + Sync {
     /// Build a `MessageEncrypter` for the given key/iv.
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter>;
+    fn encrypter(
+        &self,
+        protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter>;
 
     /// Build a `MessageDecrypter` for the given key/iv.
     fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageDecrypter>;

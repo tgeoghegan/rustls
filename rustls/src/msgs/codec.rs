@@ -384,6 +384,24 @@ impl Codec<'_> for u32 {
     }
 }
 
+/// A 48 bit unsigned integer.
+#[derive(Debug, Copy, Clone)]
+#[cfg(feature = "dtls")]
+pub struct U48(pub u64);
+
+#[cfg(feature = "dtls")]
+impl Codec<'_> for U48 {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        let be_bytes = u64::to_be_bytes(self.0);
+        bytes.extend_from_slice(&be_bytes[2..]);
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        r.take_array("u48")
+            .map(|&[a, b, c, d, e, f]| Self(u64::from_be_bytes([0, 0, a, b, c, d, e, f])))
+    }
+}
+
 pub(crate) fn put_u64(v: u64, bytes: &mut [u8]) {
     let bytes: &mut [u8; 8] = (&mut bytes[..8]).try_into().unwrap();
     *bytes = u64::to_be_bytes(v);

@@ -37,6 +37,8 @@ use crate::msgs::{
     NewSessionTicketPayloadTls13, PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer,
     Reader, ServerExtensions, ServerHelloPayload, SizedPayload,
 };
+#[cfg(feature = "dtls")]
+use crate::msgs::{EpochAndSequence, U48};
 use crate::sealed::Sealed;
 use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
@@ -472,6 +474,11 @@ pub(super) fn emit_fake_ccs(sent_tls13_fake_ccs: &mut bool, output: &mut dyn Out
         Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
+            #[cfg(feature = "dtls")]
+            // DTLS endpoints MUST NOT send ChangeCipherSpec messages, so there
+            // is never an epoch or sequence.
+            // https://datatracker.ietf.org/doc/html/rfc9147#section-5
+            epoch_and_sequence: None,
         },
         false,
     );
@@ -1253,12 +1260,21 @@ fn emit_finished_tls13(
     )));
 }
 
-fn emit_end_of_early_data_tls13(transcript: &mut HandshakeHash, output: &mut dyn Output<'_>) {
+fn emit_end_of_early_data_tls13(
+    version: ProtocolVersion,
+    transcript: &mut HandshakeHash,
+    output: &mut dyn Output<'_>,
+) {
     let m = Message {
-        version: ProtocolVersion::TLSv1_3,
+        version,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::EndOfEarlyData,
         )),
+        #[cfg(feature = "dtls")]
+        epoch_and_sequence: Some(EpochAndSequence {
+            epoch: 0,
+            sequence_number: U48(0),
+        }),
     };
 
     transcript.add_message(&m);
@@ -1312,7 +1328,12 @@ impl ExpectFinished {
          * but appears in the transcript after the server Finished. */
         if st.in_early_traffic {
             if !st.hs.key_schedule.protocol().is_quic() {
-                emit_end_of_early_data_tls13(&mut st.hs.transcript, output);
+                // TODO(timg): need to plumb DTLS here somehow
+                emit_end_of_early_data_tls13(
+                    ProtocolVersion::TLSv1_3,
+                    &mut st.hs.transcript,
+                    output,
+                );
             }
             output.emit(Event::EarlyData(EarlyDataEvent::Finished));
             st.hs

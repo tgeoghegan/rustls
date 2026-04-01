@@ -78,11 +78,17 @@ pub static TLS13_AES_128_GCM_SHA256: &Tls13CipherSuite = &Tls13CipherSuite {
 struct Chacha20Poly1305Aead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
+    fn encrypter(
+        &self,
+        protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
         // safety: the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
         Box::new(AeadMessageEncrypter {
             enc_key: aead::LessSafeKey::new(aead::UnboundKey::new(self.0.0, key.as_ref()).unwrap()),
             iv,
+            protocol,
         })
     }
 
@@ -114,8 +120,13 @@ impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
 struct Aes256GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes256GcmAead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
-        self.0.encrypter(key, iv)
+    fn encrypter(
+        &self,
+        protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
+        self.0.encrypter(protocol, key, iv)
     }
 
     fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageDecrypter> {
@@ -142,8 +153,13 @@ impl Tls13AeadAlgorithm for Aes256GcmAead {
 struct Aes128GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes128GcmAead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
-        self.0.encrypter(key, iv)
+    fn encrypter(
+        &self,
+        protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
+        self.0.encrypter(protocol, key, iv)
     }
 
     fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageDecrypter> {
@@ -172,7 +188,12 @@ struct AeadAlgorithm(&'static aead::Algorithm);
 
 impl AeadAlgorithm {
     // using aead::TlsRecordSealingKey
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
+    fn encrypter(
+        &self,
+        protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
         // safety:
         // - the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
         // - this function should only be used for `Algorithm::AES_128_GCM` or `Algorithm::AES_256_GCM`
@@ -184,6 +205,7 @@ impl AeadAlgorithm {
             )
             .unwrap(),
             iv,
+            protocol,
         })
     }
 
@@ -211,6 +233,7 @@ impl AeadAlgorithm {
 struct AeadMessageEncrypter {
     enc_key: aead::LessSafeKey,
     iv: Iv,
+    protocol: ProtocolVersion,
 }
 
 struct AeadMessageDecrypter {
@@ -236,11 +259,26 @@ impl MessageEncrypter for AeadMessageEncrypter {
             .seal_in_place_append_tag(nonce, aad, &mut payload)
             .map_err(|_| Error::EncryptError)?;
 
+        #[cfg(feature = "dtls")]
+        let epoch_and_sequence = if self.protocol.is_datagram_tls() {
+            Some(EpochAndSequence::from_sequence_number(seq))
+        } else {
+            None
+        };
+
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
             // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
-            // protocol version, see https://www.rfc-editor.org/rfc/rfc8446#section-5.1
-            version: ProtocolVersion::TLSv1_2,
+            // protocol version. Correspondingly all DTLS 1.3 records claim to be DTLSv1_2.
+            // see https://www.rfc-editor.org/rfc/rfc8446#section-5.1 and
+            // https://datatracker.ietf.org/doc/html/rfc9147#section-4
+            version: if self.protocol.is_datagram_tls() {
+                ProtocolVersion::DTLSv1_2
+            } else {
+                ProtocolVersion::TLSv1_2
+            },
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence,
             payload,
         })
     }
@@ -277,6 +315,7 @@ impl MessageDecrypter for AeadMessageDecrypter {
 struct GcmMessageEncrypter {
     enc_key: aead::TlsRecordSealingKey,
     iv: Iv,
+    protocol: ProtocolVersion,
 }
 
 impl MessageEncrypter for GcmMessageEncrypter {
@@ -297,9 +336,26 @@ impl MessageEncrypter for GcmMessageEncrypter {
             .seal_in_place_append_tag(nonce, aad, &mut payload)
             .map_err(|_| Error::EncryptError)?;
 
+        #[cfg(feature = "dtls")]
+        let epoch_and_sequence = if self.protocol.is_datagram_tls() {
+            Some(EpochAndSequence::from_sequence_number(seq))
+        } else {
+            None
+        };
+
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
-            version: ProtocolVersion::TLSv1_2,
+            // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
+            // protocol version. Correspondingly all DTLS 1.3 records claim to be DTLSv1_2.
+            // see https://www.rfc-editor.org/rfc/rfc8446#section-5.1 and
+            // https://datatracker.ietf.org/doc/html/rfc9147#section-4
+            version: if self.protocol.is_datagram_tls() {
+                ProtocolVersion::DTLSv1_2
+            } else {
+                ProtocolVersion::TLSv1_2
+            },
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence,
             payload,
         })
     }

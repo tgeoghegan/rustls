@@ -9,6 +9,8 @@ use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter, Tls13AeadAlgorithm};
 use crate::crypto::kx::SharedSecret;
 use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError, expand};
 use crate::crypto::{hash, hmac};
+#[cfg(feature = "dtls")]
+use crate::enums::ProtocolVersion;
 use crate::error::{ApiMisuse, Error};
 use crate::msgs::{HandshakeAlignedProof, Message};
 use crate::{ConnectionTrafficSecrets, KeyLog, Tls13CipherSuite};
@@ -937,8 +939,18 @@ impl KeyScheduleSuite {
         let key = derive_traffic_key(expander.as_ref(), self.suite.aead_alg);
         let iv = derive_traffic_iv(expander.as_ref(), self.suite.aead_alg.iv_len());
 
+        // TODO(timg): double check whether this uses 1.2 versions for backward
+        // compat
+        let protocol_version = match self.protocol {
+            #[cfg(feature = "dtls")]
+            Protocol::Udp => ProtocolVersion::DTLSv1_3,
+            _ => ProtocolVersion::TLSv1_3,
+        };
+
         send.set_encrypter(
-            self.suite.aead_alg.encrypter(key, iv),
+            self.suite
+                .aead_alg
+                .encrypter(protocol_version, key, iv),
             self.suite.common.confidentiality_limit,
         );
     }
