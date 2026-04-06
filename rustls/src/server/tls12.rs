@@ -355,6 +355,8 @@ mod client_hello {
             resumption_data: resumption_data.to_vec(),
             using_ems,
             send_ticket,
+            protocol: todo!(),
+            epoch_and_sequence: todo!(),
         };
 
         let secrets =
