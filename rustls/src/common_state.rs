@@ -361,6 +361,14 @@ impl Protocol {
     pub(crate) fn is_quic(&self) -> bool {
         matches!(self, Self::Quic(_))
     }
+
+    pub(crate) fn wire_protocol_version(&self) -> ProtocolVersion {
+        match self {
+            Self::Tcp | Self::Quic(_) => ProtocolVersion::TLSv1_2,
+            #[cfg(feature = "dtls")]
+            Self::Udp => ProtocolVersion::DTLSv1_2,
+        }
+    }
 }
 
 pub(crate) struct HandshakeFlight<'a, const TLS13: bool, const DTLS: bool> {

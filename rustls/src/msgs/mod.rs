@@ -737,6 +737,18 @@ pub struct EpochAndSequence {
 
 #[cfg(feature = "dtls")]
 impl EpochAndSequence {
+    /// A new DTLS epoch and sequence number.
+    pub fn new(epoch: u16, seq: u64) -> Self {
+        if seq > 0xffff_ffff_ffff {
+            panic!("sequence number too large");
+        }
+
+        Self {
+            epoch,
+            sequence_number: U48(seq),
+        }
+    }
+
     /// Concatenate the epoch and sequence number into a 64 bit sequence number
     /// suitable for use in AEAD or MAC.
     pub fn as_sequence_number(self) -> u64 {

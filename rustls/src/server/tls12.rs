@@ -11,7 +11,9 @@ use super::config::ServerConfig;
 use super::hs::ServerState;
 use super::{CommonServerSessionValue, ServerSessionKey, ServerSessionValue};
 use crate::check::inappropriate_message;
-use crate::common_state::{Event, HandshakeFlightTls12, HandshakeKind, Output, OutputEvent, Side};
+use crate::common_state::{
+    Event, HandshakeFlightTls12, HandshakeKind, Output, OutputEvent, Protocol, Side,
+};
 use crate::conn::kernel::KernelState;
 use crate::conn::{ConnectionRandoms, Input};
 use crate::crypto::cipher::{MessageDecrypter, MessageEncrypter, Payload};
@@ -23,6 +25,8 @@ use crate::enums::{
 use crate::error::{ApiMisuse, Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace};
+#[cfg(feature = "dtls")]
+use crate::msgs::EpochAndSequence;
 use crate::msgs::{
     CertificateChain, ChangeCipherSpecPayload, ClientKeyExchangeParams, Codec,
     HandshakeAlignedProof, HandshakeMessagePayload, HandshakePayload, Message, MessagePayload,
@@ -208,6 +212,14 @@ mod client_hello {
                 resumption_data: st.resumption_data,
                 using_ems: st.using_ems,
                 send_ticket,
+                protocol: st.protocol,
+                #[cfg(feature = "dtls")]
+                epoch_and_sequence: if st.protocol == Protocol::Udp {
+                    // TODO(timg): does seq continue from ClientHello?
+                    Some(EpochAndSequence::new(0, 0))
+                } else {
+                    None
+                },
             };
 
             if doing_client_auth {
@@ -1067,6 +1079,12 @@ struct HandshakeState {
     resumption_data: Vec<u8>,
     using_ems: bool,
     send_ticket: bool,
+    /// The transport protocol this handshake is being performed over.
+    protocol: Protocol,
+    /// The current epoch and sequence number, if the handshake is over UDP and
+    /// hence using datagram TLS.
+    #[cfg(feature = "dtls")]
+    epoch_and_sequence: Option<EpochAndSequence>,
 }
 
 // --- Process traffic ---
