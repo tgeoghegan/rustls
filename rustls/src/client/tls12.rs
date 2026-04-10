@@ -22,8 +22,6 @@ use crate::enums::{CertificateType, ContentType, HandshakeType, ProtocolVersion}
 use crate::error::{ApiMisuse, Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace, warn};
-#[cfg(feature = "dtls")]
-use crate::msgs::EpochAndSequence;
 use crate::msgs::{
     CertificateChain, ChangeCipherSpecPayload, ClientDhParams, ClientEcdhParams,
     ClientKeyExchangeParams, HandshakeAlignedProof, HandshakeMessagePayload, HandshakePayload,
@@ -134,14 +132,6 @@ mod server_hello {
                 ..
             } = st.input;
 
-            #[cfg(feature = "dtls")]
-            let epoch_and_sequence = if protocol == Protocol::Udp {
-                // TODO(timg): does seq continue from ClientHello?
-                Some(EpochAndSequence::new(0, 0))
-            } else {
-                None
-            };
-
             let resuming_session = st
                 .input
                 .resuming
@@ -213,8 +203,6 @@ mod server_hello {
                         using_ems,
                         transcript,
                         protocol,
-                        #[cfg(feature = "dtls")]
-                        epoch_and_sequence,
                     };
                     return if must_issue_new_ticket {
                         Ok(Box::new(ExpectNewTicket {
@@ -254,8 +242,6 @@ mod server_hello {
                     using_ems,
                     transcript,
                     protocol,
-                    #[cfg(feature = "dtls")]
-                    epoch_and_sequence,
                 },
                 randoms,
                 suite,
@@ -492,9 +478,6 @@ fn emit_certificate(
 ) {
     let cert = Message {
         version: hs.protocol.wire_protocol_version(),
-        // TODO(timg): increment sequence probably
-        #[cfg(feature = "dtls")]
-        epoch_and_sequence: hs.epoch_and_sequence,
         payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Certificate(
             cert_chain,
         ))),
@@ -524,8 +507,6 @@ fn emit_client_kx(
 
     let ckx = Message {
         version: hs.protocol.wire_protocol_version(),
-        #[cfg(feature = "dtls")]
-        epoch_and_sequence: hs.epoch_and_sequence,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::ClientKeyExchange(pubkey),
         )),
@@ -551,8 +532,6 @@ fn emit_certverify(
 
     let m = Message {
         version: hs.protocol.wire_protocol_version(),
-        #[cfg(feature = "dtls")]
-        epoch_and_sequence: hs.epoch_and_sequence,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::CertificateVerify(body),
         )),
@@ -567,8 +546,6 @@ fn emit_ccs(hs: &HandshakeState, output: &mut dyn Output<'_>) {
     output.send_msg(
         Message {
             version: hs.protocol.wire_protocol_version(),
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: hs.epoch_and_sequence,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         },
         false,
@@ -587,8 +564,6 @@ fn emit_finished(
 
     let f = Message {
         version: hs.protocol.wire_protocol_version(),
-        #[cfg(feature = "dtls")]
-        epoch_and_sequence: hs.epoch_and_sequence,
         payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Finished(
             verify_data_payload,
         ))),
@@ -1204,10 +1179,6 @@ struct HandshakeState {
     transcript: HandshakeHash,
     /// The transport protocol this handshake is being performed over.
     protocol: Protocol,
-    /// The current epoch and sequence number, if the handshake is over UDP and
-    /// hence using datagram TLS.
-    #[cfg(feature = "dtls")]
-    epoch_and_sequence: Option<EpochAndSequence>,
 }
 
 // -- Traffic transit state --

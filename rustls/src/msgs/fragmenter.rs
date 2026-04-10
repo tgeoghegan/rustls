@@ -2,6 +2,9 @@ use crate::Error;
 use crate::crypto::cipher::{EncodedMessage, OutboundPlain, Payload};
 use crate::enums::{ContentType, ProtocolVersion};
 
+#[cfg(feature = "dtls")]
+use super::EpochAndSequence;
+
 pub(crate) const MAX_FRAGMENT_LEN: usize = 16384;
 pub(crate) const PACKET_OVERHEAD: usize = 1 + 2 + 2;
 pub(crate) const MAX_FRAGMENT_SIZE: usize = MAX_FRAGMENT_LEN + PACKET_OVERHEAD;
@@ -30,7 +33,13 @@ impl MessageFragmenter {
         &self,
         msg: &'a EncodedMessage<Payload<'_>>,
     ) -> impl Iterator<Item = EncodedMessage<OutboundPlain<'a>>> + 'a {
-        self.fragment_payload(msg.typ, msg.version, msg.payload.bytes().into())
+        self.fragment_payload(
+            msg.typ,
+            msg.version,
+            #[cfg(feature = "dtls")]
+            msg.epoch_and_sequence,
+            msg.payload.bytes().into(),
+        )
     }
 
     /// Take `payload` and fragment it into new messages with given type and version.
@@ -44,11 +53,14 @@ impl MessageFragmenter {
         &self,
         typ: ContentType,
         version: ProtocolVersion,
+        #[cfg(feature = "dtls")] epoch_and_sequence: Option<EpochAndSequence>,
         payload: OutboundPlain<'a>,
     ) -> impl ExactSizeIterator<Item = EncodedMessage<OutboundPlain<'a>>> {
         Chunker::new(payload, self.max_frag).map(move |payload| EncodedMessage {
             typ,
             version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence,
             payload,
         })
     }
@@ -112,6 +124,7 @@ mod tests {
     use std::vec;
 
     use super::{MessageFragmenter, PACKET_OVERHEAD};
+    use crate::EpochAndSequence;
     use crate::crypto::cipher::{EncodedMessage, OutboundPlain, Payload};
     use crate::enums::{ContentType, ProtocolVersion};
 
@@ -139,6 +152,8 @@ mod tests {
         let m = EncodedMessage {
             typ,
             version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload: Payload::new(data),
         };
 
@@ -183,6 +198,10 @@ mod tests {
         let m = EncodedMessage {
             typ: ContentType::Handshake,
             version: ProtocolVersion::TLSv1_2,
+            // TODO(timg): we can assume this is always None if this fragmenter is only used for
+            // TLS/QUIC
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload: Payload::new(b"\x01\x02\x03\x04\x05\x06\x07\x08".to_vec()),
         };
 
@@ -213,7 +232,13 @@ mod tests {
             .unwrap();
 
         let fragments = frag
-            .fragment_payload(typ, version, borrowed_payload)
+            .fragment_payload(
+                typ,
+                version,
+                #[cfg(feature = "dtls")]
+                None,
+                borrowed_payload,
+            )
             .collect::<Vec<_>>();
         assert_eq!(fragments.len(), 3);
         msg_eq(
@@ -231,5 +256,40 @@ mod tests {
             b"ccccccccccccccccccccdddddddddddd",
         );
         msg_eq(&fragments[2], 13, &typ, &version, b"dddddddd");
+    }
+
+    #[test]
+    fn dtls() {
+        let typ = ContentType::Handshake;
+        let version = ProtocolVersion::DTLSv1_3;
+        let epoch_and_sequence = EpochAndSequence::new(1, 101);
+        let payload_owner: Vec<&[u8]> = vec![&[b'a'; 8], &[b'b'; 12], &[b'c'; 32], &[b'd'; 20]];
+        let borrowed_payload = OutboundPlain::new(&payload_owner);
+        let mut frag = MessageFragmenter::default();
+        frag.set_max_fragment_size(Some(37)) // 32 + packet overhead
+            .unwrap();
+
+        let fragments: Vec<_> = frag
+            .fragment_payload(typ, version, Some(epoch_and_sequence), borrowed_payload)
+            .collect();
+        assert_eq!(fragments.len(), 3);
+        msg_eq(
+            &fragments[0],
+            45,
+            &typ,
+            &version,
+            b"aaaaaaaabbbbbbbbbbbbcccccccccccc",
+        );
+        assert_eq!(fragments[0].epoch_and_sequence.unwrap(), epoch_and_sequence);
+        msg_eq(
+            &fragments[1],
+            45,
+            &typ,
+            &version,
+            b"ccccccccccccccccccccdddddddddddd",
+        );
+        assert_eq!(fragments[0].epoch_and_sequence.unwrap(), epoch_and_sequence);
+        msg_eq(&fragments[2], 21, &typ, &version, b"dddddddd");
+        assert_eq!(fragments[0].epoch_and_sequence.unwrap(), epoch_and_sequence);
     }
 }

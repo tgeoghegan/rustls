@@ -78,7 +78,12 @@ pub static TLS13_AES_128_GCM_SHA256: &Tls13CipherSuite = &Tls13CipherSuite {
 struct Chacha20Poly1305Aead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
+    fn encrypter(
+        &self,
+        _protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
         self.0.encrypter(key, iv)
     }
 
@@ -106,7 +111,12 @@ impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
 struct Aes256GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes256GcmAead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
+    fn encrypter(
+        &self,
+        _protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
         self.0.encrypter(key, iv)
     }
 
@@ -134,7 +144,12 @@ impl Tls13AeadAlgorithm for Aes256GcmAead {
 struct Aes128GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes128GcmAead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
+    fn encrypter(
+        &self,
+        _protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
         self.0.encrypter(key, iv)
     }
 
@@ -201,7 +216,7 @@ impl MessageEncrypter for Tls13MessageEncrypter {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(msg.header_size(), total_len);
 
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
         let aad = aead::Aad::from(make_tls13_aad(total_len));
@@ -217,6 +232,8 @@ impl MessageEncrypter for Tls13MessageEncrypter {
             // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
             // protocol version, see https://www.rfc-editor.org/rfc/rfc8446#section-5.1
             version: ProtocolVersion::TLSv1_2,
+            // TODO(timg): insert epoch and sequence as appropriate
+            epoch_and_sequence: None,
             payload,
         })
     }

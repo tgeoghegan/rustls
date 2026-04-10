@@ -3,6 +3,8 @@ use alloc::boxed::Box;
 use aws_lc_rs::hkdf::KeyType;
 use aws_lc_rs::{aead, hkdf, hmac};
 use pki_types::FipsStatus;
+#[cfg(feature = "dtls")]
+use rustls::EpochAndSequence;
 use rustls::crypto::cipher::{
     AeadKey, EncodedMessage, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter, Nonce,
     OutboundOpaque, OutboundPlain, Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
@@ -248,7 +250,7 @@ impl MessageEncrypter for AeadMessageEncrypter {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(msg.header_size(), total_len);
 
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
         let aad = aead::Aad::from(make_tls13_aad(total_len));
@@ -325,7 +327,7 @@ impl MessageEncrypter for GcmMessageEncrypter {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(msg.header_size(), total_len);
 
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
         let aad = aead::Aad::from(make_tls13_aad(total_len));

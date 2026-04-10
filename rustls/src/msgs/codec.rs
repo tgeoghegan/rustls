@@ -385,7 +385,7 @@ impl Codec<'_> for u32 {
 }
 
 /// A 48 bit unsigned integer.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg(feature = "dtls")]
 pub struct U48(pub u64);
 

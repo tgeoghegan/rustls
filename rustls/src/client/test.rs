@@ -530,7 +530,14 @@ fn client_requiring_rpk_receives_server_ee(
 
     let mut encrypter = fake_server_crypto.server_handshake_encrypter();
     let enc_ee = encrypter
-        .encrypt(EncodedMessage::<Payload<'_>>::from(ee).borrow_outbound(), 0)
+        .encrypt(
+            ee.encoded_message(
+                #[cfg(feature = "dtls")]
+                None,
+            )
+            .borrow_outbound(),
+            0,
+        )
         .unwrap();
     conn.read_tls(&mut enc_ee.encode().as_slice())
         .unwrap();
@@ -674,7 +681,9 @@ impl FakeServerCrypto {
         // Derive Encrypter
         let key = derive_traffic_key(expander.as_ref(), cipher_suite.aead_alg);
         let iv = derive_traffic_iv(expander.as_ref(), cipher_suite.aead_alg.iv_len());
-        cipher_suite.aead_alg.encrypter(key, iv)
+        cipher_suite
+            .aead_alg
+            .encrypter(ProtocolVersion::TLSv1_3, key, iv)
     }
 }
 

@@ -13,6 +13,7 @@ autobenches = false
 [features]
 default = ["std"]
 std = []
+dtls = ["rustls/dtls"]
 
 [dependencies]
 pki-types = { workspace = true }

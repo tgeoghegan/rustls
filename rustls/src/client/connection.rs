@@ -291,7 +291,7 @@ impl ConnectionCore<ClientSide> {
         quic: Option<&mut dyn QuicOutput>,
         protocol: Protocol,
     ) -> Result<Self, Error> {
-        let mut common_state = CommonState::new(Side::Client);
+        let mut common_state = CommonState::new(Side::Client, protocol);
         common_state
             .send
             .set_max_fragment_size(config.max_fragment_size)?;

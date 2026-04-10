@@ -117,7 +117,10 @@ pub mod fuzzing {
         let mut frg = MessageFragmenter::default();
         frg.set_max_fragment_size(Some(32))
             .unwrap();
-        for msg in frg.fragment_message(&EncodedMessage::<Payload<'_>>::from(msg)) {
+        for msg in frg.fragment_message(&msg.encoded_message(
+            #[cfg(feature = "dtls")]
+            None,
+        )) {
             Message::try_from(&EncodedMessage {
                 typ: msg.typ,
                 version: msg.version,
@@ -140,7 +143,11 @@ pub mod fuzzing {
         };
 
         //println!("msg = {:#?}", m);
-        let enc = EncodedMessage::<Payload<'_>>::from(msg)
+        let enc = msg
+            .encoded_message(
+                #[cfg(feature = "dtls")]
+                None,
+            )
             .into_unencrypted_opaque()
             .encode();
         //println!("data = {:?}", &data[..rdr.used()]);
@@ -157,12 +164,10 @@ pub mod fuzzing {
 #[derive(Debug)]
 pub(crate) struct Message<'a> {
     pub version: ProtocolVersion,
-    #[cfg(feature = "dtls")]
-    pub epoch_and_sequence: Option<EpochAndSequence>,
     pub payload: MessagePayload<'a>,
 }
 
-impl Message<'_> {
+impl<'a> Message<'a> {
     pub(crate) fn build_alert(level: AlertLevel, desc: AlertDescription) -> Self {
         Self {
             version: ProtocolVersion::TLSv1_2,
@@ -201,15 +206,41 @@ impl Message<'_> {
 
     #[cfg(test)]
     pub(crate) fn into_wire_bytes(self) -> Vec<u8> {
-        EncodedMessage::<Payload<'_>>::from(self)
-            .into_unencrypted_opaque()
-            .encode()
+        self.encoded_message(
+            #[cfg(feature = "dtls")]
+            None,
+        )
+        .into_unencrypted_opaque()
+        .encode()
     }
 
     pub(crate) fn handshake_type(&self) -> Option<HandshakeType> {
         match &self.payload {
             MessagePayload::Handshake { parsed, .. } => Some(parsed.0.handshake_type()),
             _ => None,
+        }
+    }
+
+    pub(crate) fn encoded_message(
+        self,
+        #[cfg(feature = "dtls")] epoch_and_sequence: Option<EpochAndSequence>,
+    ) -> EncodedMessage<Payload<'a>> {
+        let typ = self.payload.content_type();
+        let payload = match self.payload {
+            MessagePayload::ApplicationData(payload) => payload.into_owned(),
+            _ => {
+                let mut buf = Vec::new();
+                self.payload.encode(&mut buf);
+                Payload::Owned(buf)
+            }
+        };
+
+        EncodedMessage {
+            typ,
+            version: self.version,
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence,
+            payload,
         }
     }
 }
@@ -369,29 +400,6 @@ impl<'a> MessagePayload<'a> {
             HandshakeFlight(x) => HandshakeFlight(x.into_owned()),
             ChangeCipherSpec(x) => ChangeCipherSpec(x),
             ApplicationData(x) => ApplicationData(x.into_owned()),
-        }
-    }
-}
-
-impl From<Message<'_>> for EncodedMessage<Payload<'_>> {
-    fn from(msg: Message<'_>) -> Self {
-        let typ = msg.payload.content_type();
-        let payload = match msg.payload {
-            MessagePayload::ApplicationData(payload) => payload.into_owned(),
-            _ => {
-                let mut buf = Vec::new();
-                msg.payload.encode(&mut buf);
-                Payload::Owned(buf)
-            }
-        };
-
-        Self {
-            typ,
-            version: msg.version,
-            // TODO(timg): possibly the epoch should be 0?
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: msg.epoch_and_sequence,
-            payload,
         }
     }
 }
@@ -726,7 +734,7 @@ impl Codec<'_> for ChangeCipherSpecPayload {
 /// [1]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1
 /// [2]: https://datatracker.ietf.org/doc/html/rfc9147#section-4
 #[cfg(feature = "dtls")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpochAndSequence {
     /// The epoch number.
     pub epoch: u16,
@@ -788,6 +796,10 @@ impl Codec<'_> for EpochAndSequence {
 /// Content type, version and size.
 pub(crate) const HEADER_SIZE: usize = 1 + 2 + 2;
 
+/// TLS header size plus epoch (2 bytes) and sequence number (6 bytes).
+#[cfg(feature = "dtls")]
+pub(crate) const DTLS_HEADER_SIZE: usize = HEADER_SIZE + 2 + 6;
+
 /// Maximum message payload size.
 /// That's 2^14 payload bytes and a 2KB allowance for ciphertext overheads.
 pub(crate) const MAX_PAYLOAD: u16 = 16_384 + 2048;
@@ -829,9 +841,7 @@ mod tests {
                 continue;
             };
 
-            let enc = EncodedMessage::<Payload<'_>>::from(msg)
-                .into_unencrypted_opaque()
-                .encode();
+            let enc = msg.into_wire_bytes();
             assert_eq!(bytes.to_vec(), enc);
             assert_eq!(bytes[..bytes.len() - rd.left()].to_vec(), enc);
         }
@@ -931,7 +941,9 @@ mod tests {
             let out = EncodedMessage {
                 typ: m.typ,
                 version: m.version,
-                payload: OutboundOpaque::from(m.payload.bytes()),
+                #[cfg(feature = "dtls")]
+                epoch_and_sequence: None,
+                payload: OutboundOpaque::from_byte_slice(m.header_size(), m.payload.bytes()),
             }
             .encode();
             assert!(!out.is_empty());

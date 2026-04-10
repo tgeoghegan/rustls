@@ -25,8 +25,6 @@ use crate::enums::{
 use crate::error::{ApiMisuse, Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace};
-#[cfg(feature = "dtls")]
-use crate::msgs::EpochAndSequence;
 use crate::msgs::{
     CertificateChain, ChangeCipherSpecPayload, ClientKeyExchangeParams, Codec,
     HandshakeAlignedProof, HandshakeMessagePayload, HandshakePayload, Message, MessagePayload,
@@ -152,6 +150,7 @@ mod client_hello {
                     suite,
                     st.using_ems,
                     output,
+                    st.protocol,
                     input,
                     st.sni,
                     st.resumption_data,
@@ -213,13 +212,6 @@ mod client_hello {
                 using_ems: st.using_ems,
                 send_ticket,
                 protocol: st.protocol,
-                #[cfg(feature = "dtls")]
-                epoch_and_sequence: if st.protocol == Protocol::Udp {
-                    // TODO(timg): does seq continue from ClientHello?
-                    Some(EpochAndSequence::new(0, 0))
-                } else {
-                    None
-                },
             };
 
             if doing_client_auth {
@@ -310,6 +302,7 @@ mod client_hello {
         suite: &'static Tls12CipherSuite,
         using_ems: bool,
         output: &mut dyn Output<'_>,
+        protocol: Protocol,
         input: ClientHelloInput<'_>,
         sni: Option<DnsName<'static>>,
         resumption_data: Vec<u8>,
@@ -355,8 +348,7 @@ mod client_hello {
             resumption_data: resumption_data.to_vec(),
             using_ems,
             send_ticket,
-            protocol: todo!(),
-            epoch_and_sequence: todo!(),
+            protocol,
         };
 
         let secrets =
@@ -1083,10 +1075,6 @@ struct HandshakeState {
     send_ticket: bool,
     /// The transport protocol this handshake is being performed over.
     protocol: Protocol,
-    /// The current epoch and sequence number, if the handshake is over UDP and
-    /// hence using datagram TLS.
-    #[cfg(feature = "dtls")]
-    epoch_and_sequence: Option<EpochAndSequence>,
 }
 
 // --- Process traffic ---

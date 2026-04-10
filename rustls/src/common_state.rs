@@ -16,8 +16,6 @@ use crate::hash_hs::HandshakeHash;
 use crate::msgs::{
     AlertLevel, Codec, Delocator, HandshakeMessagePayload, Locator, Message, MessagePayload,
 };
-#[cfg(feature = "dtls")]
-use crate::msgs::{EpochAndSequence, U48};
 use crate::quic::{self, QuicOutput};
 use crate::suites::SupportedCipherSuite;
 
@@ -29,10 +27,10 @@ pub struct CommonState {
 }
 
 impl CommonState {
-    pub(crate) fn new(side: Side) -> Self {
+    pub(crate) fn new(side: Side, protocol: Protocol) -> Self {
         Self {
             outputs: ConnectionOutputs::default(),
-            send: SendPath::default(),
+            send: SendPath::new(protocol),
             recv: ReceivePath::new(side),
         }
     }
@@ -400,12 +398,6 @@ impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
                 (false, false) => ProtocolVersion::TLSv1_2,
             },
             payload: MessagePayload::HandshakeFlight(Payload::new(self.body)),
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: Some(EpochAndSequence {
-                epoch: 0,
-                // TODO(timg): plumb epoch and sequence here somehow
-                sequence_number: U48(0),
-            }),
         };
 
         output.send_msg(m, TLS13);

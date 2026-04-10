@@ -32,8 +32,6 @@ use crate::msgs::{
     PskKeyExchangeModes, Random, ServerHelloPayload, ServerNamePayload, SessionId,
     SupportedEcPointFormats, SupportedProtocolVersions, TransportParameters,
 };
-#[cfg(feature = "dtls")]
-use crate::msgs::{EpochAndSequence, U48};
 use crate::sealed::Sealed;
 use crate::suites::{PartiallyExtractedSecrets, Suite, SupportedCipherSuite};
 use crate::sync::Arc;
@@ -225,7 +223,7 @@ impl ExpectServerHello {
     }
 }
 
-struct ExpectServerHelloOrHelloRetryRequest {
+pub(crate) struct ExpectServerHelloOrHelloRetryRequest {
     next: Box<ExpectServerHello>,
     extra_exts: ClientExtensionsInput,
 }
@@ -737,7 +735,11 @@ fn emit_client_hello_for_retry(
     }
 
     let mut chp_payload = ClientHelloPayload {
-        client_version: ProtocolVersion::TLSv1_2,
+        client_version: match input.protocol {
+            Protocol::Tcp | Protocol::Quic(_) => ProtocolVersion::TLSv1_2,
+            #[cfg(feature = "dtls")]
+            Protocol::Udp => ProtocolVersion::DTLSv1_2,
+        },
         random: input.random,
         session_id: input.session_id,
         cipher_suites,
@@ -838,13 +840,6 @@ fn emit_client_hello_for_retry(
             // (retryreq == None means we're in the "initial ClientHello" case)
             (_, None) => ProtocolVersion::TLSv1_0,
         },
-        #[cfg(feature = "dtls")]
-        epoch_and_sequence: Some(EpochAndSequence {
-            // Always epoch 0 for handshake messages
-            epoch: 0,
-            // TODO(timg): plumb sequence number somehow
-            sequence_number: U48(0),
-        }),
         payload: MessagePayload::handshake(chp),
     };
 
@@ -854,7 +849,7 @@ fn emit_client_hello_for_retry(
         tls13::emit_fake_ccs(&mut input.sent_tls13_fake_ccs, output);
     }
 
-    trace!("Sending ClientHello {ch:#?}");
+    std::println!("Sending ClientHello {ch:#?}");
 
     transcript_buffer.add_message(&ch);
     output.send_msg(ch, false);

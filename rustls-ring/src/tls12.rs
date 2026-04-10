@@ -286,7 +286,7 @@ impl MessageEncrypter for GcmMessageEncrypter {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(msg.header_size(), total_len);
 
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
         let aad = aead::Aad::from(make_tls12_aad(seq, msg.typ, msg.version, msg.payload.len()));
@@ -301,6 +301,9 @@ impl MessageEncrypter for GcmMessageEncrypter {
         Ok(EncodedMessage {
             typ: msg.typ,
             version: msg.version,
+            // TODO(timg): insert epoch and sequence as appropriate
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload,
         })
     }
@@ -372,7 +375,7 @@ impl MessageEncrypter for ChaCha20Poly1305MessageEncrypter {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(msg.header_size(), total_len);
 
         let nonce =
             aead::Nonce::assume_unique_for_key(Nonce::new(&self.enc_offset, seq).to_array()?);
@@ -386,6 +389,8 @@ impl MessageEncrypter for ChaCha20Poly1305MessageEncrypter {
         Ok(EncodedMessage {
             typ: msg.typ,
             version: msg.version,
+            // TODO(timg): insert epoch and sequence as appropriate
+            epoch_and_sequence: None,
             payload,
         })
     }

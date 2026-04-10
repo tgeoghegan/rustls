@@ -285,6 +285,9 @@ where
             let mut encoded = EncodedMessage {
                 typ,
                 version,
+                // TODO(timg): insert epoch and sequence as appropriate
+                #[cfg(feature = "dtls")]
+                epoch_and_sequence: None,
                 payload,
             };
 
@@ -1300,7 +1303,9 @@ impl RawTls {
                 | ConnectionTrafficSecrets::Aes256Gcm { key, iv }
                 | ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv },
                 SupportedCipherSuite::Tls13(tls13),
-            ) => tls13.aead_alg.encrypter(key, iv),
+            ) => tls13
+                .aead_alg
+                .encrypter(ProtocolVersion::TLSv1_3, key, iv),
 
             (
                 ConnectionTrafficSecrets::Aes128Gcm { key, iv }
@@ -1377,6 +1382,9 @@ impl RawTls {
         let inbound = EncodedMessage {
             typ,
             version,
+            // TODO(timg): insert epoch and sequence as appropriate
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload: InboundOpaque(left),
         };
 
@@ -1770,7 +1778,12 @@ mod plaintext {
     pub(super) struct Aead;
 
     impl Tls13AeadAlgorithm for Aead {
-        fn encrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn MessageEncrypter> {
+        fn encrypter(
+            &self,
+            _protocol: ProtocolVersion,
+            _key: AeadKey,
+            _iv: Iv,
+        ) -> Box<dyn MessageEncrypter> {
             Box::new(Encrypter)
         }
 
@@ -1799,12 +1812,15 @@ mod plaintext {
             msg: EncodedMessage<OutboundPlain<'_>>,
             _seq: u64,
         ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
-            let mut payload = OutboundOpaque::with_capacity(msg.payload.len());
+            let mut payload = OutboundOpaque::with_capacity(msg.header_size(), msg.payload.len());
             payload.extend_from_chunks(&msg.payload);
 
             Ok(EncodedMessage {
                 typ: ContentType::ApplicationData,
                 version: ProtocolVersion::TLSv1_2,
+                // TODO(timg): insert epoch and sequence as appropriate
+                #[cfg(feature = "dtls")]
+                epoch_and_sequence: None,
                 payload,
             })
         }

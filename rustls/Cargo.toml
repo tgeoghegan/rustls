@@ -19,7 +19,7 @@ brotli = ["dep:brotli", "dep:brotli-decompressor"]
 log = ["dep:log"]
 webpki = ["dep:webpki"]
 zlib = ["dep:zlib-rs"]
-dtls = []
+dtls = ["rustls-test/dtls"]
 
 [dependencies]
 brotli = { workspace = true, optional = true }
@@ -39,7 +39,7 @@ bencher = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 rcgen = { workspace = true }
-rustls-test = { workspace = true, default-features = false }
+rustls-test = { workspace = true, default-features = false, features = ["dtls"] }
 time = { workspace = true }
 webpki-roots = { workspace = true }
 

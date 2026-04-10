@@ -26,8 +26,6 @@ use crate::msgs::{
     MessagePayload, PresharedKeyBinder, PresharedKeyOffer, Random, Reader, ServerHelloPayload,
     ServerNamePayload, SizedPayload,
 };
-#[cfg(feature = "dtls")]
-use crate::msgs::{EpochAndSequence, U48};
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::{
     KeyScheduleEarlyClient, KeyScheduleHandshakeStart, server_ech_hrr_confirmation_secret,
@@ -746,13 +744,6 @@ impl EchState {
                 // (retryreq == None means we're in the "initial ClientHello" case)
                 (_, None) => ProtocolVersion::TLSv1_0,
             },
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: Some(EpochAndSequence {
-                // Epoch always 0 for client handshake messages
-                epoch: 0,
-                // TODO(timg): plumb sequence number somehow
-                sequence_number: U48(0),
-            }),
             payload: MessagePayload::handshake(HandshakeMessagePayload(
                 HandshakePayload::ClientHello(inner_hello),
             )),
@@ -816,9 +807,6 @@ impl EchState {
 
         Message {
             version: ProtocolVersion::TLSv1_3,
-            // TODO(timg): ECH for DTLS
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: None,
             payload: MessagePayload::Handshake {
                 encoded: Payload::Owned(encoded),
                 parsed: HandshakeMessagePayload(HandshakePayload::ServerHello(
@@ -838,10 +826,8 @@ impl EchState {
         let mut hmp_encoded = Vec::new();
         hmp.payload_encode(&mut hmp_encoded, Encoding::EchConfirmation);
         Message {
-            version: ProtocolVersion::TLSv1_3,
             // TODO(timg): ECH for DTLS
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: None,
+            version: ProtocolVersion::TLSv1_3,
             payload: MessagePayload::Handshake {
                 encoded: Payload::new(hmp_encoded),
                 parsed: hmp,
@@ -887,9 +873,6 @@ mod tests {
         };
         let message = Message {
             version: ProtocolVersion::TLSv1_3,
-            // TODO(timg): ECH for DTLS
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: None,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
                 HandshakePayload::ServerHello(server_hello.clone()),
             )),

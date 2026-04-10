@@ -9,7 +9,6 @@ use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter, Tls13AeadAlgorithm};
 use crate::crypto::kx::SharedSecret;
 use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError, expand};
 use crate::crypto::{hash, hmac};
-#[cfg(feature = "dtls")]
 use crate::enums::ProtocolVersion;
 use crate::error::{ApiMisuse, Error};
 use crate::msgs::{HandshakeAlignedProof, Message};

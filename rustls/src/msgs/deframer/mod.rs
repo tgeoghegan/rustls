@@ -233,6 +233,10 @@ impl Deframer {
             let msg = EncodedMessage {
                 typ: ContentType::Handshake,
                 version: first.version,
+                // TODO(timg) probably wire up a field on struct to indicate dtls
+                // and do something about epoch+sequence
+                #[cfg(feature = "dtls")]
+                epoch_and_sequence: None,
                 payload: delocator.slice_from_range(&first.bounds),
             };
 
@@ -269,6 +273,10 @@ impl Deframer {
         EncodedMessage {
             typ: ContentType::Handshake,
             version: next_span.version,
+            // TODO(timg) probably wire up a field on struct to indicate dtls
+            // and do something about epoch+sequence
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload: Delocator::new(containing_buffer).slice_from_range(&next_span.bounds),
         }
     }
@@ -456,6 +464,10 @@ mod tests {
         let msg = EncodedMessage {
             typ: ContentType::Handshake,
             version: ProtocolVersion::TLSv1_3,
+            // TODO(timg) probably wire up a field on struct to indicate dtls
+            // and do something about epoch+sequence
+            #[cfg(feature = "dtls")]
+            epoch_and_sequence: None,
             payload: &within[range.start..range.end],
         };
 

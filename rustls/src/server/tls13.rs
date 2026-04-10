@@ -87,8 +87,6 @@ mod client_hello {
         HelloRetryRequest, HelloRetryRequestExtensions, KeyShareEntry, Random, ServerExtensions,
         ServerExtensionsInput, ServerHelloPayload, SessionId, SizedPayload,
     };
-    #[cfg(feature = "dtls")]
-    use crate::msgs::{EpochAndSequence, U48};
     use crate::sealed::Sealed;
     use crate::server::Tls13ServerSessionValue;
     use crate::server::hs::{ClientHelloInput, ExpectClientHello, ServerHandler, Tls13Extensions};
@@ -555,13 +553,6 @@ mod client_hello {
 
         let sh = Message {
             version: protocol_version,
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: Some(EpochAndSequence {
-                // Always epoch 2 for server handshake messages
-                epoch: 2,
-                // TODO(timg): plumb sequence number somehow
-                sequence_number: U48(0),
-            }),
             payload: MessagePayload::handshake(HandshakeMessagePayload(
                 HandshakePayload::ServerHello(ServerHelloPayload {
                     legacy_version: protocol_version,
@@ -623,11 +614,7 @@ mod client_hello {
 
     fn emit_fake_ccs(output: &mut dyn Output<'_>) {
         let m = Message {
-            // In DTLS 1.3, we never emit ChangeCipherSpec messages, so we can hardcode the protocol
-            // version and always omit epoch and sequence number.
             version: ProtocolVersion::TLSv1_2,
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: None,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         };
         output.send_msg(m, false);
@@ -659,13 +646,6 @@ mod client_hello {
 
         let m = Message {
             version,
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence: Some(EpochAndSequence {
-                // Epoch always 2 for server handshake messages
-                epoch: 2,
-                // TODO(timg): plumb sequence number somehow
-                sequence_number: U48(0),
-            }),
             payload: MessagePayload::handshake(HandshakeMessagePayload(
                 HandshakePayload::HelloRetryRequest(req),
             )),

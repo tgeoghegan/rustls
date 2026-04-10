@@ -267,7 +267,12 @@ const KX_SHARED_SECRET: &[u8] = b"KxSharedSecretKxSharedSecret";
 struct Aead;
 
 impl Tls13AeadAlgorithm for Aead {
-    fn encrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn MessageEncrypter> {
+    fn encrypter(
+        &self,
+        _protocol: ProtocolVersion,
+        _key: AeadKey,
+        _iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
         Box::new(Tls13Cipher)
     }
 
@@ -324,7 +329,7 @@ impl MessageEncrypter for Tls13Cipher {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(m.header_size(), total_len);
 
         payload.extend_from_chunks(&m.payload);
         payload.extend_from_slice(&m.typ.to_array());
@@ -343,6 +348,8 @@ impl MessageEncrypter for Tls13Cipher {
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
             version: ProtocolVersion::TLSv1_2,
+            // TODO(timg): insert epoch and sequence as appropriate
+            epoch_and_sequence: None,
             payload,
         })
     }
@@ -393,7 +400,7 @@ impl MessageEncrypter for Tls12Cipher {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(m.header_size(), total_len);
         payload.extend_from_chunks(&m.payload);
 
         for (p, mask) in payload
@@ -410,6 +417,8 @@ impl MessageEncrypter for Tls12Cipher {
         Ok(EncodedMessage {
             typ: m.typ,
             version: m.version,
+            // TODO(timg): insert epoch and sequence as appropriate
+            epoch_and_sequence: None,
             payload,
         })
     }

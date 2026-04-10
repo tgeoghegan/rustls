@@ -1,6 +1,11 @@
+use std::println;
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+#[cfg(feature = "dtls")]
+use crate::EpochAndSequence;
+use crate::common_state::Protocol;
 use crate::crypto::cipher::{
     EncodedMessage, EncryptionState, MessageEncrypter, OutboundOpaque, OutboundPlain, Payload,
     PreEncryptAction,
@@ -14,6 +19,7 @@ use crate::vecbuf::ChunkVecBuffer;
 
 /// The data path from us to the peer.
 pub(crate) struct SendPath {
+    pub(crate) protocol: Protocol,
     pub(crate) encrypt_state: EncryptionState,
     pub(crate) may_send_application_data: bool,
     pub(crate) may_send_half_rtt_data: bool,
@@ -29,6 +35,23 @@ pub(crate) struct SendPath {
 }
 
 impl SendPath {
+    pub(crate) fn new(protocol: Protocol) -> Self {
+        Self {
+            protocol,
+            encrypt_state: EncryptionState::new(),
+            may_send_application_data: false,
+            may_send_half_rtt_data: false,
+            has_sent_fatal_alert: false,
+            has_sent_close_notify: false,
+            message_fragmenter: MessageFragmenter::default(),
+            sendable_tls: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
+            queued_key_update_message: None,
+            refresh_traffic_keys_pending: false,
+            negotiated_version: None,
+            tls13_key_schedule: None,
+        }
+    }
+
     #[expect(dead_code)]
     pub(crate) fn write_plaintext(
         &mut self,
@@ -43,6 +66,8 @@ impl SendPath {
             .fragment_payload(
                 ContentType::ApplicationData,
                 ProtocolVersion::TLSv1_2,
+                #[cfg(feature = "dtls")]
+                None,
                 payload.clone(),
             );
 
@@ -78,6 +103,8 @@ impl SendPath {
             .fragment_payload(
                 ContentType::ApplicationData,
                 ProtocolVersion::TLSv1_2,
+                #[cfg(feature = "dtls")]
+                None,
                 payload,
             );
 
@@ -118,7 +145,13 @@ impl SendPath {
             .message_fragmenter
             .fragment_payload(
                 ContentType::ApplicationData,
-                ProtocolVersion::TLSv1_2,
+                match self.protocol {
+                    Protocol::Tcp | Protocol::Quic(_) => ProtocolVersion::TLSv1_2,
+                    #[cfg(feature = "dtls")]
+                    Protocol::Udp => ProtocolVersion::DTLSv1_2,
+                },
+                #[cfg(feature = "dtls")]
+                self.dtls_epoch_and_sequence(),
                 payload,
             );
         for m in iter {
@@ -247,16 +280,22 @@ impl SendPath {
     }
 
     fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        let msg = m.encoded_message(
+            #[cfg(feature = "dtls")]
+            self.dtls_epoch_and_sequence(),
+        );
+        println!("encoded message looks like: {msg:#?}");
+
         if !must_encrypt {
-            let msg = &m.into();
             let iter = self
                 .message_fragmenter
-                .fragment_message(msg);
+                .fragment_message(&msg);
             for m in iter {
+                println!("fragment looks like: {m:#?}");
                 self.queue_tls_message(m.to_unencrypted_opaque());
             }
         } else {
-            self.send_msg_encrypt(m.into());
+            self.send_msg_encrypt(msg);
         }
     }
 
@@ -286,7 +325,10 @@ impl SendPath {
             return;
         }
 
-        let message = EncodedMessage::<Payload<'static>>::from(Message::build_key_update_notify());
+        let message = Message::build_key_update_notify().encoded_message(
+            #[cfg(feature = "dtls")]
+            self.dtls_epoch_and_sequence(),
+        );
         self.queued_key_update_message = Some(
             self.encrypt_state
                 .encrypt_outgoing(message.borrow_outbound())
@@ -296,6 +338,16 @@ impl SendPath {
         if let Some(mut ks) = self.tls13_key_schedule.take() {
             ks.update_encrypter_for_key_update(self);
             self.tls13_key_schedule = Some(ks);
+        }
+    }
+
+    #[cfg(feature = "dtls")]
+    fn dtls_epoch_and_sequence(&self) -> Option<EpochAndSequence> {
+        match self.protocol {
+            Protocol::Udp => Some(EpochAndSequence::from_sequence_number(
+                self.encrypt_state.write_seq(),
+            )),
+            _ => None,
         }
     }
 
@@ -349,25 +401,8 @@ impl SendOutput for SendPath {
 
     /// Send a raw TLS message, fragmenting it if needed.
     fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        println!("send msg via trait encrypt?: {must_encrypt}\n{m:#?}");
         self.send_msg(m, must_encrypt);
-    }
-}
-
-impl Default for SendPath {
-    fn default() -> Self {
-        Self {
-            encrypt_state: EncryptionState::new(),
-            may_send_application_data: false,
-            may_send_half_rtt_data: false,
-            has_sent_fatal_alert: false,
-            has_sent_close_notify: false,
-            message_fragmenter: MessageFragmenter::default(),
-            sendable_tls: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
-            queued_key_update_message: None,
-            refresh_traffic_keys_pending: false,
-            negotiated_version: None,
-            tls13_key_schedule: None,
-        }
     }
 }
 

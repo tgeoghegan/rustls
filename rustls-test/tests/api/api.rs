@@ -1418,6 +1418,8 @@ fn test_illegal_server_renegotiation_attempt_after_tls13_handshake() {
     let msg = EncodedMessage {
         typ: ContentType::Handshake,
         version: ProtocolVersion::TLSv1_3,
+        #[cfg(feature = "dtls")]
+        epoch_and_sequence: None,
         payload: Payload::new(encoding::handshake_framing(
             HandshakeType::HelloRequest,
             vec![],
@@ -1451,6 +1453,8 @@ fn test_illegal_server_renegotiation_attempt_after_tls12_handshake() {
     let msg = EncodedMessage {
         typ: ContentType::Handshake,
         version: ProtocolVersion::TLSv1_3,
+        #[cfg(feature = "dtls")]
+        epoch_and_sequence: None,
         payload: Payload::new(encoding::handshake_framing(
             HandshakeType::HelloRequest,
             vec![],
@@ -1491,6 +1495,8 @@ fn test_illegal_client_renegotiation_attempt_after_tls13_handshake() {
     let msg = EncodedMessage {
         typ: ContentType::Handshake,
         version: ProtocolVersion::TLSv1_3,
+        #[cfg(feature = "dtls")]
+        epoch_and_sequence: None,
         payload: Payload::new(encoding::basic_client_hello(vec![])),
     };
     raw_client.encrypt_and_send(&msg, &mut server);

@@ -13,7 +13,12 @@ use rustls::enums::{ContentType, ProtocolVersion};
 pub(crate) struct Chacha20Poly1305;
 
 impl Tls13AeadAlgorithm for Chacha20Poly1305 {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
+    fn encrypter(
+        &self,
+        _protocol: ProtocolVersion,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Box<dyn MessageEncrypter> {
         Box::new(Tls13Cipher(
             chacha20poly1305::ChaCha20Poly1305::new_from_slice(key.as_ref()).unwrap(),
             iv,
@@ -87,7 +92,7 @@ impl MessageEncrypter for Tls13Cipher {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, rustls::Error> {
         let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(m.header_size(), total_len);
 
         payload.extend_from_chunks(&m.payload);
         payload.extend_from_slice(&m.typ.to_array());
@@ -100,6 +105,8 @@ impl MessageEncrypter for Tls13Cipher {
             .map(|_| EncodedMessage {
                 typ: ContentType::ApplicationData,
                 version: ProtocolVersion::TLSv1_2,
+                // TODO: insert epoch and sequence as appropriate
+                epoch_and_sequence: None,
                 payload,
             })
     }
@@ -136,7 +143,7 @@ impl MessageEncrypter for Tls12Cipher {
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, rustls::Error> {
         let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+        let mut payload = OutboundOpaque::with_capacity(m.header_size(), total_len);
 
         payload.extend_from_chunks(&m.payload);
         let nonce = chacha20poly1305::Nonce::from(Nonce::new(&self.1, seq).to_array()?);
@@ -148,6 +155,8 @@ impl MessageEncrypter for Tls12Cipher {
             .map(|_| EncodedMessage {
                 typ: m.typ,
                 version: m.version,
+                // TODO(timg): insert epoch and sequence as appropriate
+                epoch_and_sequence: None,
                 payload,
             })
     }
