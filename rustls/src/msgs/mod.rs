@@ -738,8 +738,7 @@ impl Codec<'_> for ChangeCipherSpecPayload {
 pub struct EpochAndSequence {
     /// The epoch number.
     pub epoch: u16,
-    /// The sequence number of the record within the epoch. This is
-    /// actually a 48-bit integer.
+    /// The sequence number of the record within the epoch. This is actually a 48-bit integer.
     pub sequence_number: U48,
 }
 
@@ -757,8 +756,8 @@ impl EpochAndSequence {
         }
     }
 
-    /// Concatenate the epoch and sequence number into a 64 bit sequence number
-    /// suitable for use in AEAD or MAC.
+    /// Concatenate the epoch and sequence number into a 64 bit sequence number suitable for use in
+    /// AEAD or MAC.
     pub fn as_sequence_number(self) -> u64 {
         (self.epoch as u64) << 48 + self.sequence_number.0
     }
@@ -772,6 +771,18 @@ impl EpochAndSequence {
             epoch: epoch as u16,
             sequence_number: U48(seq & 0x0000_ffff_ffff_ffff),
         }
+    }
+
+    /// Add the provided increment to the sequence number. Panics if the resulting sequence number
+    /// is too big for a 48 bit integer.
+    pub(crate) fn add_sequence_increment(&self, increment: u64) -> Self {
+        let new_sequence = self
+            .sequence_number
+            .0
+            .checked_add(increment)
+            .unwrap();
+
+        Self::new(self.epoch, new_sequence)
     }
 }
 
@@ -789,6 +800,62 @@ impl Codec<'_> for EpochAndSequence {
         Ok(Self {
             epoch,
             sequence_number,
+        })
+    }
+}
+
+/// Fragment of a DTLS handshake message used in [Datagram TLS 1.2][1] and [1.3][2].
+///
+/// [1]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.2.2
+/// [2]: https://datatracker.ietf.org/doc/html/rfc9147#section-5.2
+#[cfg(feature = "dtls")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DtlsHandshakeFragment<'a> {
+    pub(crate) msg_type: HandshakeType,
+    /// Total length of the message this is a fragment of. The value will be the same in all
+    /// fragments of a given message.
+    pub(crate) length: U24,
+    /// Sequence number of the message this is a fragment of. The value will be the same in all
+    /// fragments of a given message.
+    pub(crate) message_seq: u16,
+    /// The offset into the original message where this fragment begins. Equivalently, the sum of
+    /// the lengths of all previous fragments.
+    pub(crate) fragment_offset: U24,
+    /// The length of this fragment.
+    pub(crate) fragment_length: U24,
+    /// The fragment. Its length must be equal to `fragment_length`.
+    pub(crate) fragment: Payload<'a>,
+}
+
+#[cfg(feature = "dtls")]
+impl<'a> Codec<'a> for DtlsHandshakeFragment<'a> {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.msg_type.encode(bytes);
+        self.length.encode(bytes);
+        self.message_seq.encode(bytes);
+        self.fragment_offset.encode(bytes);
+        self.fragment_length.encode(bytes);
+        self.fragment.encode(bytes);
+    }
+
+    fn read(r: &mut Reader<'a>) -> Result<Self, InvalidMessage> {
+        let msg_type = HandshakeType::read(r)?;
+        let length = U24::read(r)?;
+        let message_seq = u16::read(r)?;
+        let fragment_offset = U24::read(r)?;
+        let fragment_len = U24::read(r)?;
+        let fragment = Payload::Borrowed(
+            r.take(fragment_len.into())
+                .ok_or_else(|| InvalidMessage::MessageTooShort)?,
+        );
+
+        Ok(Self {
+            msg_type,
+            length,
+            message_seq,
+            fragment_offset,
+            fragment_length: fragment_len,
+            fragment,
         })
     }
 }

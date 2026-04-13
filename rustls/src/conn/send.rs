@@ -14,6 +14,8 @@ use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
 use crate::log::{debug, error};
 use crate::msgs::{AlertLevel, Message, MessageFragmenter};
+#[cfg(feature = "dtls")]
+use crate::msgs::{Codec, MessagePayload};
 use crate::tls13::key_schedule::KeyScheduleTrafficSend;
 use crate::vecbuf::ChunkVecBuffer;
 
@@ -32,6 +34,8 @@ pub(crate) struct SendPath {
     pub(crate) refresh_traffic_keys_pending: bool,
     negotiated_version: Option<ProtocolVersion>,
     pub(crate) tls13_key_schedule: Option<Box<KeyScheduleTrafficSend>>,
+    #[cfg(feature = "dtls")]
+    handshake_sequence_number: u16,
 }
 
 impl SendPath {
@@ -49,6 +53,8 @@ impl SendPath {
             refresh_traffic_keys_pending: false,
             negotiated_version: None,
             tls13_key_schedule: None,
+            #[cfg(feature = "dtls")]
+            handshake_sequence_number: 0,
         }
     }
 
@@ -127,35 +133,29 @@ impl SendPath {
         self.send_appdata_encrypt(data[..len].into())
     }
 
-    /// Fragment `m`, encrypt the fragments, and then queue
-    /// the encrypted fragments for sending.
-    fn send_msg_encrypt(&mut self, m: EncodedMessage<Payload<'_>>) {
-        let iter = self
-            .message_fragmenter
-            .fragment_message(&m);
-        for m in iter {
-            self.send_single_fragment(m);
-        }
-    }
-
     /// Like send_msg_encrypt, but operate on an appdata directly.
     fn send_appdata_encrypt(&mut self, payload: OutboundPlain<'_>) -> usize {
         let len = payload.len();
-        let iter = self
-            .message_fragmenter
-            .fragment_payload(
-                ContentType::ApplicationData,
-                match self.protocol {
-                    Protocol::Tcp | Protocol::Quic(_) => ProtocolVersion::TLSv1_2,
-                    #[cfg(feature = "dtls")]
-                    Protocol::Udp => ProtocolVersion::DTLSv1_2,
-                },
-                #[cfg(feature = "dtls")]
-                self.dtls_epoch_and_sequence(),
+        let typ = ContentType::ApplicationData;
+
+        match self.protocol {
+            // For DTLS, we don't fragment application data, instead expecting clients to chunk up
+            // application layer messages appropriately themselves.
+            #[cfg(feature = "dtls")]
+            Protocol::Udp => self.send_single_fragment(EncodedMessage {
+                typ,
+                version: ProtocolVersion::DTLSv1_2,
+                epoch_and_sequence: self.dtls_epoch_and_sequence(),
                 payload,
-            );
-        for m in iter {
-            self.send_single_fragment(m);
+            }),
+            Protocol::Tcp | Protocol::Quic(_) => {
+                let iter = self
+                    .message_fragmenter
+                    .fragment_payload(typ, ProtocolVersion::TLSv1_2, None, payload);
+                for m in iter {
+                    self.send_single_fragment(m);
+                }
+            }
         }
 
         len
@@ -280,22 +280,80 @@ impl SendPath {
     }
 
     fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
-        let msg = m.encoded_message(
+        println!("Message looks like: {m:#?}");
+        // TODO(timg): Kinda sucks, would be nice to deduplicate code across match arms BUT the
+        // iterators don't have the same type and I don't want to Box<dyn Iterator>.
+        match (self.protocol, &m.payload) {
+            // DTLS handshake messages can be fragmented into multiple records which contain
+            // information necessary for reassembly.
             #[cfg(feature = "dtls")]
-            self.dtls_epoch_and_sequence(),
-        );
-        println!("encoded message looks like: {msg:#?}");
-
-        if !must_encrypt {
-            let iter = self
-                .message_fragmenter
-                .fragment_message(&msg);
-            for m in iter {
-                println!("fragment looks like: {m:#?}");
-                self.queue_tls_message(m.to_unencrypted_opaque());
+            (Protocol::Udp, MessagePayload::Handshake { parsed, encoded }) => {
+                for m in self
+                    .message_fragmenter
+                    .fragment_dtls_handshake_message(
+                        self.dtls_epoch_and_sequence()
+                            .expect("epoch and sequence should be set for DTLS"),
+                        parsed.0.handshake_type(),
+                        self.handshake_sequence_number,
+                        encoded,
+                    )
+                {
+                    self.send_fragment(
+                        EncodedMessage {
+                            typ: m.typ,
+                            version: m.version,
+                            epoch_and_sequence: m.epoch_and_sequence,
+                            payload: m
+                                .payload
+                                .get_encoding()
+                                .as_slice()
+                                .into(),
+                        },
+                        must_encrypt,
+                    );
+                }
             }
+            // Other DTLS messages are required to fit into a single record. Application data should
+            // be chunked by the application before being handled off to rustls.
+            #[cfg(feature = "dtls")]
+            (Protocol::Udp, _) => self.send_fragment(
+                EncodedMessage {
+                    typ: m.payload.content_type(),
+                    version: m.version,
+                    epoch_and_sequence: self.dtls_epoch_and_sequence(),
+                    payload: m
+                        .encoded_message(self.dtls_epoch_and_sequence())
+                        .payload
+                        .bytes()
+                        .into(),
+                },
+                must_encrypt,
+            ),
+            // TLS messages can be fragmented into multiple TCP or QUIC packets
+            _ => {
+                let msg = m.encoded_message(
+                    #[cfg(feature = "dtls")]
+                    None,
+                );
+                for m in self
+                    .message_fragmenter
+                    .fragment_message(&msg)
+                {
+                    self.send_fragment(m, must_encrypt);
+                }
+            }
+        }
+    }
+
+    fn send_fragment<'a>(
+        &mut self,
+        fragment: EncodedMessage<OutboundPlain<'a>>,
+        must_encrypt: bool,
+    ) {
+        if must_encrypt {
+            self.send_single_fragment(fragment);
         } else {
-            self.send_msg_encrypt(msg);
+            self.queue_tls_message(fragment.to_unencrypted_opaque());
         }
     }
 

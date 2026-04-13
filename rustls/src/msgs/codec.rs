@@ -350,8 +350,12 @@ impl Codec<'_> for u16 {
 }
 
 // Make a distinct type for u24, even though it's a u32 underneath
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct U24(pub u32);
+
+impl U24 {
+    pub(crate) const MAX: u32 = 0xff_ffff;
+}
 
 #[cfg(any(target_pointer_width = "32", target_pointer_width = "64"))]
 impl From<U24> for usize {

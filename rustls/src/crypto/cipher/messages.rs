@@ -219,6 +219,7 @@ impl EncodedMessage<OutboundOpaque> {
         let mut encoded_payload = self.payload.payload;
         encoded_payload[0] = self.typ.into();
         encoded_payload[1..3].copy_from_slice(&self.version.to_array());
+        // TODO(timg) this is not great
         #[cfg(feature = "dtls")]
         if let Some(EpochAndSequence {
             epoch,
@@ -430,21 +431,6 @@ impl<'a> Extend<&'a u8> for OutboundOpaque {
         self.payload.extend(iter)
     }
 }
-
-// impl From<&[u8]> for OutboundOpaque {
-//     fn from(content: &[u8]) -> Self {
-//         let mut payload = Vec::with_capacity(HEADER_SIZE + content.len());
-//         payload.extend(&[0u8; HEADER_SIZE]);
-//         payload.extend(content);
-//         Self(payload)
-//     }
-// }
-
-// impl<const N: usize> From<&[u8; N]> for OutboundOpaque {
-//     fn from(content: &[u8; N]) -> Self {
-//         Self::from(&content[..])
-//     }
-// }
 
 /// An externally length'd payload
 ///
