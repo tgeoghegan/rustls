@@ -280,9 +280,6 @@ impl SendPath {
     }
 
     fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
-        println!("Message looks like: {m:#?}");
-        // TODO(timg): Kinda sucks, would be nice to deduplicate code across match arms BUT the
-        // iterators don't have the same type and I don't want to Box<dyn Iterator>.
         match (self.protocol, &m.payload) {
             // DTLS handshake messages can be fragmented into multiple records which contain
             // information necessary for reassembly.
@@ -295,7 +292,7 @@ impl SendPath {
                             .expect("epoch and sequence should be set for DTLS"),
                         parsed.0.handshake_type(),
                         self.handshake_sequence_number,
-                        encoded,
+                        encoded.bytes(),
                     )
                 {
                     self.send_fragment(
@@ -317,16 +314,8 @@ impl SendPath {
             // be chunked by the application before being handled off to rustls.
             #[cfg(feature = "dtls")]
             (Protocol::Udp, _) => self.send_fragment(
-                EncodedMessage {
-                    typ: m.payload.content_type(),
-                    version: m.version,
-                    epoch_and_sequence: self.dtls_epoch_and_sequence(),
-                    payload: m
-                        .encoded_message(self.dtls_epoch_and_sequence())
-                        .payload
-                        .bytes()
-                        .into(),
-                },
+                m.encoded_message(self.dtls_epoch_and_sequence())
+                    .borrow_outbound(),
                 must_encrypt,
             ),
             // TLS messages can be fragmented into multiple TCP or QUIC packets
@@ -459,7 +448,6 @@ impl SendOutput for SendPath {
 
     /// Send a raw TLS message, fragmenting it if needed.
     fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
-        println!("send msg via trait encrypt?: {must_encrypt}\n{m:#?}");
         self.send_msg(m, must_encrypt);
     }
 }

@@ -69,14 +69,18 @@ impl MessageFragmenter {
         epoch_and_sequence: EpochAndSequence,
         msg_type: HandshakeType,
         handshake_sequence_number: u16,
-        handshake_payload: &'a Payload<'a>,
+        handshake_payload: &'a [u8],
     ) -> impl Iterator<Item = EncodedMessage<DtlsHandshakeFragment<'a>>> + 'a {
-        assert!(handshake_payload.bytes().len() <= U24::MAX as usize);
-        let length = U24(handshake_payload.bytes().len() as u32);
+        // handshake_payload will have been encoded as a TLS handshake message, so we discard the
+        // front 4 bytes (1 byte of handshake type plus 3 bytes of length) so that we can re-encode
+        // as a DTLS handshake fragment.
+        let handshake_payload = &handshake_payload[4..];
+        assert!(handshake_payload.len() <= U24::MAX as usize);
+        let length = U24(handshake_payload.len() as u32);
         let mut fragment_offset = 0;
 
         Chunker::new(
-            handshake_payload.bytes().into(),
+            handshake_payload.into(),
             self.max_fragment_size(ProtocolVersion::DTLSv1_2) - DTLS_HANDSHAKE_OVERHEAD,
         )
         .enumerate()
@@ -358,7 +362,7 @@ mod tests {
     #[test]
     fn dtls() {
         let content_type = ContentType::Handshake;
-        let payload = Payload::Borrowed(&[b'a'; 100]);
+        let encoded_handshake = &[b'a'; 104];
         let mut frag = MessageFragmenter::default();
         frag.set_max_fragment_size(Some(32 + DTLS_PACKET_OVERHEAD + DTLS_HANDSHAKE_OVERHEAD))
             .unwrap();
@@ -368,7 +372,7 @@ mod tests {
                 EpochAndSequence::new(1, 101),
                 HandshakeType::ClientHello,
                 11,
-                &payload,
+                encoded_handshake,
             )
             .collect();
         assert_eq!(fragments.len(), 4);
