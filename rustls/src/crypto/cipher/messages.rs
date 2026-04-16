@@ -495,6 +495,7 @@ impl fmt::Debug for Payload<'_> {
 }
 
 /// A borrowed payload buffer.
+#[derive(Debug)]
 #[expect(clippy::exhaustive_structs)]
 pub struct InboundOpaque<'a>(pub &'a mut [u8]);
 

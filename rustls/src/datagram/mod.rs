@@ -14,35 +14,77 @@ use pki_types::ServerName;
 use crate::client::ClientSide;
 use crate::common_state::{Output, Protocol};
 use crate::conn::{ConnectionCommon, ConnectionCore};
-use crate::msgs::{ClientExtensionsInput, Message, U48};
-use crate::{ClientConfig, SideData};
+use crate::msgs::{ClientExtensionsInput, Message, ServerExtensionsInput, U48, VecInput};
+use crate::server::ServerSide;
+use crate::{ClientConfig, ServerConfig, SideData};
 
 /// Errors encountered while sending or receiving data on a `DtlsSocket`.
 #[derive(Debug)]
-pub enum Error {
+pub(crate) enum Error {
     Other(Box<dyn std::error::Error>),
 }
 
-pub struct ClientDtlsSocket<SocketLike> {
+pub(crate) struct ClientDtlsSocket<SocketLike> {
     inner: DtlsSocket<SocketLike, ClientSide>,
 }
 
 impl<SocketLike: UdpSocketLike> ClientDtlsSocket<SocketLike> {
-    pub fn new(
+    pub(crate) fn new(
         config: ClientConfig,
         server_name: ServerName<'static>,
         inner: SocketLike,
     ) -> Result<Self, Error> {
         let connection_core = ConnectionCore::for_client(
-            Arc::new(config),
+            Arc::new(config.clone()),
             server_name,
-            // TODO client extensions? Probably need something akin to ConnectionBuilder
             ClientExtensionsInput {
+                // Never set transport parameters, since that's for QUIC
                 transport_parameters: None,
-                protocols: None,
+                protocols: Some(config.alpn_protocols),
             },
             // Never QUIC since this is UDP
             None,
+            Protocol::Udp,
+        )
+        .map_err(|e| Error::Other(e.into()))?;
+        Ok(Self {
+            inner: DtlsSocket::new(inner, connection_core),
+        })
+    }
+
+    /// API used by crate clients to send plaintext bytes.
+    ///
+    /// Under the covers we'll do handshake as needed and also encrypt content
+    /// into EncodedMessage.
+    ///
+    /// Returns number of bytes transmitted, not including DTLS overhead.
+    fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+        self.inner.send(bytes)
+    }
+
+    /// API used by crate clients to receive plaintext bytes.
+    ///
+    /// Under the covers we'll do handshake as needed and also encrypt content
+    /// into EncodedMessage.
+    ///
+    /// Returns number of bytes transmitted, not including DTLS overhead.
+    fn recv<B: AsMut<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+        self.inner.recv(bytes)
+    }
+}
+
+pub struct ServerDtlsSocket<SocketLike> {
+    inner: DtlsSocket<SocketLike, ServerSide>,
+}
+
+impl<SocketLike: UdpSocketLike> ServerDtlsSocket<SocketLike> {
+    pub fn new(config: ServerConfig, inner: SocketLike) -> Result<Self, Error> {
+        let connection_core = ConnectionCore::for_server(
+            Arc::new(config),
+            ServerExtensionsInput {
+                // Never set transport parameters, that's only for QUIC
+                transport_parameters: None,
+            },
             Protocol::Udp,
         )
         .map_err(|e| Error::Other(e.into()))?;
@@ -102,6 +144,8 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
     fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+        // TODO: this should do something like the TLS side where it checks for pending handshake
+        // messages and sends them
         todo!()
     }
 
@@ -143,14 +187,20 @@ impl UdpSocketLike for UdpSocket {
 #[cfg(test)]
 mod tests {
     use std::fmt::Display;
-    use std::println;
+    use std::io::Read;
     use std::sync::Arc;
     use std::vec::Vec;
+    use std::{print, println, vec};
 
     use crate::RootCertStore;
     use crate::client::hs::ClientState;
-    use crate::crypto::TEST_PROVIDER;
+    use crate::crypto::{Identity, TEST_PROVIDER};
     use crate::msgs::hex;
+    use crate::server::hs::ServerState;
+
+    use pki_types::pem::PemObject;
+    use pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls_test::KeyType;
 
     use super::*;
 
@@ -195,13 +245,30 @@ mod tests {
         }
     }
 
+    fn server_key() -> PrivateKeyDer<'static> {
+        PrivateKeyDer::from_pem_reader(
+            &mut include_bytes!("../../../test-ca/ecdsa-p256/end.key").as_slice(),
+        )
+        .unwrap()
+    }
+
+    fn server_identity() -> Arc<Identity<'static>> {
+        Arc::new(
+            Identity::from_cert_chain(vec![
+                CertificateDer::from(&include_bytes!("../../../test-ca/ecdsa-p256/end.der")[..]),
+                CertificateDer::from(&include_bytes!("../../../test-ca/ecdsa-p256/inter.der")[..]),
+            ])
+            .unwrap(),
+        )
+    }
+
     #[test]
     fn client() {
         let root_store = RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.into(),
         };
 
-        let mut config = ClientConfig::builder(Arc::new(TEST_PROVIDER.clone()))
+        let client_config = ClientConfig::builder(Arc::new(TEST_PROVIDER.clone()))
             .with_root_certificates(root_store)
             .with_no_client_auth()
             .unwrap();
@@ -209,10 +276,23 @@ mod tests {
         // This is where we might instantiate an std::net::UdpSocket bound to a particular host
         // socketaddr and connecting to a particular other socketaddr. In the test we use in memory
         // buffers to simulate transmission.
-        let transport = InMemoryBuffers::default();
+        let client_transport = InMemoryBuffers::default();
 
-        let mut client_socket =
-            ClientDtlsSocket::new(config, "example.org".try_into().unwrap(), transport).unwrap();
+        let mut client_socket = ClientDtlsSocket::new(
+            client_config,
+            "example.org".try_into().unwrap(),
+            client_transport,
+        )
+        .unwrap();
+
+        let server_config = ServerConfig::builder(Arc::new(TEST_PROVIDER.clone()))
+            .with_no_client_auth()
+            .with_single_cert(server_identity(), server_key())
+            .unwrap();
+
+        let server_transport = InMemoryBuffers::default();
+
+        let mut server_socket = ServerDtlsSocket::new(server_config, server_transport).unwrap();
 
         let state = client_socket
             .inner
@@ -220,8 +300,9 @@ mod tests {
             .state
             .as_ref()
             .unwrap();
+        print!("client state ");
         match state {
-            ClientState::ServerHello(_) => println!("server hello"),
+            ClientState::ServerHello(_) => println!("ServerHello"),
             ClientState::ServerHelloOrHelloRetryRequest(_) => {
                 println!("ServerHelloOrHelloRetryRequest")
             }
@@ -229,17 +310,47 @@ mod tests {
             ClientState::Tls13(_) => panic!("Tls13"),
         }
 
-        let send_peek = client_socket
+        print!("server state ");
+        let state = server_socket
+            .inner
+            .core
+            .state
+            .as_ref()
+            .unwrap();
+        match state {
+            ServerState::ReadClientHello(_) => println!("ReadClientHello"),
+            ServerState::ChooseConfig(_) => panic!("ChooseConfig"),
+            ServerState::ClientHello(_) => println!("ClientHello"),
+            ServerState::Tls12(_) => panic!("Tls12"),
+            ServerState::Tls13(_) => panic!("Tls13"),
+        }
+
+        let send = client_socket
             .inner
             .core
             .common
             .send
             .sendable_tls
-            .peek()
-            .unwrap();
+            .take();
 
-        println!("send path chunk vec buffer: ");
-        hex_dump(&send_peek);
+        // Send the handshake records (should be a clienthello) to server so it can transition its
+        // state machine
+        println!("handshake records constructed by client");
+        for (idx, record) in send.into_iter().enumerate() {
+            println!("record #{idx}");
+            hex_dump(&record);
+
+            let mut vec_input = VecInput::default();
+            let read = vec_input
+                .read(&mut &record[..])
+                .unwrap();
+            assert_eq!(read, record.len());
+            server_socket
+                .inner
+                .core
+                .process_new_packets(&mut vec_input, None)
+                .unwrap();
+        }
 
         client_socket
             .send(b"some bytes here")

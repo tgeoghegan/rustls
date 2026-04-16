@@ -1,5 +1,3 @@
-use std::println;
-
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -7,7 +5,7 @@ use alloc::vec::Vec;
 use crate::EpochAndSequence;
 use crate::common_state::Protocol;
 use crate::crypto::cipher::{
-    EncodedMessage, EncryptionState, MessageEncrypter, OutboundOpaque, OutboundPlain, Payload,
+    EncodedMessage, EncryptionState, MessageEncrypter, OutboundOpaque, OutboundPlain,
     PreEncryptAction,
 };
 use crate::enums::{ContentType, ProtocolVersion};

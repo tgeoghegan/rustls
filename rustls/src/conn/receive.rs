@@ -5,8 +5,8 @@ use core::ops::Range;
 use super::SendOutput;
 use crate::SideData;
 use crate::common_state::{
-    ConnectionOutput, ConnectionOutputs, Event, Output, OutputEvent, Side, UnborrowedPayload,
-    maybe_send_fatal_alert,
+    ConnectionOutput, ConnectionOutputs, Event, Output, OutputEvent, Protocol, Side,
+    UnborrowedPayload, maybe_send_fatal_alert,
 };
 use crate::conn::StateMachine;
 use crate::conn::private::SideOutput;
@@ -24,6 +24,7 @@ use crate::quic::QuicOutput;
 
 pub(crate) struct ReceivePath {
     side: Side,
+    protocol: Protocol,
     pub(crate) decrypt_state: DecryptionState,
     pub(crate) may_receive_application_data: bool,
     /// If the peer has signaled end of stream.
@@ -40,9 +41,10 @@ pub(crate) struct ReceivePath {
 }
 
 impl ReceivePath {
-    pub(crate) fn new(side: Side) -> Self {
+    pub(crate) fn new(side: Side, protocol: Protocol) -> Self {
         Self {
             side,
+            protocol,
             decrypt_state: DecryptionState::new(),
             may_receive_application_data: false,
             has_received_close_notify: false,
@@ -71,8 +73,10 @@ impl ReceivePath {
         let mut plaintext = None;
         while st.wants_input() {
             let buffer = input.slice_mut();
+            std::println!("recv path: input buffer len {}", buffer.len());
             let locator = Locator::new(buffer);
             let res = self.deframe(buffer);
+            std::println!("did deframe");
 
             let mut output = CaptureAppData {
                 recv: self,
@@ -110,6 +114,8 @@ impl ReceivePath {
                     .send
                     .send_alert(AlertLevel::Warning, AlertDescription::CloseNotify);
             }
+
+            std::println!("plaintext message: {msg:?}");
 
             let hs_aligned = output.recv.deframer.aligned();
             let result = match output
@@ -155,6 +161,8 @@ impl ReceivePath {
 
     /// Pull a message out of the deframer and send any messages that need to be sent as a result.
     fn deframe<'b>(&mut self, buffer: &'b mut [u8]) -> Result<Option<Decrypted<'b>>, Error> {
+        std::println!("initial buffer: {} {buffer:?}", buffer.len());
+
         let version_is_tls13 = matches!(self.negotiated_version, Some(ProtocolVersion::TLSv1_3));
 
         let locator = Locator::new(buffer);
@@ -163,7 +171,10 @@ impl ReceivePath {
         loop {
             // before processing any more of `buffer`, return any extant messages from `deframer`
             if let Some(span) = self.deframer.complete_span() {
+                std::println!("complete span {span:?}");
+                std::println!("buffer: {} {buffer:?}", buffer.len());
                 let plaintext = self.deframer.message(span, buffer);
+                std::println!("message from deframer: {plaintext:?}");
 
                 // trial decryption finishes with the first handshake message after it started.
                 self.decrypt_state
@@ -173,6 +184,8 @@ impl ReceivePath {
                     plaintext,
                     want_close_before_decrypt,
                 }));
+            } else {
+                std::println!("no complete span");
             }
 
             let (message, bounds) = loop {
@@ -181,6 +194,7 @@ impl ReceivePath {
                     Some(Err(err)) => return Err(err),
                     None => return Ok(None),
                 };
+                std::println!("decoded message {message:?}");
 
                 let allowed_plaintext = match message.typ {
                     // CCS messages are always plaintext.
@@ -201,6 +215,7 @@ impl ReceivePath {
                     // In other circumstances, we expect all messages to be encrypted.
                     _ => false,
                 };
+                std::println!("plaintext allowed? {allowed_plaintext}");
 
                 if allowed_plaintext && !self.deframer.is_active() {
                     break (
@@ -230,6 +245,10 @@ impl ReceivePath {
                     Ok(Some(decrypted)) => {
                         // After decryption, the payload is shorter
                         let bounds = locator.locate(decrypted.plaintext.payload);
+                        std::println!(
+                            "decrypted message {bounds:?} {} {decrypted:?}",
+                            decrypted.plaintext.payload.len()
+                        );
                         break (decrypted, bounds);
                     }
 
@@ -284,9 +303,15 @@ impl ReceivePath {
             }
 
             let message = unborrowed.reborrow(&Delocator::new(buffer));
+            // TODO(timg): I think this is where we should look at epoch and sequence number. Reject
+            // messages from old epoch? Buffer messages from a new one?
             self.deframer
                 .input_message(message, bounds);
-            self.deframer.coalesce(buffer)?;
+            match self.protocol {
+                #[cfg(feature = "dtls")]
+                Protocol::Udp => self.deframer.coalesce_dtls(buffer)?,
+                _ => self.deframer.coalesce(buffer)?,
+            }
         }
     }
 
@@ -299,12 +324,13 @@ impl ReceivePath {
     ///
     /// Otherwise the caller must present the returned `Input` to the state machine to
     /// progress the connection.
-    pub(crate) fn receive_message<'a>(
+    fn receive_message<'a>(
         &mut self,
         msg: EncodedMessage<&'a [u8]>,
         aligned_handshake: Option<HandshakeAlignedProof>,
         send: &mut dyn SendOutput,
     ) -> Result<Option<Input<'a>>, Error> {
+        std::println!("decrypted message: {msg:?}");
         // Drop CCS messages during handshake in TLS1.3
         if msg.typ == ContentType::ChangeCipherSpec && self.drop_tls13_ccs(&msg)? {
             trace!("Dropping CCS");
@@ -313,6 +339,7 @@ impl ReceivePath {
 
         // Now we can fully parse the message payload.
         let message = Message::try_from(msg)?;
+        std::println!("did parse message");
 
         // For alerts, we have separate logic.
         if let MessagePayload::Alert(alert) = &message.payload {

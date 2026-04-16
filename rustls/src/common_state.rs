@@ -31,7 +31,7 @@ impl CommonState {
         Self {
             outputs: ConnectionOutputs::default(),
             send: SendPath::new(protocol),
-            recv: ReceivePath::new(side),
+            recv: ReceivePath::new(side, protocol),
         }
     }
 

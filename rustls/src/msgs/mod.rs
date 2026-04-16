@@ -249,6 +249,7 @@ impl<'a> TryFrom<EncodedMessage<&'a [u8]>> for Message<'a> {
     type Error = InvalidMessage;
 
     fn try_from(plain: EncodedMessage<&'a [u8]>) -> Result<Self, Self::Error> {
+        std::println!("decoding message from encodedmessage [u8]");
         Ok(Self {
             version: plain.version,
             payload: MessagePayload::new(plain.typ, plain.version, plain.payload)?,
@@ -368,6 +369,7 @@ impl<'a> MessagePayload<'a> {
             ContentType::ApplicationData => Ok(Self::ApplicationData(Payload::Borrowed(payload))),
             ContentType::Alert => AlertMessagePayload::read(&mut r).map(MessagePayload::Alert),
             ContentType::Handshake => {
+                std::println!("parsing a handshake");
                 HandshakeMessagePayload::read_version(&mut r, vers).map(|parsed| Self::Handshake {
                     parsed,
                     encoded: Payload::Borrowed(payload),
@@ -424,11 +426,16 @@ impl<'a> HandshakeMessagePayload<'a> {
     ) -> Result<Self, InvalidMessage> {
         let typ = HandshakeType::read(r)?;
         let len = U24::read(r)?.0 as usize;
+        if vers.is_datagram_tls() {
+            // Skip the DTLS seq and fragment fields, which are no longer meaningful
+            let _ = r.take(DTLS_HANDSHAKE_HEADER_EXTRA);
+        }
         let mut sub = r.sub(len)?;
 
         let payload = match typ {
             HandshakeType::HelloRequest if sub.left() == 0 => HandshakePayload::HelloRequest,
             HandshakeType::ClientHello => {
+                std::println!("parsing a clienthello");
                 HandshakePayload::ClientHello(ClientHelloPayload::read(&mut sub)?)
             }
             HandshakeType::ServerHello => {
@@ -860,12 +867,25 @@ impl<'a> Codec<'a> for DtlsHandshakeFragment<'a> {
     }
 }
 
-/// Content type, version and size.
+/// Length of the header on a TLS record. Content type (1 byte), version (2 bytes) and size (2
+/// bytes).
 pub(crate) const HEADER_SIZE: usize = 1 + 2 + 2;
 
-/// TLS header size plus epoch (2 bytes) and sequence number (6 bytes).
-#[cfg(feature = "dtls")]
+/// Length of the header on a DTLS record. TLS header size plus epoch (2 bytes) and sequence number
+/// (6 bytes).
 pub(crate) const DTLS_HEADER_SIZE: usize = HEADER_SIZE + 2 + 6;
+
+/// Length of the header on a handshake message. Does not include the record layer header. Handshake
+/// type (1 byte) and length (3 bytes).
+pub(crate) const HANDSHAKE_HEADER_SIZE: usize = 1 + 3;
+
+/// Extra fields in the handshake header for DTLS: message sequence (2 bytes), fragment offset (3
+/// bytes) and fragment length (3 bytes).
+pub(crate) const DTLS_HANDSHAKE_HEADER_EXTRA: usize = 2 + 3 + 3;
+
+/// Length of the header on a DTLS handshake message. Does not include the record layer header.
+pub(crate) const DTLS_HANDSHAKE_HEADER_SIZE: usize =
+    HANDSHAKE_HEADER_SIZE + DTLS_HANDSHAKE_HEADER_EXTRA;
 
 /// Maximum message payload size.
 /// That's 2^14 payload bytes and a 2KB allowance for ciphertext overheads.

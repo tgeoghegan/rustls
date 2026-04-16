@@ -350,7 +350,7 @@ impl Codec<'_> for u16 {
 }
 
 // Make a distinct type for u24, even though it's a u32 underneath
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct U24(pub u32);
 
 impl U24 {

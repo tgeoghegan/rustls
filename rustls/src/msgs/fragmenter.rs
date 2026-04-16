@@ -3,30 +3,14 @@ use crate::crypto::cipher::{EncodedMessage, OutboundPlain, Payload};
 #[cfg(feature = "dtls")]
 use crate::enums::HandshakeType;
 use crate::enums::{ContentType, ProtocolVersion};
+use crate::msgs::HEADER_SIZE;
 #[cfg(feature = "dtls")]
-use crate::msgs::{DtlsHandshakeFragment, EpochAndSequence, U24};
+use crate::msgs::{
+    DTLS_HANDSHAKE_HEADER_SIZE, DTLS_HEADER_SIZE, DtlsHandshakeFragment, EpochAndSequence, U24,
+};
 
 pub(crate) const MAX_FRAGMENT_LEN: usize = 16384;
-pub(crate) const PACKET_OVERHEAD: usize = 1 + 2 + 2;
-#[cfg(feature = "dtls")]
-pub(crate) const DTLS_PACKET_OVERHEAD: usize = PACKET_OVERHEAD
-    // Epoch
-    + 2
-    // Sequence number
-     + 6;
-#[cfg(feature = "dtls")]
-pub(crate) const DTLS_HANDSHAKE_OVERHEAD: usize =
-    // Handshake type
-    1
-    // Length
-    + 3
-    // Message sequence
-    + 2
-    // Fragment offset
-    + 3
-    // Fragment length
-    + 3;
-pub(crate) const MAX_FRAGMENT_SIZE: usize = MAX_FRAGMENT_LEN + PACKET_OVERHEAD;
+pub(crate) const MAX_FRAGMENT_SIZE: usize = MAX_FRAGMENT_LEN + HEADER_SIZE;
 
 pub(crate) struct MessageFragmenter {
     max_frag: usize,
@@ -81,7 +65,7 @@ impl MessageFragmenter {
 
         Chunker::new(
             handshake_payload.into(),
-            self.max_fragment_size(ProtocolVersion::DTLSv1_2) - DTLS_HANDSHAKE_OVERHEAD,
+            self.max_fragment_size(ProtocolVersion::DTLSv1_2) - DTLS_HANDSHAKE_HEADER_SIZE,
         )
         .enumerate()
         .map(move |(sequence, payload)| {
@@ -175,9 +159,9 @@ impl MessageFragmenter {
         match version {
             #[cfg(feature = "dtls")]
             ProtocolVersion::DTLSv1_2 | ProtocolVersion::DTLSv1_3 => {
-                self.max_frag - DTLS_PACKET_OVERHEAD
+                self.max_frag - DTLS_HEADER_SIZE
             }
-            _ => self.max_frag - PACKET_OVERHEAD,
+            _ => self.max_frag - HEADER_SIZE,
         }
     }
 }
@@ -214,20 +198,18 @@ impl ExactSizeIterator for Chunker<'_> {
     }
 }
 
-/// An iterator over
-
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
     use std::vec;
 
-    use super::{MessageFragmenter, PACKET_OVERHEAD};
+    use super::MessageFragmenter;
     use crate::crypto::cipher::{EncodedMessage, OutboundPlain, Payload};
     use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
-    use crate::msgs::DtlsHandshakeFragment;
-    use crate::msgs::fragmenter::{DTLS_HANDSHAKE_OVERHEAD, DTLS_PACKET_OVERHEAD};
-    #[cfg(feature = "dtls")]
-    use crate::msgs::{EpochAndSequence, U24};
+    use crate::msgs::{
+        DTLS_HANDSHAKE_HEADER_SIZE, DTLS_HEADER_SIZE, DtlsHandshakeFragment, EpochAndSequence,
+        HEADER_SIZE, U24,
+    };
 
     fn msg_eq(
         m: &EncodedMessage<OutboundPlain<'_>>,
@@ -315,7 +297,7 @@ mod tests {
         assert_eq!(q.len(), 1);
         msg_eq(
             &q[0],
-            PACKET_OVERHEAD + 8,
+            HEADER_SIZE + 8,
             &ContentType::Handshake,
             &ProtocolVersion::TLSv1_2,
             b"\x01\x02\x03\x04\x05\x06\x07\x08",
@@ -364,7 +346,7 @@ mod tests {
         let content_type = ContentType::Handshake;
         let encoded_handshake = &[b'a'; 104];
         let mut frag = MessageFragmenter::default();
-        frag.set_max_fragment_size(Some(32 + DTLS_PACKET_OVERHEAD + DTLS_HANDSHAKE_OVERHEAD))
+        frag.set_max_fragment_size(Some(32 + DTLS_HEADER_SIZE + DTLS_HANDSHAKE_HEADER_SIZE))
             .unwrap();
 
         let fragments: Vec<_> = frag

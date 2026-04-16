@@ -5,7 +5,10 @@ use alloc::vec::Vec;
 
 use crate::crypto::cipher::Payload;
 use crate::error::InvalidMessage;
-use crate::msgs::{Codec, ListLength, NonEmpty, Reader, SizedPayload, TlsListElement};
+use crate::msgs::{
+    Codec, DTLS_HANDSHAKE_HEADER_SIZE, DTLS_HEADER_SIZE, HANDSHAKE_HEADER_SIZE, HEADER_SIZE,
+    ListLength, NonEmpty, Reader, SizedPayload, TlsListElement,
+};
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +196,22 @@ enum_builder! {
 impl ProtocolVersion {
     pub fn is_datagram_tls(self) -> bool {
         self == Self::DTLSv1_0 || self == Self::DTLSv1_2 || self == Self::DTLSv1_3
+    }
+
+    pub fn record_header_size(self) -> usize {
+        if self.is_datagram_tls() {
+            DTLS_HEADER_SIZE
+        } else {
+            HEADER_SIZE
+        }
+    }
+
+    pub fn handshake_header_size(self) -> usize {
+        if self.is_datagram_tls() {
+            DTLS_HANDSHAKE_HEADER_SIZE
+        } else {
+            HANDSHAKE_HEADER_SIZE
+        }
     }
 }
 
