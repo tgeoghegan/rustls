@@ -37,11 +37,7 @@ impl<SocketLike: UdpSocketLike> ClientDtlsSocket<SocketLike> {
         let connection_core = ConnectionCore::for_client(
             Arc::new(config.clone()),
             server_name,
-            ClientExtensionsInput {
-                // Never set transport parameters, since that's for QUIC
-                transport_parameters: None,
-                protocols: Some(config.alpn_protocols),
-            },
+            ClientExtensionsInput::from_alpn(config.alpn_protocols),
             // Never QUIC since this is UDP
             None,
             Protocol::Udp,
@@ -337,7 +333,7 @@ mod tests {
         // state machine
         println!("handshake records constructed by client");
         for (idx, record) in send.into_iter().enumerate() {
-            println!("record #{idx}");
+            println!("client -> server record #{idx}");
             hex_dump(&record);
 
             let mut vec_input = VecInput::default();
@@ -350,6 +346,62 @@ mod tests {
                 .core
                 .process_new_packets(&mut vec_input, None)
                 .unwrap();
+        }
+
+        print!("server state ");
+        let state = server_socket
+            .inner
+            .core
+            .state
+            .as_ref()
+            .unwrap();
+        match state {
+            ServerState::ReadClientHello(_) => panic!("ReadClientHello"),
+            ServerState::ChooseConfig(_) => panic!("ChooseConfig"),
+            ServerState::ClientHello(_) => panic!("ClientHello"),
+            ServerState::Tls12(_) => panic!("Tls12"),
+            ServerState::Tls13(tls13) => println!("Tls13"),
+        }
+
+        let send = server_socket
+            .inner
+            .core
+            .common
+            .send
+            .sendable_tls
+            .take();
+        // Should be a serverhello here?
+        println!("handshake records constructed by server");
+        for (idx, record) in send.iter().into_iter().enumerate() {
+            println!("server -> client record #{idx}");
+            hex_dump(&record);
+
+            let mut vec_input = VecInput::default();
+            let read = vec_input
+                .read(&mut &record[..])
+                .unwrap();
+            assert_eq!(read, record.len());
+            client_socket
+                .inner
+                .core
+                .process_new_packets(&mut vec_input, None)
+                .unwrap();
+        }
+
+        let state = client_socket
+            .inner
+            .core
+            .state
+            .as_ref()
+            .unwrap();
+        print!("client state ");
+        match state {
+            ClientState::ServerHello(_) => println!("ServerHello"),
+            ClientState::ServerHelloOrHelloRetryRequest(_) => {
+                println!("ServerHelloOrHelloRetryRequest")
+            }
+            ClientState::Tls12(_) => panic!("Tls12"),
+            ClientState::Tls13(_) => panic!("Tls13"),
         }
 
         client_socket

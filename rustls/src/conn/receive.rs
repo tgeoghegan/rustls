@@ -73,10 +73,8 @@ impl ReceivePath {
         let mut plaintext = None;
         while st.wants_input() {
             let buffer = input.slice_mut();
-            std::println!("recv path: input buffer len {}", buffer.len());
             let locator = Locator::new(buffer);
             let res = self.deframe(buffer);
-            std::println!("did deframe");
 
             let mut output = CaptureAppData {
                 recv: self,
@@ -114,8 +112,6 @@ impl ReceivePath {
                     .send
                     .send_alert(AlertLevel::Warning, AlertDescription::CloseNotify);
             }
-
-            std::println!("plaintext message: {msg:?}");
 
             let hs_aligned = output.recv.deframer.aligned();
             let result = match output
@@ -161,8 +157,6 @@ impl ReceivePath {
 
     /// Pull a message out of the deframer and send any messages that need to be sent as a result.
     fn deframe<'b>(&mut self, buffer: &'b mut [u8]) -> Result<Option<Decrypted<'b>>, Error> {
-        std::println!("initial buffer: {} {buffer:?}", buffer.len());
-
         let version_is_tls13 = matches!(self.negotiated_version, Some(ProtocolVersion::TLSv1_3));
 
         let locator = Locator::new(buffer);
@@ -171,10 +165,7 @@ impl ReceivePath {
         loop {
             // before processing any more of `buffer`, return any extant messages from `deframer`
             if let Some(span) = self.deframer.complete_span() {
-                std::println!("complete span {span:?}");
-                std::println!("buffer: {} {buffer:?}", buffer.len());
                 let plaintext = self.deframer.message(span, buffer);
-                std::println!("message from deframer: {plaintext:?}");
 
                 // trial decryption finishes with the first handshake message after it started.
                 self.decrypt_state
@@ -184,17 +175,17 @@ impl ReceivePath {
                     plaintext,
                     want_close_before_decrypt,
                 }));
-            } else {
-                std::println!("no complete span");
             }
 
+            std::println!("buffer before deframe: {} {buffer:?}", buffer.len());
             let (message, bounds) = loop {
                 let (message, bounds) = match self.deframer.deframe(buffer) {
                     Some(Ok(Deframed { message, bounds })) => (message, bounds),
                     Some(Err(err)) => return Err(err),
                     None => return Ok(None),
                 };
-                std::println!("decoded message {message:?}");
+
+                // here, bounds is the bounds **** of the TLS record ****
 
                 let allowed_plaintext = match message.typ {
                     // CCS messages are always plaintext.
@@ -215,7 +206,6 @@ impl ReceivePath {
                     // In other circumstances, we expect all messages to be encrypted.
                     _ => false,
                 };
-                std::println!("plaintext allowed? {allowed_plaintext}");
 
                 if allowed_plaintext && !self.deframer.is_active() {
                     break (
@@ -245,10 +235,6 @@ impl ReceivePath {
                     Ok(Some(decrypted)) => {
                         // After decryption, the payload is shorter
                         let bounds = locator.locate(decrypted.plaintext.payload);
-                        std::println!(
-                            "decrypted message {bounds:?} {} {decrypted:?}",
-                            decrypted.plaintext.payload.len()
-                        );
                         break (decrypted, bounds);
                     }
 
@@ -330,7 +316,6 @@ impl ReceivePath {
         aligned_handshake: Option<HandshakeAlignedProof>,
         send: &mut dyn SendOutput,
     ) -> Result<Option<Input<'a>>, Error> {
-        std::println!("decrypted message: {msg:?}");
         // Drop CCS messages during handshake in TLS1.3
         if msg.typ == ContentType::ChangeCipherSpec && self.drop_tls13_ccs(&msg)? {
             trace!("Dropping CCS");
@@ -339,7 +324,6 @@ impl ReceivePath {
 
         // Now we can fully parse the message payload.
         let message = Message::try_from(msg)?;
-        std::println!("did parse message");
 
         // For alerts, we have separate logic.
         if let MessagePayload::Alert(alert) = &message.payload {

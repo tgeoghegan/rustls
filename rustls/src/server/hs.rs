@@ -717,11 +717,6 @@ impl ExpectClientHello {
         input: Input<'m>,
         output: &mut dyn Output<'_>,
     ) -> Result<ServerState, Error> {
-        std::println!(
-            "expect client hello got input: {}\n{:#?}",
-            input.aligned_handshake.is_some(),
-            input.message
-        );
         let input = ClientHelloInput::from_input(&input)?;
         self.with_input(input, output)
     }

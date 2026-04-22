@@ -114,10 +114,7 @@ impl Codec<'_> for ClientHelloPayload {
             session_id: SessionId::read(r)?,
             cipher_suites: Vec::read(r)?,
             compression_methods: Vec::read(r)?,
-            extensions: {
-                std::println!("parsing exts");
-                Box::new(ClientExtensions::read(r)?.into_owned())
-            },
+            extensions: Box::new(ClientExtensions::read(r)?.into_owned()),
         };
 
         match r.any_left() {

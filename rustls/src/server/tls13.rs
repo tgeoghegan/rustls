@@ -404,6 +404,7 @@ mod client_hello {
                 })
                 .into())
             } else {
+                std::println!("server going to ExpectFinished");
                 Ok(Box::new(ExpectFinished {
                     hs,
                     key_schedule: key_schedule_traffic,

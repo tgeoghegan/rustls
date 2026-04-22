@@ -249,7 +249,7 @@ impl<'a> TryFrom<EncodedMessage<&'a [u8]>> for Message<'a> {
     type Error = InvalidMessage;
 
     fn try_from(plain: EncodedMessage<&'a [u8]>) -> Result<Self, Self::Error> {
-        std::println!("decoding message from encodedmessage [u8]");
+        std::println!("decoding message from encoded message [u8]");
         Ok(Self {
             version: plain.version,
             payload: MessagePayload::new(plain.typ, plain.version, plain.payload)?,
@@ -369,7 +369,6 @@ impl<'a> MessagePayload<'a> {
             ContentType::ApplicationData => Ok(Self::ApplicationData(Payload::Borrowed(payload))),
             ContentType::Alert => AlertMessagePayload::read(&mut r).map(MessagePayload::Alert),
             ContentType::Handshake => {
-                std::println!("parsing a handshake");
                 HandshakeMessagePayload::read_version(&mut r, vers).map(|parsed| Self::Handshake {
                     parsed,
                     encoded: Payload::Borrowed(payload),
@@ -435,7 +434,6 @@ impl<'a> HandshakeMessagePayload<'a> {
         let payload = match typ {
             HandshakeType::HelloRequest if sub.left() == 0 => HandshakePayload::HelloRequest,
             HandshakeType::ClientHello => {
-                std::println!("parsing a clienthello");
                 HandshakePayload::ClientHello(ClientHelloPayload::read(&mut sub)?)
             }
             HandshakeType::ServerHello => {

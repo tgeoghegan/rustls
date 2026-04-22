@@ -185,7 +185,9 @@ impl ExpectServerHello {
         let config = &self.input.config;
         let tls13_supported = config.supports_version(ProtocolVersion::TLSv1_3);
 
-        let server_version = if server_hello.legacy_version == ProtocolVersion::TLSv1_2 {
+        let server_version = if server_hello.legacy_version == ProtocolVersion::TLSv1_2
+            || server_hello.legacy_version == ProtocolVersion::DTLSv1_2
+        {
             server_hello
                 .selected_version
                 .unwrap_or(server_hello.legacy_version)
@@ -195,6 +197,10 @@ impl ExpectServerHello {
 
         match server_version {
             ProtocolVersion::TLSv1_3 if tls13_supported => {
+                self.with_version::<Tls13CipherSuite>(server_hello, &input, output)
+            }
+            #[cfg(feature = "dtls")]
+            ProtocolVersion::DTLSv1_3 if config.supports_version(ProtocolVersion::DTLSv1_3) => {
                 self.with_version::<Tls13CipherSuite>(server_hello, &input, output)
             }
             ProtocolVersion::TLSv1_2 if config.supports_version(ProtocolVersion::TLSv1_2) => {
@@ -208,6 +214,11 @@ impl ExpectServerHello {
                     return Err(PeerMisbehaved::SelectedTls12UsingTls13VersionExtension.into());
                 }
 
+                self.with_version::<Tls12CipherSuite>(server_hello, &input, output)
+            }
+            #[cfg(feature = "dtls")]
+            ProtocolVersion::DTLSv1_2 if config.supports_version(ProtocolVersion::DTLSv1_2) => {
+                // TODO(timg): all this 0-RTT stuff
                 self.with_version::<Tls12CipherSuite>(server_hello, &input, output)
             }
             _ => {
