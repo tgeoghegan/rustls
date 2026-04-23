@@ -419,5 +419,6 @@ mod tests {
             }
             std::print!("{byte:02x} ");
         }
+        std::println!("");
     }
 }

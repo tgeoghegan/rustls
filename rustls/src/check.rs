@@ -56,7 +56,6 @@ pub(crate) fn inappropriate_handshake_message(
     content_types: &[ContentType],
     handshake_types: &[HandshakeType],
 ) -> Error {
-    panic!("inappropriate_handshake_message");
     match payload {
         MessagePayload::Handshake { parsed, .. } => {
             let got_type = parsed.0.handshake_type();

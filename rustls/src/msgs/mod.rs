@@ -249,7 +249,6 @@ impl<'a> TryFrom<EncodedMessage<&'a [u8]>> for Message<'a> {
     type Error = InvalidMessage;
 
     fn try_from(plain: EncodedMessage<&'a [u8]>) -> Result<Self, Self::Error> {
-        std::println!("decoding message from encoded message [u8]");
         Ok(Self {
             version: plain.version,
             payload: MessagePayload::new(plain.typ, plain.version, plain.payload)?,

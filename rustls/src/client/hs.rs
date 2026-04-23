@@ -860,8 +860,6 @@ fn emit_client_hello_for_retry(
         tls13::emit_fake_ccs(&mut input.sent_tls13_fake_ccs, output);
     }
 
-    std::println!("Sending ClientHello {ch:#?}");
-
     transcript_buffer.add_message(&ch);
     output.send_msg(ch, false);
 
