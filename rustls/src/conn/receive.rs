@@ -75,7 +75,6 @@ impl ReceivePath {
             let buffer = input.slice_mut();
             let locator = Locator::new(buffer);
             let res = self.deframe(buffer);
-            std::println!("server deframed {res:?}");
 
             let mut output = CaptureAppData {
                 recv: self,
@@ -114,7 +113,6 @@ impl ReceivePath {
                     .send_alert(AlertLevel::Warning, AlertDescription::CloseNotify);
             }
 
-            std::println!("message from deframer: {msg:?}");
             let hs_aligned = output.recv.deframer.aligned();
             let result = match output
                 .recv
@@ -167,7 +165,6 @@ impl ReceivePath {
         loop {
             // before processing any more of `buffer`, return any extant messages from `deframer`
             if let Some(span) = self.deframer.complete_span() {
-                std::println!("complete span");
                 let plaintext = self.deframer.message(span, buffer);
 
                 // trial decryption finishes with the first handshake message after it started.
@@ -179,21 +176,13 @@ impl ReceivePath {
                     want_close_before_decrypt,
                 }));
             }
-            std::println!("not complete span");
 
             let (message, bounds) = loop {
                 let (message, bounds) = match self.deframer.deframe(buffer) {
                     Some(Ok(Deframed { message, bounds })) => (message, bounds),
                     Some(Err(err)) => return Err(err),
-                    None => {
-                        std::println!("deframed nothing");
-                        return Ok(None);
-                    }
+                    None => return Ok(None),
                 };
-                std::println!(
-                    "deframed message bounds: {bounds:?} payload len: {} {message:?}",
-                    message.payload.iter().as_ref().len()
-                );
 
                 let allowed_plaintext = match message.typ {
                     // CCS messages are always plaintext.
@@ -243,7 +232,6 @@ impl ReceivePath {
                     Ok(Some(decrypted)) => {
                         // After decryption, the payload is shorter
                         let bounds = locator.locate(decrypted.plaintext.payload);
-                        std::println!("decrypted message, bounds now {bounds:?}");
                         break (decrypted, bounds);
                     }
 
@@ -300,7 +288,6 @@ impl ReceivePath {
             let message = unborrowed.reborrow(&Delocator::new(buffer));
             // TODO(timg): I think this is where we should look at epoch and sequence number. Reject
             // messages from old epoch? Buffer messages from a new one?
-            std::println!("doing handshake deframe stuff bounds {bounds:?}");
             match self.protocol {
                 #[cfg(feature = "dtls")]
                 Protocol::Udp => {
