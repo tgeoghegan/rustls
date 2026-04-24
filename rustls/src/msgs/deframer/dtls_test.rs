@@ -37,21 +37,27 @@ fn test_handshake_message<'a>() -> Message<'a> {
 }
 
 fn check_reassembled_message(
+    idx: usize,
     original_message: &EncodedMessage<Payload<'_>>,
     reassembled_message: &EncodedMessage<&[u8]>,
 ) {
-    assert_eq!(reassembled_message.typ, original_message.typ);
-    assert_eq!(reassembled_message.version, original_message.version);
-    assert_eq!(reassembled_message.epoch_and_sequence, None);
+    assert_eq!(reassembled_message.typ, original_message.typ, "idx: {idx}");
+    assert_eq!(
+        reassembled_message.version, original_message.version,
+        "idx: {idx}"
+    );
+    assert_eq!(reassembled_message.epoch_and_sequence, None, "idx: {idx}");
     assert_eq!(
         reassembled_message.payload.len(),
         original_message.payload.bytes().len() + DTLS_HANDSHAKE_HEADER_EXTRA,
+        "idx: {idx}",
     );
     // The record we encoded had a TLS handshake header on it, but the one we get back has a *DTLS*
     // handshake header. Check that the payloads are equal.
     assert_eq!(
         &original_message.payload.bytes()[HANDSHAKE_HEADER_SIZE..],
-        &reassembled_message.payload[DTLS_HANDSHAKE_HEADER_SIZE..]
+        &reassembled_message.payload[DTLS_HANDSHAKE_HEADER_SIZE..],
+        "idx: {idx}",
     );
 
     // Make sure we can parse the handshake message, but we already checked that the bytes are as
@@ -63,7 +69,7 @@ fn check_reassembled_message(
 fn single_handshake_fragment() {
     let record = test_handshake_message().encoded_message(Some(EpochAndSequence::new(0, 0)));
 
-    let fragments: Vec<_> = MessageFragmenter::default()
+    let records: Vec<_> = MessageFragmenter::default()
         .fragment_dtls_handshake_message(
             EpochAndSequence::new(0, 0),
             HandshakeType::ClientHello,
@@ -71,13 +77,13 @@ fn single_handshake_fragment() {
             record.payload.bytes(),
         )
         .collect();
-    assert_eq!(fragments.len(), 1);
+    assert_eq!(records.len(), 1);
 
     let mut record_wire_bytes = EncodedMessage {
-        typ: fragments[0].typ,
-        version: fragments[0].version,
-        epoch_and_sequence: fragments[0].epoch_and_sequence,
-        payload: fragments[0]
+        typ: records[0].typ,
+        version: records[0].version,
+        epoch_and_sequence: records[0].epoch_and_sequence,
+        payload: records[0]
             .payload
             .get_encoding()
             .as_slice()
@@ -114,7 +120,7 @@ fn single_handshake_fragment() {
 
     // We should get the whole handshake message out of the deframer
     let reassembled_message = deframer.message(message_span, &record_wire_bytes);
-    check_reassembled_message(&record, &reassembled_message);
+    check_reassembled_message(0, &record, &reassembled_message);
 }
 
 #[test]
@@ -125,7 +131,7 @@ fn multiple_handshake_fragment_in_order() {
     message_fragmenter
         .set_max_fragment_size(Some(48))
         .unwrap();
-    let fragments: Vec<_> = message_fragmenter
+    let records: Vec<_> = message_fragmenter
         .fragment_dtls_handshake_message(
             EpochAndSequence::new(5, 222),
             HandshakeType::ClientHello,
@@ -133,17 +139,17 @@ fn multiple_handshake_fragment_in_order() {
             &record.payload.bytes(),
         )
         .collect();
-    assert_eq!(fragments.len(), 4);
+    assert_eq!(records.len(), 4);
 
-    let mut encoded_fragments = Vec::new();
+    let mut encoded_records = Vec::new();
 
-    for fragment in &fragments {
-        encoded_fragments.extend_from_slice(
+    for record in &records {
+        encoded_records.extend_from_slice(
             EncodedMessage {
-                typ: fragment.typ,
-                version: fragment.version,
-                epoch_and_sequence: fragment.epoch_and_sequence,
-                payload: fragment
+                typ: record.typ,
+                version: record.version,
+                epoch_and_sequence: record.epoch_and_sequence,
+                payload: record
                     .payload
                     .get_encoding()
                     .as_slice()
@@ -158,10 +164,10 @@ fn multiple_handshake_fragment_in_order() {
     let mut deframer = Deframer::default();
 
     // Deframe records and feed messages into the deframer to be coalesced. We should not
-    // get a complete span until all fragments are fed in.
-    for fragment_idx in 0..fragments.len() {
+    // get a complete span until all records are fed in.
+    for record_idx in 0..records.len() {
         let Deframed { message, bounds } = deframer
-            .deframe(&mut encoded_fragments)
+            .deframe(&mut encoded_records)
             .unwrap()
             .unwrap();
 
@@ -172,16 +178,16 @@ fn multiple_handshake_fragment_in_order() {
         deframer
             .input_message_dtls(message, bounds)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_fragments);
+        deframer.coalesce_dtls(&mut encoded_records);
 
-        if fragment_idx < fragments.len() - 1 {
+        if record_idx < records.len() - 1 {
             assert!(deframer.complete_span().is_none());
         } else {
             let message_span = deframer.complete_span().unwrap();
 
             // We should get the whole handshake message out of the deframer
-            let reassembled_handshake_message = deframer.message(message_span, &encoded_fragments);
-            check_reassembled_message(&record, &reassembled_handshake_message);
+            let reassembled_handshake_message = deframer.message(message_span, &encoded_records);
+            check_reassembled_message(record_idx, &record, &reassembled_handshake_message);
         }
     }
 }
@@ -194,7 +200,7 @@ fn multiple_handshake_fragment_overlapping() {
     message_fragmenter
         .set_max_fragment_size(Some(48))
         .unwrap();
-    let mut fragments: Vec<_> = message_fragmenter
+    let mut records: Vec<_> = message_fragmenter
         .fragment_dtls_handshake_message(
             EpochAndSequence::new(5, 222),
             HandshakeType::ClientHello,
@@ -202,44 +208,44 @@ fn multiple_handshake_fragment_overlapping() {
             &record.payload.bytes(),
         )
         .collect();
-    assert_eq!(fragments.len(), 4);
+    assert_eq!(records.len(), 4);
 
     // Grow one of the fragments so that it overlaps with part of the fragment before it and then
     // all of the fragment after it.
     let fragment_0_portion = 11;
     assert!(
         fragment_0_portion as usize
-            <= fragments[0]
+            <= records[0]
                 .payload
                 .fragment
                 .bytes()
                 .len()
     );
-    let fragment_2_portion = fragments[2].payload.fragment_length.0;
-    fragments[1].payload.fragment_length =
-        U24(fragments[1].payload.fragment_length.0 + fragment_0_portion + fragment_2_portion);
-    fragments[1].payload.fragment_offset =
-        U24(fragments[1].payload.fragment_offset.0 - fragment_0_portion);
-    let mut grown_payload = fragments[0]
+    let fragment_2_portion = records[2].payload.fragment_length.0;
+    records[1].payload.fragment_length =
+        U24(records[1].payload.fragment_length.0 + fragment_0_portion + fragment_2_portion);
+    records[1].payload.fragment_offset =
+        U24(records[1].payload.fragment_offset.0 - fragment_0_portion);
+    let mut grown_payload = records[0]
         .payload
         .fragment
         .bytes()
         .last_chunk::<11>()
         .unwrap()
         .to_vec();
-    grown_payload.extend(fragments[1].payload.fragment.bytes());
-    grown_payload.extend(fragments[2].payload.fragment.bytes());
-    fragments[1].payload.fragment = Payload::new(grown_payload);
+    grown_payload.extend(records[1].payload.fragment.bytes());
+    grown_payload.extend(records[2].payload.fragment.bytes());
+    records[1].payload.fragment = Payload::new(grown_payload);
 
-    let mut encoded_fragments = Vec::new();
+    let mut encoded_records = Vec::new();
 
-    for fragment in &fragments {
-        encoded_fragments.extend_from_slice(
+    for record in &records {
+        encoded_records.extend_from_slice(
             EncodedMessage {
-                typ: fragment.typ,
-                version: fragment.version,
-                epoch_and_sequence: fragment.epoch_and_sequence,
-                payload: fragment
+                typ: record.typ,
+                version: record.version,
+                epoch_and_sequence: record.epoch_and_sequence,
+                payload: record
                     .payload
                     .get_encoding()
                     .as_slice()
@@ -254,10 +260,10 @@ fn multiple_handshake_fragment_overlapping() {
     let mut deframer = Deframer::default();
 
     // Deframe records and feed messages into the deframer to be coalesced. We should not
-    // get a complete span until all fragments are fed in.
-    for fragment_idx in 0..fragments.len() {
+    // get a complete span until all records are fed in.
+    for record_idx in 0..records.len() {
         let Deframed { message, bounds } = deframer
-            .deframe(&mut encoded_fragments)
+            .deframe(&mut encoded_records)
             .unwrap()
             .unwrap();
 
@@ -268,16 +274,16 @@ fn multiple_handshake_fragment_overlapping() {
         deframer
             .input_message_dtls(message, bounds)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_fragments);
+        deframer.coalesce_dtls(&mut encoded_records);
 
-        if fragment_idx < fragments.len() - 1 {
+        if record_idx < records.len() - 1 {
             assert!(deframer.complete_span().is_none());
         } else {
             let message_span = deframer.complete_span().unwrap();
 
             // We should get the whole handshake message out of the deframer
-            let reassembled_handshake_message = deframer.message(message_span, &encoded_fragments);
-            check_reassembled_message(&record, &reassembled_handshake_message);
+            let reassembled_handshake_message = deframer.message(message_span, &encoded_records);
+            check_reassembled_message(record_idx, &record, &reassembled_handshake_message);
         }
     }
 }
@@ -291,7 +297,7 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1() {
     message_fragmenter
         .set_max_fragment_size(Some(48))
         .unwrap();
-    let fragments: Vec<_> = message_fragmenter
+    let records: Vec<_> = message_fragmenter
         .fragment_dtls_handshake_message(
             EpochAndSequence::new(5, 222),
             HandshakeType::ClientHello,
@@ -305,19 +311,19 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1() {
             &second_record.payload.bytes(),
         ))
         .collect();
-    assert_eq!(fragments.len(), 8);
+    assert_eq!(records.len(), 8);
 
     // Interleave the fragments of the two handshake messages to simulate UDP messages arriving out
     // of order. Even though we receive all the fragments of the second message at index 5, we can't
     // get any messages out of the deframer until all fragments of the first message arrive.
-    let mut encoded_fragments = Vec::new();
+    let mut encoded_records = Vec::new();
     for index in [4, 2, 7, 3, 6, 5, 1, 0] {
-        encoded_fragments.extend_from_slice(
+        encoded_records.extend_from_slice(
             EncodedMessage {
-                typ: fragments[index].typ,
-                version: fragments[index].version,
-                epoch_and_sequence: fragments[index].epoch_and_sequence,
-                payload: fragments[index]
+                typ: records[index].typ,
+                version: records[index].version,
+                epoch_and_sequence: records[index].epoch_and_sequence,
+                payload: records[index]
                     .payload
                     .get_encoding()
                     .as_slice()
@@ -333,9 +339,9 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1() {
 
     // Deframe records and feed messages into the deframer to be coalesced.
     let mut saw_first_message = false;
-    for _ in 0..fragments.len() {
+    for record_idx in 0..records.len() {
         let Deframed { message, bounds } = deframer
-            .deframe(&mut encoded_fragments)
+            .deframe(&mut encoded_records)
             .unwrap()
             .unwrap();
 
@@ -346,20 +352,20 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1() {
         deframer
             .input_message_dtls(message, bounds)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_fragments);
+        deframer.coalesce_dtls(&mut encoded_records);
 
         if let Some(span) = deframer.complete_span() {
             // Because of how we laid out encoded_fragments, no message will be available until the
             // last iteration of this loop, at which point both will be in the buffer, ordered by
             // handshake seq.
-            let reassembled_handshake_message = deframer.message(span, &encoded_fragments);
-            check_reassembled_message(&first_record, &reassembled_handshake_message);
+            let reassembled_handshake_message = deframer.message(span, &encoded_records);
+            check_reassembled_message(record_idx, &first_record, &reassembled_handshake_message);
 
             saw_first_message = true;
 
             let span = deframer.complete_span().unwrap();
-            let reassembled_handshake_message = deframer.message(span, &encoded_fragments);
-            check_reassembled_message(&second_record, &reassembled_handshake_message);
+            let reassembled_handshake_message = deframer.message(span, &encoded_records);
+            check_reassembled_message(record_idx, &second_record, &reassembled_handshake_message);
         }
     }
 
@@ -375,7 +381,7 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2() {
     message_fragmenter
         .set_max_fragment_size(Some(48))
         .unwrap();
-    let fragments: Vec<_> = message_fragmenter
+    let records: Vec<_> = message_fragmenter
         .fragment_dtls_handshake_message(
             EpochAndSequence::new(5, 222),
             HandshakeType::ClientHello,
@@ -389,19 +395,19 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2() {
             &second_record.payload.bytes(),
         ))
         .collect();
-    assert_eq!(fragments.len(), 8);
+    assert_eq!(records.len(), 8);
 
     // Interleave the fragments of the two handshake messages to simulate UDP messages arriving out
     // of order. We receive all fragments of the first message at index 5, so the deframer should
     // yield that message then, but the second message has to wait until all 8 fragments arrive.
-    let mut encoded_fragments = Vec::new();
+    let mut encoded_records = Vec::new();
     for index in [4, 2, 7, 3, 1, 0, 6, 5] {
-        encoded_fragments.extend_from_slice(
+        encoded_records.extend_from_slice(
             EncodedMessage {
-                typ: fragments[index].typ,
-                version: fragments[index].version,
-                epoch_and_sequence: fragments[index].epoch_and_sequence,
-                payload: fragments[index]
+                typ: records[index].typ,
+                version: records[index].version,
+                epoch_and_sequence: records[index].epoch_and_sequence,
+                payload: records[index]
                     .payload
                     .get_encoding()
                     .as_slice()
@@ -418,9 +424,9 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2() {
     // Deframe records and feed messages into the deframer to be coalesced.
     let mut saw_first_message = false;
     let mut saw_second_message = false;
-    for _ in 0..fragments.len() {
+    for record_idx in 0..records.len() {
         let Deframed { message, bounds } = deframer
-            .deframe(&mut encoded_fragments)
+            .deframe(&mut encoded_records)
             .unwrap()
             .unwrap();
 
@@ -431,15 +437,23 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2() {
         deframer
             .input_message_dtls(message, bounds)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_fragments);
+        deframer.coalesce_dtls(&mut encoded_records);
 
         if let Some(span) = deframer.complete_span() {
-            let reassembled_handshake_message = deframer.message(span, &encoded_fragments);
+            let reassembled_handshake_message = deframer.message(span, &encoded_records);
             if !saw_first_message {
-                check_reassembled_message(&first_record, &reassembled_handshake_message);
+                check_reassembled_message(
+                    record_idx,
+                    &first_record,
+                    &reassembled_handshake_message,
+                );
                 saw_first_message = true;
             } else {
-                check_reassembled_message(&second_record, &reassembled_handshake_message);
+                check_reassembled_message(
+                    record_idx,
+                    &second_record,
+                    &reassembled_handshake_message,
+                );
                 saw_second_message = true;
             }
         }
@@ -447,6 +461,141 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2() {
 
     assert!(saw_first_message);
     assert!(saw_second_message);
+}
+
+#[test]
+fn single_record_multiple_handshake_messages() {
+    // "Note that as with TLS, multiple handshake messages may be placed in the same DTLS record,
+    // provided that there is room and that they are part of the same flight."
+    // https://datatracker.ietf.org/doc/html/rfc9147#section-5.5-5
+    // Message lengths are chosen so that the first occupies the entire first record and part of
+    // the second, and the second occupies part of the second record and part of the third, and then
+    // the third message occupies the remainder of the third record.
+    // Where r indicates 13 bytes of record header, h indicates 12 bytes of handshake header and
+    // H[x] indicates x bytes of handshake payload, we will get records:
+    //
+    // rhH[32]      <-- first 32 bytes of first message
+    // rhH[4]hH[16] <-- last 4 bytes of first message plus first 16 bytes of second message
+    // rhH[16]hH[4] <-- last 16 bytes of second message plus 14 bytes of third message
+    let messages = [vec![6u8; 36], vec![7; 32], vec![8; 4]];
+    let message_flight: Vec<_> = messages
+        .iter()
+        .map(|m| HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone()))))
+        .collect();
+
+    let mut fragmenter = MessageFragmenter::default();
+    fragmenter
+        .set_max_fragment_size(Some(32 + DTLS_HEADER_SIZE + DTLS_HANDSHAKE_HEADER_SIZE))
+        .unwrap();
+
+    let records = fragmenter.fragment_dtls_handshake_message_flight(
+        EpochAndSequence::new(11, 255),
+        17,
+        &message_flight,
+    );
+    assert_eq!(records.len(), 3);
+
+    let mut encoded_records = Vec::new();
+
+    for record in &records {
+        encoded_records.extend_from_slice(
+            EncodedMessage {
+                typ: record.typ,
+                version: record.version,
+                epoch_and_sequence: record.epoch_and_sequence,
+                payload: record
+                    .payload
+                    .get_encoding()
+                    .as_slice()
+                    .into(),
+            }
+            .to_unencrypted_opaque()
+            .encode()
+            .as_slice(),
+        );
+    }
+
+    let mut deframer = Deframer::default();
+
+    fn check_reassembled_handshake(
+        idx: usize,
+        original_message: &[u8],
+        reassembled_message: &EncodedMessage<&[u8]>,
+    ) {
+        assert_eq!(
+            reassembled_message.typ,
+            ContentType::Handshake,
+            "idx: {idx}"
+        );
+        assert_eq!(
+            reassembled_message.version,
+            ProtocolVersion::DTLSv1_2,
+            "idx: {idx}"
+        );
+        assert_eq!(reassembled_message.epoch_and_sequence, None, "idx: {idx}");
+        assert_eq!(
+            &reassembled_message.payload[DTLS_HANDSHAKE_HEADER_SIZE..],
+            original_message,
+            "idx: {idx}"
+        );
+    }
+
+    // Deframe records and feed messages into the deframer to be coalesced.
+    for record_idx in 0..records.len() {
+        let Deframed { message, bounds } = deframer
+            .deframe(&mut encoded_records)
+            .unwrap()
+            .unwrap();
+
+        // Simulate in-place decryption
+        let message = message.into_plain_message();
+        let bounds = bounds.start + DTLS_HEADER_SIZE..bounds.end;
+
+        deframer
+            .input_message_dtls(message, bounds)
+            .unwrap();
+        deframer.coalesce_dtls(&mut encoded_records);
+
+        if record_idx == 0 {
+            // First record contains incomplete handshake message
+            assert!(deframer.complete_span().is_none());
+        } else if record_idx == 1 {
+            // Second record contains rest of first message and part of second; one complete span
+            // should be available
+            let message_span = deframer.complete_span().unwrap();
+
+            let reassembled_handshake_message = deframer.message(message_span, &encoded_records);
+            check_reassembled_handshake(
+                record_idx,
+                messages[0].as_slice(),
+                &reassembled_handshake_message,
+            );
+
+            assert!(deframer.complete_span().is_none());
+        } else if record_idx == 2 {
+            // Third record contains rest of second message and entire third message; two complete
+            // spans should be available
+            let message_span = deframer.complete_span().unwrap();
+
+            let reassembled_handshake_message = deframer.message(message_span, &encoded_records);
+            check_reassembled_handshake(
+                record_idx,
+                messages[1].as_slice(),
+                &reassembled_handshake_message,
+            );
+
+            let message_span = deframer.complete_span().unwrap();
+
+            let reassembled_handshake_message = deframer.message(message_span, &encoded_records);
+            check_reassembled_handshake(
+                record_idx,
+                messages[2].as_slice(),
+                &reassembled_handshake_message,
+            );
+        } else {
+            panic!("record_idx > 2");
+        }
+    }
 }
 
 #[test]

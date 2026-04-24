@@ -371,7 +371,7 @@ mod tests {
             .sendable_tls
             .take();
         // Should be a serverhello here?
-        println!("handshake records constructed by server");
+        println!("{} handshake records constructed by server", send.len());
         for (idx, record) in send.iter().into_iter().enumerate() {
             println!("server -> client record #{idx}");
             hex_dump(&record);

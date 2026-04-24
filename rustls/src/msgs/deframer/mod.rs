@@ -6,7 +6,10 @@ use crate::crypto::cipher::{EncodedMessage, InboundOpaque, MessageError};
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage};
 use crate::msgs::codec::{Codec, Reader, U24};
-use crate::msgs::{MessageHeader, read_opaque_message_header};
+#[cfg(feature = "dtls")]
+use crate::msgs::{
+    DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment, MessageHeader, read_opaque_message_header,
+};
 
 mod buffers;
 #[cfg(all(feature = "dtls", test))]
@@ -147,13 +150,13 @@ impl Deframer {
 
     /// Input a DTLS record containing a fragment of a handshake so that fragments can be re-ordered
     /// and re-assembled by [`Self::coalesce_dtls`]. There should not be any trailing bytes on the
-    /// message payload. The values passed in should be computed by [`Self::deframe`].
+    /// message payload.
     ///
-    /// `msg` is a parsed TLS record, which must be a handshake, and whose payload contains the
-    /// handshake header but not the record header.
+    /// `msg` is a parsed TLS record, which may contain one or more handshake messages, each
+    /// starting with a handshake header. `msg` does not contain the record header.
     ///
-    /// `bounds` is the position within the containing buffer of the entire TLS record (i.e.,
-    /// includes both TLS record and handshake headers).
+    /// `bounds` is the position within the containing buffer of the record payload. That is, it
+    /// begins at the start of the first handshake header.
     #[cfg(feature = "dtls")]
     pub(crate) fn input_message_dtls(
         &mut self,
@@ -163,35 +166,30 @@ impl Deframer {
         debug_assert_eq!(msg.typ, ContentType::Handshake);
         debug_assert!(msg.version.is_datagram_tls());
 
-        // In DTLS, each record contains a single handshake fragment, meaning we don't need anything
-        // like DissectHandshakeIter to look for multiple fragments.
-        // If there is not enough data for the handshake header, then we have a short
-        // read.
-        let (handshake_header, rest) = msg
-            .payload
-            .split_at_checked(msg.version.handshake_header_size())
-            .ok_or_else(|| Error::InvalidMessage(InvalidMessage::MessageTooShort))?;
-
-        // Unwrap safety: each byte slice is exactly the right size for the type being decoded
-        // and so cannot fail.
-        let handshake_msg_size = U24::read_bytes(&handshake_header[1..4])
-            .unwrap()
-            .into();
-        let message_seq = u16::read_bytes(&handshake_header[4..6]).unwrap();
-        let fragment_offset = U24::read_bytes(&handshake_header[6..9]).unwrap();
-        let fragment_length = U24::read_bytes(&handshake_header[9..12]).unwrap();
-
-        if rest.len() != fragment_length.into() {
-            // Payload contains trailing bytes not part of this record.
-            return Err(Error::InvalidMessage(InvalidMessage::MessageTooLarge));
+        // Using DissectHandshakeIter wouldn't be appropriate here because parsing DTLS handshake
+        // fragments is fallible: if there isn't enough room for a handshake fragment header, we
+        // have a short read.
+        let mut bound_start = bounds.start;
+        let mut reader = Reader::new(msg.payload);
+        while reader.any_left() {
+            let handshake_fragment = DtlsHandshakeFragment::read(&mut reader)?;
+            let fragment_len =
+                DTLS_HANDSHAKE_HEADER_SIZE + handshake_fragment.fragment_length.0 as usize;
+            self.spans.push_back(FragmentSpan {
+                version: msg.version,
+                size: Some(handshake_fragment.length.into()),
+                bounds: bound_start..bound_start + fragment_len,
+                dtls_fragment_fields: Some((
+                    handshake_fragment.message_seq,
+                    handshake_fragment.fragment_offset,
+                    handshake_fragment.fragment_length,
+                )),
+            });
+            bound_start += fragment_len;
+            if bound_start > bounds.end {
+                return Err(Error::InvalidMessage(InvalidMessage::MessageTooLarge));
+            }
         }
-
-        self.spans.push_back(FragmentSpan {
-            version: msg.version,
-            size: Some(handshake_msg_size),
-            bounds,
-            dtls_fragment_fields: Some((message_seq, fragment_offset, fragment_length)),
-        });
 
         Ok(())
     }
@@ -415,6 +413,8 @@ impl Deframer {
             // we'll have what appears to be a single TLS record containing the entire handshake
             // message.
             if is_first_fragment {
+                // TODO(timg): this won't work, because first fragment is not always preceded by
+                // record header, if >1 handshake message is packed into a single record
                 copy_bounds.start -= self.spans[index]
                     .version
                     .record_header_size();

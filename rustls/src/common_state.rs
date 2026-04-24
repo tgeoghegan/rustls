@@ -390,6 +390,8 @@ impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
     }
 
     pub(crate) fn finish(self, output: &mut dyn Output<'_>) {
+        std::println!("flight body: {} {:?}", self.body.len(), self.body);
+
         let m = Message {
             version: match (TLS13, DTLS) {
                 (true, true) => ProtocolVersion::DTLSv1_3,
@@ -400,6 +402,7 @@ impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
             payload: MessagePayload::HandshakeFlight(Payload::new(self.body)),
         };
 
+        std::println!("sending a message flight");
         output.send_msg(m, TLS13);
     }
 }

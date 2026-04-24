@@ -278,11 +278,13 @@ impl SendPath {
     }
 
     fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        std::println!("sending message");
         match (self.protocol, &m.payload) {
             // DTLS handshake messages can be fragmented into multiple records which contain
             // information necessary for reassembly.
             #[cfg(feature = "dtls")]
             (Protocol::Udp, MessagePayload::Handshake { parsed, encoded }) => {
+                std::println!("fragmenting a handshake {parsed:?}");
                 for m in self
                     .message_fragmenter
                     .fragment_dtls_handshake_message(
@@ -291,6 +293,32 @@ impl SendPath {
                         parsed.0.handshake_type(),
                         self.handshake_sequence_number,
                         encoded.bytes(),
+                    )
+                {
+                    self.send_fragment(
+                        EncodedMessage {
+                            typ: m.typ,
+                            version: m.version,
+                            epoch_and_sequence: m.epoch_and_sequence,
+                            payload: m
+                                .payload
+                                .get_encoding()
+                                .as_slice()
+                                .into(),
+                        },
+                        must_encrypt,
+                    );
+                }
+            }
+            #[cfg(feature = "dtls")]
+            (Protocol::Udp, MessagePayload::HandshakeFlight(_)) => {
+                for m in self
+                    .message_fragmenter
+                    .fragment_dtls_handshake_message_flight(
+                        self.dtls_epoch_and_sequence()
+                            .expect("epoch and sequence should be set for DTLS"),
+                        self.handshake_sequence_number,
+                        handshake_messages,
                     )
                 {
                     self.send_fragment(
