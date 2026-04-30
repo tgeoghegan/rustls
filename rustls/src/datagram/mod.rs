@@ -182,6 +182,7 @@ impl UdpSocketLike for UdpSocket {
 
 #[cfg(test)]
 mod tests {
+    use core::hash::Hasher;
     use std::fmt::Display;
     use std::io::Read;
     use std::sync::Arc;
@@ -189,14 +190,15 @@ mod tests {
     use std::{print, println, vec};
 
     use crate::RootCertStore;
+    use crate::client::danger::{ServerIdentity, SignatureVerificationInput};
     use crate::client::hs::ClientState;
-    use crate::crypto::{Identity, TEST_PROVIDER};
+    use crate::crypto::{Identity, SignatureScheme, TEST_PROVIDER};
     use crate::msgs::{VecInput, hex};
     use crate::server::hs::ServerState;
+    use crate::verify::{HandshakeSignatureValid, PeerVerified, ServerVerifier};
 
     use pki_types::pem::PemObject;
     use pki_types::{CertificateDer, PrivateKeyDer};
-    use rustls_test::KeyType;
 
     use super::*;
 
@@ -258,6 +260,49 @@ mod tests {
         )
     }
 
+    #[derive(Debug, Clone)]
+    struct AcceptsEverythingServerVerifier {}
+
+    impl ServerVerifier for AcceptsEverythingServerVerifier {
+        fn verify_identity(
+            &self,
+            identity: &ServerIdentity<'_>,
+        ) -> Result<PeerVerified, crate::Error> {
+            Ok(PeerVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            input: &SignatureVerificationInput<'_>,
+        ) -> Result<HandshakeSignatureValid, crate::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            input: &SignatureVerificationInput<'_>,
+        ) -> Result<HandshakeSignatureValid, crate::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            Vec::from([
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::ED25519,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::ECDSA_NISTP384_SHA384,
+                SignatureScheme::ECDSA_NISTP521_SHA512,
+            ])
+        }
+
+        fn request_ocsp_response(&self) -> bool {
+            false
+        }
+
+        fn hash_config(&self, h: &mut dyn Hasher) {}
+    }
+
     #[test]
     fn client() {
         let root_store = RootCertStore {
@@ -265,7 +310,8 @@ mod tests {
         };
 
         let client_config = ClientConfig::builder(Arc::new(TEST_PROVIDER.clone()))
-            .with_root_certificates(root_store)
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptsEverythingServerVerifier {}))
             .with_no_client_auth()
             .unwrap();
 

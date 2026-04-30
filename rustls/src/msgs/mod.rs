@@ -455,7 +455,9 @@ impl<'a> HandshakeMessagePayload<'a> {
                     HandshakePayload::ServerHello(shp)
                 }
             }
-            HandshakeType::Certificate if vers == ProtocolVersion::TLSv1_3 => {
+            HandshakeType::Certificate
+                if vers == ProtocolVersion::TLSv1_3 || vers == ProtocolVersion::DTLSv1_3 =>
+            {
                 let p = CertificatePayloadTls13::read(&mut sub)?;
                 HandshakePayload::CertificateTls13(p)
             }

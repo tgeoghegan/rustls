@@ -2572,7 +2572,6 @@ dependencies = [
  "once_cell",
  "rcgen",
  "rustls-pki-types",
- "rustls-test",
  "rustls-webpki 0.104.0-alpha.5",
  "subtle",
  "time",
