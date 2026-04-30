@@ -10,7 +10,7 @@ use crate::conn::{Exporter, ReceivePath, SendOutput, SendPath};
 use crate::crypto::Identity;
 use crate::crypto::cipher::Payload;
 use crate::crypto::kx::SupportedKxGroup;
-use crate::enums::{ApplicationProtocol, ProtocolVersion};
+use crate::enums::{ApplicationProtocol, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
 use crate::hash_hs::HandshakeHash;
 use crate::msgs::{
@@ -351,13 +351,16 @@ pub(crate) enum Protocol {
     /// QUIC, standardized in RFC9001
     Quic(quic::Version),
     /// Datagram TLS, standardized in RFC6347 (1.2) and RFC9147 (1.3)
-    #[cfg(feature = "dtls")]
     Udp,
 }
 
 impl Protocol {
     pub(crate) fn is_quic(&self) -> bool {
         matches!(self, Self::Quic(_))
+    }
+
+    pub(crate) fn is_dtls(&self) -> bool {
+        matches!(self, Self::Udp)
     }
 
     pub(crate) fn wire_protocol_version(&self) -> ProtocolVersion {
@@ -371,27 +374,27 @@ impl Protocol {
 
 pub(crate) struct HandshakeFlight<'a, const TLS13: bool, const DTLS: bool> {
     pub(crate) transcript: &'a mut HandshakeHash,
-    body: Vec<u8>,
+    /// The handshake type and encoded payload of each handshake message in the
+    /// flight.
+    handshake_messages: Vec<(HandshakeType, Vec<u8>)>,
 }
 
 impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
     pub(crate) fn new(transcript: &'a mut HandshakeHash) -> Self {
         Self {
             transcript,
-            body: Vec::new(),
+            handshake_messages: Vec::new(),
         }
     }
 
     pub(crate) fn add(&mut self, hs: HandshakeMessagePayload<'_>) {
-        let start_len = self.body.len();
-        hs.encode(&mut self.body);
-        self.transcript
-            .add(&self.body[start_len..]);
+        let encoded = hs.get_encoding();
+        self.transcript.add(&encoded);
+        self.handshake_messages
+            .push((hs.0.handshake_type(), encoded));
     }
 
     pub(crate) fn finish(self, output: &mut dyn Output<'_>) {
-        std::println!("flight body: {} {:?}", self.body.len(), self.body);
-
         let m = Message {
             version: match (TLS13, DTLS) {
                 (true, true) => ProtocolVersion::DTLSv1_3,
@@ -399,10 +402,9 @@ impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
                 (false, true) => ProtocolVersion::DTLSv1_2,
                 (false, false) => ProtocolVersion::TLSv1_2,
             },
-            payload: MessagePayload::HandshakeFlight(Payload::new(self.body)),
+            payload: MessagePayload::HandshakeFlight(self.handshake_messages),
         };
 
-        std::println!("sending a message flight");
         output.send_msg(m, TLS13);
     }
 }

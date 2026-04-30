@@ -148,12 +148,12 @@ impl Deframer {
         }
     }
 
-    /// Input a DTLS record containing a fragment of a handshake so that fragments can be re-ordered
-    /// and re-assembled by [`Self::coalesce_dtls`]. There should not be any trailing bytes on the
-    /// message payload.
+    /// Input a DTLS record containing one or more handshake fragments so that they can be
+    /// re-ordered and re-assembled by [`Self::coalesce_dtls`]. There should not be any trailing
+    /// bytes on the message payload.
     ///
     /// `msg` is a parsed TLS record, which may contain one or more handshake messages, each
-    /// starting with a handshake header. `msg` does not contain the record header.
+    /// starting with a handshake header.
     ///
     /// `bounds` is the position within the containing buffer of the record payload. That is, it
     /// begins at the start of the first handshake header.
@@ -312,9 +312,9 @@ impl Deframer {
     /// messages.
     ///
     /// `containing_buffer` is understood to contain some number of DTLS records containing
-    /// handshake messages (i.e., record header, handshake header and payload). Before calling this
-    /// function, each of those records must have been parsed by [`Self::deframe`] and then input
-    /// into this deframer with [`Self::input_message_dtls`].
+    /// handshake messages, i.e., a record header, then one or more handshake headers and payloads.
+    /// Before calling this function, each of those records must have been parsed by
+    /// [`Self::deframe`] and then input into this deframer with [`Self::input_message_dtls`].
     ///
     /// If `containing_buffer` contains all the fragments of a handshake message, then on return,
     /// the buffer will contain the coalesced (reassembled) handshake message, followed by any
@@ -324,14 +324,18 @@ impl Deframer {
     /// return, the buffer will contain coalesced handshake messages, ordered by the handshake
     /// sequence number, not to be confused with the sequence number at the DTLS record layer.
     ///
-    /// Coalesced handshake messages consist of the record and handshake headers of the first
-    /// fragment, concatenated with just the handshake payloads of subsequent fragments. Coalesced
-    /// messages include `DTLSHandshake.{message_seq, fragment_offset, fragment_length}` values but
-    /// these are no longer meaningful since the message is coalesced. See [1], [2] for details of
-    /// the `DTLSHandshake` message.
+    /// Coalesced handshake messages consist of the handshake header of the first fragment,
+    /// concatenated with just the handshake payloads of subsequent fragments. Coalesced messages
+    /// include `DTLSHandshake.{message_seq, fragment_offset, fragment_length}` values but these are
+    /// no longer meaningful since the message is coalesced. See [1], [2] for details of the
+    /// `DTLSHandshake` structure.
     ///
     /// After calling this method, callers should call [`Self::complete_span`] to find out the
-    /// position of any coalesced handshake messages, and then [`Self::message`] to obtain it.
+    /// position of the next coalesced handshake message, if any, and then [`Self::message`] to
+    /// obtain it.
+    ///
+    /// More fragments may then be added into the deframer by calling [`Self::deframe`] and
+    /// [`Self::input_message_dtls`] again.
     ///
     /// [1]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.2.2
     /// [2]: https://datatracker.ietf.org/doc/html/rfc9147#section-5.2
@@ -360,12 +364,12 @@ impl Deframer {
 
         // Which handshake message are we reassembling into?
         let mut first_fragment_index = 0;
-        // How much of the current handshake message have we reassembled (excluding record and
-        // handshake headers)?
+        // How much of the current handshake message have we reassembled (excluding handshake
+        // headers)?
         let mut current_message_len = 0;
         // How many bytes of handshake message have we reassembled, total, including the first
-        // fragment's record and handshake header but excluding both headers from subsequent
-        // messages? Equivalentlty, what position of containing_buffer are we copying into?
+        // fragment's handshake header but excluding any headers from subsequent messages?
+        // Equivalentlty, what position of containing_buffer are we copying into?
         let mut reassembled_len = 0;
 
         // We can't idiomatically iterate over self.spans because we need to mutably borrow elements
@@ -387,14 +391,11 @@ impl Deframer {
                 .dtls_fragment_fields
                 .unwrap();
 
-            let is_first_fragment = if index == 0 || current_seq > coalesce_into_seq {
+            let is_first_fragment = index == 0 || current_seq > coalesce_into_seq;
+            if is_first_fragment {
                 first_fragment_index = index;
                 current_message_len = 0;
-
-                true
-            } else {
-                false
-            };
+            }
 
             if current_fragment_offset > current_message_len {
                 // We are still missing some fragments and can't yet reassemble this handshake.
@@ -406,19 +407,10 @@ impl Deframer {
             let mut copy_bounds = self.spans[index].bounds.clone();
 
             // Each span's bounds include only the handshake header and the handshake message
-            // fragment. But immediately before each unreassembled fragment in containing_buffer is
-            // the record header.
-            // We retain the record and handshake headers for the first fragment of each handshake
-            // message, but skip them for subsequent fragments. As a result, after decoalescing,
-            // we'll have what appears to be a single TLS record containing the entire handshake
-            // message.
-            if is_first_fragment {
-                // TODO(timg): this won't work, because first fragment is not always preceded by
-                // record header, if >1 handshake message is packed into a single record
-                copy_bounds.start -= self.spans[index]
-                    .version
-                    .record_header_size();
-            } else {
+            // fragment. We retain the handshake header for the first fragment of each handshake
+            // message, but skip it for subsequent fragments. As a result, after decoalescing,
+            // we'll have what appears to be a single handshake message.
+            if !is_first_fragment {
                 copy_bounds.start += self.spans[index]
                     .version
                     .handshake_header_size();
@@ -448,13 +440,10 @@ impl Deframer {
             // Copy the fragment we want into scratch.
             scratch[0..copy_bounds.len()].copy_from_slice(&containing_buffer[copy_bounds.clone()]);
 
-            // If there is any portion of containing_buffer between first_fragment and the fragment
-            // we are copying, shift that portion to the right to make room.
-            // This is where the _record_ for the current fragment starts, not the _handshake_
-            let curr_fragment_start = self.spans[index].bounds.start
-                - self.spans[index]
-                    .version
-                    .record_header_size();
+            // If there is any portion of containing_buffer between the fragment we coalesce into
+            // and the fragment we are copying, shift that portion to the right to make room. The
+            // span might be preceded by a record header, but we don't need to preserve it.
+            let curr_fragment_start = self.spans[index].bounds.start;
             if curr_fragment_start > reassembled_len {
                 let shifted_range = reassembled_len..curr_fragment_start;
                 let dest = reassembled_len + copy_bounds.len();
@@ -478,11 +467,7 @@ impl Deframer {
 
             if is_first_fragment {
                 // We may have copied the first fragment to a new position, so fix up its bounds
-                self.spans[index].bounds.start = destination_bounds.start
-                    + self.spans[index]
-                        .version
-                        .record_header_size();
-                self.spans[index].bounds.end = destination_bounds.end;
+                self.spans[index].bounds = destination_bounds;
             }
 
             reassembled_len += copy_bounds.len();

@@ -14,7 +14,7 @@ use crate::msgs::HEADER_SIZE;
 #[cfg(feature = "dtls")]
 use crate::msgs::{
     Codec, DTLS_HANDSHAKE_HEADER_SIZE, DTLS_HEADER_SIZE, DtlsHandshakeFragment, EpochAndSequence,
-    HandshakeMessagePayload, U24,
+    U24,
 };
 
 pub(crate) const MAX_FRAGMENT_LEN: usize = 16384;
@@ -51,8 +51,6 @@ impl MessageFragmenter {
 
     /// Take a DTLS handshake message and fragment it into multiple unencrypted outbound messages,
     /// each consisting of a DTLSPlaintext ([1]). Other DTLS messages may not be fragmented.
-    ///
-    /// TODO(timg): handshake flights?
     ///
     /// [1]: https://datatracker.ietf.org/doc/html/rfc9147#appendix-A.1
     #[cfg(feature = "dtls")]
@@ -117,8 +115,8 @@ impl MessageFragmenter {
         &self,
         mut epoch_and_sequence: EpochAndSequence,
         mut handshake_sequence_number: u16,
-        handshake_messages: &'a [HandshakeMessagePayload<'_>],
-    ) -> Vec<EncodedMessage<Payload<'_>>> {
+        handshake_messages: &'a [(HandshakeType, Vec<u8>)],
+    ) -> Vec<EncodedMessage<Payload<'a>>> {
         let mut records = Vec::new();
         // The current record we are packing with the handshake flight. Does not include record
         // header.
@@ -136,9 +134,7 @@ impl MessageFragmenter {
             epoch_and_sequence = epoch_and_sequence.add_sequence_increment(1);
         };
 
-        for (idx, handshake_message) in handshake_messages.iter().enumerate() {
-            let handshake_payload = handshake_message.get_encoding();
-
+        for (idx, (handshake_type, handshake_payload)) in handshake_messages.iter().enumerate() {
             // handshake_payload will have been encoded as a TLS handshake message, so we discard the
             // front 4 bytes (1 byte of handshake type plus 3 bytes of length) so that we can re-encode
             // as a DTLS handshake fragment.
@@ -161,9 +157,7 @@ impl MessageFragmenter {
                 );
 
                 let fragment = DtlsHandshakeFragment {
-                    msg_type: handshake_message
-                        .0
-                        .wire_handshake_type(),
+                    msg_type: *handshake_type,
                     length,
                     message_seq: handshake_sequence_number,
                     fragment_offset: U24(fragment_offset.try_into().unwrap()),
@@ -535,7 +529,13 @@ mod tests {
         let messages = [vec![6u8; 32], vec![7; 32], vec![8; 16]];
         let message_flight: Vec<_> = messages
             .iter()
-            .map(|m| HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone()))))
+            .map(|m| {
+                (
+                    HandshakeType::Finished,
+                    HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone())))
+                        .get_encoding(),
+                )
+            })
             .collect();
 
         let mut fragmenter = MessageFragmenter::default();
@@ -594,7 +594,13 @@ mod tests {
         let messages = [vec![6u8; 36], vec![7; 32]];
         let message_flight: Vec<_> = messages
             .iter()
-            .map(|m| HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone()))))
+            .map(|m| {
+                (
+                    HandshakeType::Finished,
+                    HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone())))
+                        .get_encoding(),
+                )
+            })
             .collect();
 
         let mut fragmenter = MessageFragmenter::default();
@@ -696,10 +702,15 @@ mod tests {
             28 + DTLS_HANDSHAKE_HEADER_SIZE,
             4 + DTLS_HANDSHAKE_HEADER_SIZE + 16 + DTLS_HANDSHAKE_HEADER_SIZE,
         ];
-
         let message_flight: Vec<_> = messages
             .iter()
-            .map(|m| HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone()))))
+            .map(|m| {
+                (
+                    HandshakeType::Finished,
+                    HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone())))
+                        .get_encoding(),
+                )
+            })
             .collect();
 
         let mut fragmenter = MessageFragmenter::default();

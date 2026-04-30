@@ -228,7 +228,6 @@ impl Codec<'_> for SingleProtocolName {
     }
 
     fn read(reader: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
-        std::println!("decoding a SingleProtocolName");
         let len = Self::SIZE_LEN.read(reader)?;
         let mut sub = reader.sub(len)?;
 

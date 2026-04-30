@@ -298,7 +298,6 @@ impl ReceivePath {
                 _ => {
                     self.deframer
                         .input_message(message, bounds);
-
                     self.deframer.coalesce(buffer)?
                 }
             }

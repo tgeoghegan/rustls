@@ -34,7 +34,11 @@ impl HandshakeHashBuffer {
     pub(crate) fn add_message(&mut self, m: &Message<'_>) {
         match &m.payload {
             MessagePayload::Handshake { encoded, .. } => self.add_raw(encoded.bytes()),
-            MessagePayload::HandshakeFlight(payload) => self.add_raw(payload.bytes()),
+            MessagePayload::HandshakeFlight(encoded) => {
+                for (_, encoded) in encoded {
+                    self.add_raw(encoded)
+                }
+            }
             _ => {}
         };
     }
@@ -97,7 +101,13 @@ impl HandshakeHash {
     pub(crate) fn add_message(&mut self, m: &Message<'_>) -> &mut Self {
         match &m.payload {
             MessagePayload::Handshake { encoded, .. } => self.add_raw(encoded.bytes()),
-            MessagePayload::HandshakeFlight(payload) => self.add_raw(payload.bytes()),
+            MessagePayload::HandshakeFlight(encoded) => {
+                for (_, encoded) in encoded {
+                    self.add(encoded)
+                }
+
+                self
+            }
             _ => self,
         }
     }
@@ -184,7 +194,7 @@ mod tests {
     use super::*;
     use crate::crypto::cipher::Payload;
     use crate::crypto::test_provider::SHA256;
-    use crate::enums::ProtocolVersion;
+    use crate::enums::{HandshakeType, ProtocolVersion};
     use crate::msgs::{HandshakeMessagePayload, HandshakePayload};
 
     #[test]
@@ -220,7 +230,10 @@ mod tests {
 
         let end_of_early_data_flight = Message {
             version: ProtocolVersion::TLSv1_3,
-            payload: MessagePayload::HandshakeFlight(Payload::Borrowed(b"\x05\x00\x00\x00")),
+            payload: MessagePayload::HandshakeFlight(Vec::from([(
+                HandshakeType::EndOfEarlyData,
+                Vec::from(b"\x05\x00\x00\x00"),
+            )])),
         };
 
         // buffered mode

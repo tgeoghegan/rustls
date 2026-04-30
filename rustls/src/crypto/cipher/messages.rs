@@ -155,7 +155,11 @@ impl<'a> EncodedMessage<InboundOpaque<'a>> {
             return Err(Error::PeerSentOversizedRecord);
         }
 
-        self.version = ProtocolVersion::TLSv1_3;
+        self.version = if self.version.is_datagram_tls() {
+            ProtocolVersion::DTLSv1_3
+        } else {
+            ProtocolVersion::TLSv1_3
+        };
         Ok(self.into_plain_message())
     }
 

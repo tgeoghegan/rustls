@@ -376,7 +376,6 @@ impl MessageEncrypter for Tls13Cipher {
         m: EncodedMessage<OutboundPlain<'_>>,
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
-        std::println!("encrypting using test provider impl of Tls13Cipher");
         let total_len = self.encrypted_payload_len(m.payload.len());
         let mut payload = OutboundOpaque::with_capacity(m.header_size(), total_len);
 
@@ -396,7 +395,7 @@ impl MessageEncrypter for Tls13Cipher {
 
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
-            version: ProtocolVersion::TLSv1_2,
+            version: m.version,
             #[cfg(feature = "dtls")]
             epoch_and_sequence: m.epoch_and_sequence,
             payload,
@@ -416,6 +415,7 @@ impl MessageDecrypter for Tls13Cipher {
     ) -> Result<EncodedMessage<&'a [u8]>, Error> {
         let payload = &mut m.payload;
 
+        std::println!("payload len: {}", payload.len());
         let mut expected_tag = vec![];
         expected_tag.extend_from_slice(&seq.to_be_bytes());
         expected_tag.extend_from_slice(AEAD_TAG);

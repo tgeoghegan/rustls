@@ -193,7 +193,7 @@ mod client_hello {
                     output,
                     kx_group.name(),
                 );
-                if !st.protocol.is_quic() {
+                if !st.protocol.is_quic() && !st.protocol.is_dtls() {
                     emit_fake_ccs(output);
                 }
 
@@ -264,7 +264,7 @@ mod client_hello {
                 &input.proof,
                 &st.config,
             )?;
-            if !st.done_retry && !st.protocol.is_quic() {
+            if !st.done_retry && !st.protocol.is_quic() && !st.protocol.is_dtls() {
                 emit_fake_ccs(output);
             }
 
@@ -404,7 +404,6 @@ mod client_hello {
                 })
                 .into())
             } else {
-                std::println!("server going to ExpectFinished");
                 Ok(Box::new(ExpectFinished {
                     hs,
                     key_schedule: key_schedule_traffic,

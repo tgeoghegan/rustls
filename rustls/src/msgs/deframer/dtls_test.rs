@@ -463,8 +463,114 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2() {
     assert!(saw_second_message);
 }
 
+fn check_reassembled_handshake(
+    record_idx: usize,
+    original_message: &[u8],
+    reassembled_message: &EncodedMessage<&[u8]>,
+) {
+    assert_eq!(
+        reassembled_message.typ,
+        ContentType::Handshake,
+        "record_idx: {record_idx}",
+    );
+    assert_eq!(
+        reassembled_message.version,
+        ProtocolVersion::DTLSv1_2,
+        "record_idx: {record_idx}",
+    );
+    assert_eq!(
+        reassembled_message.epoch_and_sequence, None,
+        "record_idx: {record_idx}",
+    );
+    assert_eq!(
+        &reassembled_message.payload[DTLS_HANDSHAKE_HEADER_SIZE..],
+        original_message,
+        "record_idx: {record_idx}",
+    );
+}
+
 #[test]
 fn single_record_multiple_handshake_messages() {
+    // "Note that as with TLS, multiple handshake messages may be placed in the same DTLS record,
+    // provided that there is room and that they are part of the same flight."
+    // https://datatracker.ietf.org/doc/html/rfc9147#section-5.5-5
+    // Message lengths and fragment size are chosen so that multiple complete handshake messages get
+    // packed into a singel record.
+    // Where r indicates 13 bytes of record header, h indicates 12 bytes of handshake header and
+    // H[x] indicates x bytes of handshake payload, we will get a record:
+    //
+    // rhH[36]hH[32]hH[4]
+    let messages = [vec![6u8; 36], vec![7; 32], vec![8; 4]];
+    let message_flight: Vec<_> = messages
+        .iter()
+        .map(|m| {
+            (
+                HandshakeType::Finished,
+                HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone())))
+                    .get_encoding(),
+            )
+        })
+        .collect();
+
+    let mut fragmenter = MessageFragmenter::default();
+    fragmenter
+        .set_max_fragment_size(Some(
+            36 + 32 + 4 + DTLS_HEADER_SIZE + 3 * DTLS_HANDSHAKE_HEADER_SIZE,
+        ))
+        .unwrap();
+
+    let records = fragmenter.fragment_dtls_handshake_message_flight(
+        EpochAndSequence::new(11, 255),
+        17,
+        &message_flight,
+    );
+    assert_eq!(records.len(), 1);
+
+    let mut encoded_record = EncodedMessage {
+        typ: records[0].typ,
+        version: records[0].version,
+        epoch_and_sequence: records[0].epoch_and_sequence,
+        payload: records[0]
+            .payload
+            .get_encoding()
+            .as_slice()
+            .into(),
+    }
+    .to_unencrypted_opaque()
+    .encode();
+
+    let mut deframer = Deframer::default();
+
+    // Deframe the record and feed it into the deframer to be coalesced.
+    let Deframed { message, bounds } = deframer
+        .deframe(&mut encoded_record)
+        .unwrap()
+        .unwrap();
+
+    // Simulate in-place decryption
+    let message = message.into_plain_message();
+    let bounds = bounds.start + DTLS_HEADER_SIZE..bounds.end;
+
+    deframer
+        .input_message_dtls(message, bounds)
+        .unwrap();
+    deframer.coalesce_dtls(&mut encoded_record);
+
+    // The first and only record contains three complete handshake messages which should now be
+    // available.
+    for message in messages {
+        let message_span = deframer.complete_span().unwrap();
+
+        let reassembled_handshake_message = deframer.message(message_span, &encoded_record);
+        check_reassembled_handshake(1, message.as_slice(), &reassembled_handshake_message);
+    }
+
+    // No more messages
+    assert!(deframer.complete_span().is_none());
+}
+
+#[test]
+fn handshake_messages_span_records() {
     // "Note that as with TLS, multiple handshake messages may be placed in the same DTLS record,
     // provided that there is room and that they are part of the same flight."
     // https://datatracker.ietf.org/doc/html/rfc9147#section-5.5-5
@@ -480,7 +586,13 @@ fn single_record_multiple_handshake_messages() {
     let messages = [vec![6u8; 36], vec![7; 32], vec![8; 4]];
     let message_flight: Vec<_> = messages
         .iter()
-        .map(|m| HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone()))))
+        .map(|m| {
+            (
+                HandshakeType::Finished,
+                HandshakeMessagePayload(HandshakePayload::Finished(Payload::new(m.clone())))
+                    .get_encoding(),
+            )
+        })
         .collect();
 
     let mut fragmenter = MessageFragmenter::default();
@@ -516,29 +628,6 @@ fn single_record_multiple_handshake_messages() {
     }
 
     let mut deframer = Deframer::default();
-
-    fn check_reassembled_handshake(
-        idx: usize,
-        original_message: &[u8],
-        reassembled_message: &EncodedMessage<&[u8]>,
-    ) {
-        assert_eq!(
-            reassembled_message.typ,
-            ContentType::Handshake,
-            "idx: {idx}"
-        );
-        assert_eq!(
-            reassembled_message.version,
-            ProtocolVersion::DTLSv1_2,
-            "idx: {idx}"
-        );
-        assert_eq!(reassembled_message.epoch_and_sequence, None, "idx: {idx}");
-        assert_eq!(
-            &reassembled_message.payload[DTLS_HANDSHAKE_HEADER_SIZE..],
-            original_message,
-            "idx: {idx}"
-        );
-    }
 
     // Deframe records and feed messages into the deframer to be coalesced.
     for record_idx in 0..records.len() {

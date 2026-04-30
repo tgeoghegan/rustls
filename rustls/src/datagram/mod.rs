@@ -12,9 +12,9 @@ use std::sync::Arc;
 use pki_types::ServerName;
 
 use crate::client::ClientSide;
-use crate::common_state::{Output, Protocol};
-use crate::conn::{ConnectionCommon, ConnectionCore};
-use crate::msgs::{ClientExtensionsInput, Message, ServerExtensionsInput, U48, VecInput};
+use crate::common_state::Protocol;
+use crate::conn::ConnectionCore;
+use crate::msgs::{ClientExtensionsInput, ServerExtensionsInput, U48};
 use crate::server::ServerSide;
 use crate::{ClientConfig, ServerConfig, SideData};
 
@@ -139,7 +139,7 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     /// into EncodedMessage.
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
-    fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+    fn send<B: AsRef<[u8]>>(&mut self, _bytes: B) -> Result<usize, Error> {
         // TODO: this should do something like the TLS side where it checks for pending handshake
         // messages and sends them
         todo!()
@@ -151,7 +151,7 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     /// into EncodedMessage.
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
-    fn recv<B: AsMut<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+    fn recv<B: AsMut<[u8]>>(&mut self, _bytes: B) -> Result<usize, Error> {
         todo!()
     }
 }
@@ -191,7 +191,7 @@ mod tests {
     use crate::RootCertStore;
     use crate::client::hs::ClientState;
     use crate::crypto::{Identity, TEST_PROVIDER};
-    use crate::msgs::hex;
+    use crate::msgs::{VecInput, hex};
     use crate::server::hs::ServerState;
 
     use pki_types::pem::PemObject;
@@ -375,7 +375,9 @@ mod tests {
         for (idx, record) in send.iter().into_iter().enumerate() {
             println!("server -> client record #{idx}");
             hex_dump(&record);
+        }
 
+        for (_idx, record) in send.iter().into_iter().enumerate() {
             let mut vec_input = VecInput::default();
             let read = vec_input
                 .read(&mut &record[..])
