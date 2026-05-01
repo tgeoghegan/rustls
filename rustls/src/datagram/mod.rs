@@ -14,8 +14,10 @@ use pki_types::ServerName;
 use crate::client::ClientSide;
 use crate::common_state::Protocol;
 use crate::conn::ConnectionCore;
+use crate::crypto::cipher::OutboundPlain;
 use crate::msgs::{ClientExtensionsInput, ServerExtensionsInput, U48};
 use crate::server::ServerSide;
+use crate::vecbuf::ChunkVecBuffer;
 use crate::{ClientConfig, ServerConfig, SideData};
 
 /// Errors encountered while sending or receiving data on a `DtlsSocket`.
@@ -139,10 +141,16 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     /// into EncodedMessage.
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
-    fn send<B: AsRef<[u8]>>(&mut self, _bytes: B) -> Result<usize, Error> {
+    fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
         // TODO: this should do something like the TLS side where it checks for pending handshake
         // messages and sends them
-        todo!()
+        // TODO(timg): do something smarter with this buffer
+        let mut chunks = ChunkVecBuffer::new(None);
+        Ok(self
+            .core
+            .common
+            .send
+            .buffer_plaintext(OutboundPlain::new(&[bytes.as_ref()]), &mut chunks))
     }
 
     /// API used by crate clients to receive plaintext bytes.
@@ -152,6 +160,7 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
     fn recv<B: AsMut<[u8]>>(&mut self, _bytes: B) -> Result<usize, Error> {
+        // TODO: this should try to pump the handshake state machine
         todo!()
     }
 }
@@ -416,14 +425,13 @@ mod tests {
             .send
             .sendable_tls
             .take();
-        // Should be a serverhello here?
         println!("{} handshake records constructed by server", send.len());
-        for (idx, record) in send.iter().into_iter().enumerate() {
+        for (idx, record) in send.iter().enumerate() {
             println!("server -> client record #{idx}");
             hex_dump(&record);
         }
 
-        for (_idx, record) in send.iter().into_iter().enumerate() {
+        for (_idx, record) in send.iter().enumerate() {
             let mut vec_input = VecInput::default();
             let read = vec_input
                 .read(&mut &record[..])
@@ -444,19 +452,81 @@ mod tests {
             .unwrap();
         print!("client state ");
         match state {
-            ClientState::ServerHello(_) => println!("ServerHello"),
+            ClientState::ServerHello(_) => panic!("ServerHello"),
             ClientState::ServerHelloOrHelloRetryRequest(_) => {
-                println!("ServerHelloOrHelloRetryRequest")
+                panic!("ServerHelloOrHelloRetryRequest")
             }
             ClientState::Tls12(_) => panic!("Tls12"),
-            ClientState::Tls13(_) => panic!("Tls13"),
+            ClientState::Tls13(_) => println!("Tls13 (probably expecttraffic)"),
         }
 
-        client_socket
+        let send = client_socket
+            .inner
+            .core
+            .common
+            .send
+            .sendable_tls
+            .take();
+        for (idx, record) in send.iter().enumerate() {
+            println!("client -> server record #{idx}");
+            hex_dump(record);
+
+            let mut vec_input = VecInput::default();
+            let read = vec_input
+                .read(&mut &record[..])
+                .unwrap();
+            assert_eq!(read, record.len());
+            server_socket
+                .inner
+                .core
+                .process_new_packets(&mut vec_input, None)
+                .unwrap();
+        }
+
+        print!("server state ");
+        let state = server_socket
+            .inner
+            .core
+            .state
+            .as_ref()
+            .unwrap();
+        match state {
+            ServerState::ReadClientHello(_) => panic!("ReadClientHello"),
+            ServerState::ChooseConfig(_) => panic!("ChooseConfig"),
+            ServerState::ClientHello(_) => panic!("ClientHello"),
+            ServerState::Tls12(_) => panic!("Tls12"),
+            ServerState::Tls13(tls13) => println!("Tls13"),
+        }
+
+        // Server emits a session ticket which we'll give to the client
+        let send = server_socket
+            .inner
+            .core
+            .common
+            .send
+            .sendable_tls
+            .take();
+        println!("{} handshake records constructed by server", send.len());
+        for (idx, record) in send.iter().enumerate() {
+            let mut vec_input = VecInput::default();
+            let read = vec_input
+                .read(&mut &record[..])
+                .unwrap();
+            assert_eq!(read, record.len());
+            client_socket
+                .inner
+                .core
+                .process_new_packets(&mut vec_input, None)
+                .unwrap();
+            println!("client accepted ticket");
+        }
+
+        let sent = client_socket
             .send(b"some bytes here")
             .unwrap();
+        assert_eq!(sent, 15);
 
-        // Not sure what to check on in transport.
+        todo!("server should receive app data and decrypt")
     }
 
     fn hex_dump<B: AsRef<[u8]>>(buf: B) {

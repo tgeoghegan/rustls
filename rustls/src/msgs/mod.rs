@@ -475,7 +475,9 @@ impl<'a> HandshakeMessagePayload<'a> {
             HandshakeType::ClientKeyExchange => {
                 HandshakePayload::ClientKeyExchange(Payload::read(&mut sub))
             }
-            HandshakeType::CertificateRequest if vers == ProtocolVersion::TLSv1_3 => {
+            HandshakeType::CertificateRequest
+                if vers == ProtocolVersion::TLSv1_3 || vers == ProtocolVersion::DTLSv1_3 =>
+            {
                 let p = CertificateRequestPayloadTls13::read(&mut sub)?;
                 HandshakePayload::CertificateRequestTls13(p)
             }
@@ -489,7 +491,9 @@ impl<'a> HandshakeMessagePayload<'a> {
             HandshakeType::CertificateVerify => {
                 HandshakePayload::CertificateVerify(DigitallySignedStruct::read(&mut sub)?)
             }
-            HandshakeType::NewSessionTicket if vers == ProtocolVersion::TLSv1_3 => {
+            HandshakeType::NewSessionTicket
+                if vers == ProtocolVersion::TLSv1_3 || vers == ProtocolVersion::DTLSv1_3 =>
+            {
                 let p = NewSessionTicketPayloadTls13::read(&mut sub)?;
                 HandshakePayload::NewSessionTicketTls13(p)
             }
