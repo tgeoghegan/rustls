@@ -202,7 +202,7 @@ mod tests {
     use crate::client::danger::{ServerIdentity, SignatureVerificationInput};
     use crate::client::hs::ClientState;
     use crate::crypto::{Identity, SignatureScheme, TEST_PROVIDER};
-    use crate::msgs::{VecInput, hex};
+    use crate::msgs::{Delocator, VecInput, hex};
     use crate::server::hs::ServerState;
     use crate::verify::{HandshakeSignatureValid, PeerVerified, ServerVerifier};
 
@@ -521,12 +521,91 @@ mod tests {
             println!("client accepted ticket");
         }
 
-        let sent = client_socket
-            .send(b"some bytes here")
-            .unwrap();
-        assert_eq!(sent, 15);
+        // Handshake is finished. Server and client should have nothing to send.
+        assert!(
+            server_socket
+                .inner
+                .core
+                .common
+                .send
+                .sendable_tls
+                .peek()
+                .is_none()
+        );
+        assert!(
+            client_socket
+                .inner
+                .core
+                .common
+                .send
+                .sendable_tls
+                .peek()
+                .is_none()
+        );
 
-        todo!("server should receive app data and decrypt")
+        println!("sending application data client -> server");
+
+        let client_message = b"client sends application data";
+        let sent = client_socket
+            .send(client_message)
+            .unwrap();
+        assert_eq!(sent, client_message.len());
+
+        let send = client_socket
+            .inner
+            .core
+            .common
+            .send
+            .sendable_tls
+            .take();
+        for (idx, record) in send.iter().enumerate() {
+            println!("client -> server record #{idx}");
+            hex_dump(record);
+
+            let mut vec_input = VecInput::default();
+            let read = vec_input
+                .read(&mut &record[..])
+                .unwrap();
+            assert_eq!(read, record.len());
+            let unborrowed = server_socket
+                .inner
+                .core
+                .process_new_packets(&mut vec_input, None)
+                .unwrap()
+                .unwrap();
+            let payload = unborrowed.reborrow(&Delocator::new(vec_input.filled()));
+
+            assert_eq!(payload.bytes(), client_message);
+        }
+
+        let server_message = b"server sends application data";
+        let sent = server_socket
+            .send(server_message)
+            .unwrap();
+        assert_eq!(sent, server_message.len());
+
+        let send = server_socket
+            .inner
+            .core
+            .common
+            .send
+            .sendable_tls
+            .take();
+        for (idx, record) in send.iter().enumerate() {
+            let mut vec_input = VecInput::default();
+            let read = vec_input
+                .read(&mut &record[..])
+                .unwrap();
+            assert_eq!(read, record.len());
+            let unborrowed = client_socket
+                .inner
+                .core
+                .process_new_packets(&mut vec_input, None)
+                .unwrap()
+                .unwrap();
+            let payload = unborrowed.reborrow(&Delocator::new(vec_input.filled()));
+            assert_eq!(payload.bytes(), server_message);
+        }
     }
 
     fn hex_dump<B: AsRef<[u8]>>(buf: B) {
