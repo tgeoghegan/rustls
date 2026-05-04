@@ -192,9 +192,11 @@ impl UdpSocketLike for UdpSocket {
 #[cfg(test)]
 mod tests {
     use core::hash::Hasher;
+    use std::cmp::min;
+    use std::collections::VecDeque;
     use std::fmt::Display;
     use std::io::Read;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::vec::Vec;
     use std::{print, println, vec};
 
@@ -224,9 +226,29 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct InMemoryBuffers {
-        send: Vec<u8>,
-        receive: Vec<u8>,
+        send: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        receive: Arc<Mutex<VecDeque<Vec<u8>>>>,
         receive_position: usize,
+    }
+
+    impl InMemoryBuffers {
+        fn pair() -> (Self, Self) {
+            let client_receive = Arc::new(Mutex::new(VecDeque::new()));
+            let server_receive = Arc::new(Mutex::new(VecDeque::new()));
+
+            (
+                InMemoryBuffers {
+                    send: server_receive.clone(),
+                    receive: client_receive.clone(),
+                    receive_position: 0,
+                },
+                InMemoryBuffers {
+                    send: client_receive,
+                    receive: server_receive,
+                    receive_position: 0,
+                },
+            )
+        }
     }
 
     impl UdpSocketLike for InMemoryBuffers {
@@ -235,20 +257,41 @@ mod tests {
         fn send<B: AsRef<[u8]>>(&mut self, buf: B) -> Result<usize, Self::Error> {
             let slice = buf.as_ref();
 
-            self.send.extend_from_slice(slice);
+            self.send
+                .lock()
+                .unwrap()
+                .push_back(slice.to_vec());
 
             Ok(slice.len())
         }
 
         fn recv<B: AsMut<[u8]>>(&mut self, mut buf: B) -> Result<usize, Self::Error> {
-            let mut slice = buf.as_mut();
+            let mut read_into = buf.as_mut();
 
-            let remaining_receive_bytes = self.receive.len() - self.receive_position;
+            let mut receive_queue = self.receive.lock().unwrap();
 
-            slice[..remaining_receive_bytes]
-                .copy_from_slice(&self.receive[self.receive_position..remaining_receive_bytes]);
+            if let Some(received) = receive_queue.pop_front() {
+                let remaining_receive_bytes = received.len() - self.receive_position;
+                let bytes_read = min(remaining_receive_bytes, read_into.len());
 
-            Ok(remaining_receive_bytes)
+                read_into[..bytes_read].copy_from_slice(
+                    &received[self.receive_position..self.receive_position + bytes_read],
+                );
+
+                self.receive_position += bytes_read;
+
+                if self.receive_position == received.len() {
+                    self.receive_position = 0;
+                } else {
+                    // Put buffer back in receive queue for later read
+                    receive_queue.push_front(received);
+                }
+
+                Ok(bytes_read)
+            } else {
+                // No buffers in queue
+                return Ok(0);
+            }
         }
     }
 
@@ -313,7 +356,51 @@ mod tests {
     }
 
     #[test]
-    fn client() {
+    fn in_memory_buffer() {
+        let (mut client, mut server) = InMemoryBuffers::pair();
+
+        assert_eq!(
+            client
+                .send("hello from client")
+                .unwrap(),
+            17
+        );
+
+        let mut buf = [0u8; 1024];
+        assert_eq!(server.recv(&mut buf).unwrap(), 17);
+        assert_eq!(&buf[..17], b"hello from client");
+        assert_eq!(server.recv(&mut buf).unwrap(), 0);
+
+        assert_eq!(
+            server
+                .send("hello back from server")
+                .unwrap(),
+            22
+        );
+
+        assert_eq!(client.recv(&mut buf).unwrap(), 22);
+        assert_eq!(&buf[..22], b"hello back from server");
+        assert_eq!(client.recv(&mut buf).unwrap(), 0);
+
+        // queue up multiple messages in server receive buffers
+        let messages = [b"message 1", b"message 2"];
+
+        for message in messages {
+            assert_eq!(client.send(message).unwrap(), message.len());
+        }
+
+        // partial read of a message
+        assert_eq!(server.recv(&mut buf[..4]).unwrap(), 4);
+        assert_eq!(&buf[..4], b"mess");
+        assert_eq!(server.recv(&mut buf[4..]).unwrap(), 5);
+        assert_eq!(&buf[..9], messages[0]);
+        // read second message
+        assert_eq!(server.recv(&mut buf).unwrap(), 9);
+        assert_eq!(&buf[..9], messages[1]);
+    }
+
+    #[test]
+    fn dtls_12_full_handshake_and_application_data() {
         let root_store = RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.into(),
         };
