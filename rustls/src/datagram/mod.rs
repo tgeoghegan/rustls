@@ -7,6 +7,7 @@
 use std::boxed::Box;
 use std::fmt::Debug;
 use std::net::UdpSocket;
+use std::println;
 use std::sync::Arc;
 
 use pki_types::ServerName;
@@ -15,7 +16,7 @@ use crate::client::ClientSide;
 use crate::common_state::Protocol;
 use crate::conn::ConnectionCore;
 use crate::crypto::cipher::OutboundPlain;
-use crate::msgs::{ClientExtensionsInput, ServerExtensionsInput, U48};
+use crate::msgs::{ClientExtensionsInput, Delocator, ServerExtensionsInput, SliceInput, U48};
 use crate::server::ServerSide;
 use crate::vecbuf::ChunkVecBuffer;
 use crate::{ClientConfig, ServerConfig, SideData};
@@ -123,6 +124,10 @@ pub(crate) struct DtlsSocket<SocketLike, Side: SideData> {
     inner: SocketLike,
     /// Connection internals
     core: ConnectionCore<Side>,
+    /// Buffered plaintext waiting for handshakes to complete.
+    buffered_plaintext: ChunkVecBuffer,
+    /// Plaintext received and decrypted but not yet read.
+    received_plaintext: ChunkVecBuffer,
 }
 
 impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
@@ -132,6 +137,8 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
             sequence: U48(0),
             inner,
             core,
+            buffered_plaintext: ChunkVecBuffer::new(None),
+            received_plaintext: ChunkVecBuffer::new(None),
         }
     }
 
@@ -142,15 +149,15 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
     fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
-        // TODO: this should do something like the TLS side where it checks for pending handshake
-        // messages and sends them
-        // TODO(timg): do something smarter with this buffer
-        let mut chunks = ChunkVecBuffer::new(None);
-        Ok(self
-            .core
-            .common
-            .send
-            .buffer_plaintext(OutboundPlain::new(&[bytes.as_ref()]), &mut chunks))
+        let sent = self.core.common.send.buffer_plaintext(
+            OutboundPlain::new(&[bytes.as_ref()]),
+            &mut self.buffered_plaintext,
+        );
+
+        let mut buf = [0u8; 8096];
+        self.pending_io(&mut buf)?;
+
+        Ok(sent)
     }
 
     /// API used by crate clients to receive plaintext bytes.
@@ -159,16 +166,79 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     /// into EncodedMessage.
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
-    fn recv<B: AsMut<[u8]>>(&mut self, _bytes: B) -> Result<usize, Error> {
-        // TODO: this should try to pump the handshake state machine
-        todo!()
+    fn recv<B: AsMut<[u8]>>(&mut self, mut bytes: B) -> Result<usize, Error> {
+        let mut receive_buf = bytes.as_mut();
+        self.pending_io(&mut receive_buf)?;
+
+        if self.received_plaintext.is_empty() {
+            return Ok(0);
+        }
+
+        Ok(self
+            .received_plaintext
+            .write_to(&mut receive_buf)
+            .map_err(|e| Error::Other(e.into()))?)
+    }
+
+    /// Much like `rustls-util::complete_io`, but doesn't require implemntations of `std::io::{Read,
+    /// Write}`.
+    fn pending_io(&mut self, mut read_into: &mut [u8]) -> Result<(), Error> {
+        // Check if we have any messages to read, possibly to finish handshaking.
+        loop {
+            let read = self
+                .inner
+                .recv(&mut read_into)
+                .map_err(|e| Error::Other(e.into()))?;
+            if read == 0 {
+                break;
+            }
+            if let Some(payload) = self
+                .core
+                .process_new_packets(&mut SliceInput::new(&mut read_into[..read]), None)
+                .map_err(|e| Error::Other(e.into()))?
+            {
+                let payload = payload.reborrow(&Delocator::new(&mut read_into));
+                self.received_plaintext
+                    .append(payload.into_vec());
+            }
+        }
+
+        // If we're now done handshaking, encrypt any buffered plaintext and enqueue into send queue
+        if self
+            .core
+            .common
+            .send
+            .may_send_application_data
+            && !self.buffered_plaintext.is_empty()
+        {
+            self.core
+                .common
+                .send
+                .send_buffered_plaintext(&mut self.buffered_plaintext);
+        }
+
+        // Send any TLS messages we have to send out
+        for sendable in self
+            .core
+            .common
+            .send
+            .sendable_tls
+            .take()
+        {
+            let _ = self
+                .inner
+                .send(sendable)
+                .map_err(|e| Error::Other(e.into()))?;
+        }
+
+        Ok(())
     }
 }
 
 /// Something akin to a UDP socket which can send and receive data, but does not
 /// implement [`std::io::Write`] or [`std::io::Read`].
 pub(crate) trait UdpSocketLike {
-    type Error: std::error::Error;
+    type Error: std::error::Error + 'static;
 
     /// Send data.
     fn send<B: AsRef<[u8]>>(&mut self, buf: B) -> Result<usize, Self::Error>;
@@ -203,7 +273,7 @@ mod tests {
     use crate::RootCertStore;
     use crate::client::danger::{ServerIdentity, SignatureVerificationInput};
     use crate::client::hs::ClientState;
-    use crate::crypto::{Identity, SignatureScheme, TEST_PROVIDER};
+    use crate::crypto::{Identity, SignatureScheme, TEST_PROVIDER, test_provider};
     use crate::msgs::{Delocator, VecInput, hex};
     use crate::server::hs::ServerState;
     use crate::verify::{HandshakeSignatureValid, PeerVerified, ServerVerifier};
@@ -400,21 +470,21 @@ mod tests {
     }
 
     #[test]
-    fn dtls_12_full_handshake_and_application_data() {
+    fn dtls_13_full_handshake_and_application_data() {
         let root_store = RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.into(),
         };
 
-        let client_config = ClientConfig::builder(Arc::new(TEST_PROVIDER.clone()))
+        let (mut client_transport, mut server_transport) = InMemoryBuffers::pair();
+
+        let mut test_provider_13_only = TEST_PROVIDER.clone();
+        test_provider_13_only.tls12_cipher_suites = std::borrow::Cow::Owned(Vec::new());
+
+        let client_config = ClientConfig::builder(Arc::new(test_provider_13_only.clone()))
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptsEverythingServerVerifier {}))
             .with_no_client_auth()
             .unwrap();
-
-        // This is where we might instantiate an std::net::UdpSocket bound to a particular host
-        // socketaddr and connecting to a particular other socketaddr. In the test we use in memory
-        // buffers to simulate transmission.
-        let client_transport = InMemoryBuffers::default();
 
         let mut client_socket = ClientDtlsSocket::new(
             client_config,
@@ -423,275 +493,188 @@ mod tests {
         )
         .unwrap();
 
-        let server_config = ServerConfig::builder(Arc::new(TEST_PROVIDER.clone()))
+        let server_config = ServerConfig::builder(Arc::new(test_provider_13_only.clone()))
             .with_no_client_auth()
             .with_single_cert(server_identity(), server_key())
             .unwrap();
 
-        let server_transport = InMemoryBuffers::default();
+        let mut server_socket = ServerDtlsSocket::new(server_config, server_transport).unwrap();
+
+        let client_message = b"client sends application data";
+        let server_message = b"server sends application data";
+
+        let mut client_sent_message = false;
+        let mut server_received_message = false;
+        let mut server_sent_message = false;
+        let mut client_received_message = false;
+        let mut receive_buf = [0; 8096];
+        let mut iters = 0;
+        loop {
+            assert!(iters < 10);
+            if !client_sent_message {
+                let sent = client_socket
+                    .send(client_message)
+                    .unwrap();
+                assert_eq!(sent, client_message.len());
+                client_sent_message = true;
+            }
+
+            if !server_sent_message && server_received_message {
+                let sent = server_socket
+                    .send(server_message)
+                    .unwrap();
+                assert_eq!(sent, server_message.len());
+
+                server_sent_message = true;
+            }
+
+            {
+                // Peek at message received by server so we can verify its encoding
+                let server_recv = server_socket
+                    .inner
+                    .inner
+                    .receive
+                    .lock()
+                    .unwrap();
+                let peek_server_recv = server_recv.back().unwrap();
+
+                println!("server recv: {peek_server_recv:?}");
+
+                // This is DTLS 1.3, so message should have a unified header on it, whose first byte
+                // is not a TLS content type but instead a bitmask describing the unified header.
+                assert!((32u8..63).contains(&peek_server_recv[0]));
+            }
+
+            // Call recv on server and client sockets at each iteration to drive the handshake and
+            // packet processing machine until application data comes through
+            let server_recvd = server_socket
+                .recv(&mut receive_buf)
+                .unwrap();
+            if client_sent_message
+                && !server_received_message
+                && server_recvd == client_message.len()
+            {
+                server_received_message = true;
+                assert_eq!(&receive_buf[..client_message.len()], client_message);
+            } else {
+                assert_eq!(server_recvd, 0);
+            }
+
+            let client_recvd = client_socket
+                .recv(&mut receive_buf)
+                .unwrap();
+            if server_sent_message && client_recvd == server_message.len() {
+                client_received_message = true;
+                assert_eq!(&receive_buf[..server_message.len()], server_message);
+            } else {
+                assert_eq!(client_recvd, 0);
+            }
+
+            if server_received_message
+                && client_received_message
+                && client_sent_message
+                && server_sent_message
+            {
+                break;
+            }
+
+            iters += 1;
+        }
+    }
+
+    #[test]
+    fn dtls_12_full_handshake_and_application_data() {
+        let root_store = RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.into(),
+        };
+
+        let (mut client_transport, mut server_transport) = InMemoryBuffers::pair();
+
+        let mut test_provider_12_only = TEST_PROVIDER.clone();
+        test_provider_12_only.tls13_cipher_suites = std::borrow::Cow::Owned(Vec::new());
+
+        let client_config = ClientConfig::builder(Arc::new(test_provider_12_only.clone()))
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptsEverythingServerVerifier {}))
+            .with_no_client_auth()
+            .unwrap();
+
+        let mut client_socket = ClientDtlsSocket::new(
+            client_config,
+            "example.org".try_into().unwrap(),
+            client_transport,
+        )
+        .unwrap();
+
+        let server_config = ServerConfig::builder(Arc::new(test_provider_12_only.clone()))
+            .with_no_client_auth()
+            .with_single_cert(server_identity(), server_key())
+            .unwrap();
 
         let mut server_socket = ServerDtlsSocket::new(server_config, server_transport).unwrap();
 
-        let state = client_socket
-            .inner
-            .core
-            .state
-            .as_ref()
-            .unwrap();
-        print!("client state ");
-        match state {
-            ClientState::ServerHello(_) => println!("ServerHello"),
-            ClientState::ServerHelloOrHelloRetryRequest(_) => {
-                println!("ServerHelloOrHelloRetryRequest")
-            }
-            ClientState::Tls12(_) => panic!("Tls12"),
-            ClientState::Tls13(_) => panic!("Tls13"),
-        }
-
-        print!("server state ");
-        let state = server_socket
-            .inner
-            .core
-            .state
-            .as_ref()
-            .unwrap();
-        match state {
-            ServerState::ReadClientHello(_) => println!("ReadClientHello"),
-            ServerState::ChooseConfig(_) => panic!("ChooseConfig"),
-            ServerState::ClientHello(_) => println!("ClientHello"),
-            ServerState::Tls12(_) => panic!("Tls12"),
-            ServerState::Tls13(_) => panic!("Tls13"),
-        }
-
-        let send = client_socket
-            .inner
-            .core
-            .common
-            .send
-            .sendable_tls
-            .take();
-
-        // Send the handshake records (should be a clienthello) to server so it can transition its
-        // state machine
-        println!("handshake records constructed by client");
-        for (idx, record) in send.into_iter().enumerate() {
-            println!("client -> server record #{idx}");
-            hex_dump(&record);
-
-            let mut vec_input = VecInput::default();
-            let read = vec_input
-                .read(&mut &record[..])
-                .unwrap();
-            assert_eq!(read, record.len());
-            server_socket
-                .inner
-                .core
-                .process_new_packets(&mut vec_input, None)
-                .unwrap();
-        }
-
-        print!("server state ");
-        let state = server_socket
-            .inner
-            .core
-            .state
-            .as_ref()
-            .unwrap();
-        match state {
-            ServerState::ReadClientHello(_) => panic!("ReadClientHello"),
-            ServerState::ChooseConfig(_) => panic!("ChooseConfig"),
-            ServerState::ClientHello(_) => panic!("ClientHello"),
-            ServerState::Tls12(_) => panic!("Tls12"),
-            ServerState::Tls13(tls13) => println!("Tls13"),
-        }
-
-        let send = server_socket
-            .inner
-            .core
-            .common
-            .send
-            .sendable_tls
-            .take();
-        println!("{} handshake records constructed by server", send.len());
-        for (idx, record) in send.iter().enumerate() {
-            println!("server -> client record #{idx}");
-            hex_dump(&record);
-        }
-
-        for (_idx, record) in send.iter().enumerate() {
-            let mut vec_input = VecInput::default();
-            let read = vec_input
-                .read(&mut &record[..])
-                .unwrap();
-            assert_eq!(read, record.len());
-            client_socket
-                .inner
-                .core
-                .process_new_packets(&mut vec_input, None)
-                .unwrap();
-        }
-
-        let state = client_socket
-            .inner
-            .core
-            .state
-            .as_ref()
-            .unwrap();
-        print!("client state ");
-        match state {
-            ClientState::ServerHello(_) => panic!("ServerHello"),
-            ClientState::ServerHelloOrHelloRetryRequest(_) => {
-                panic!("ServerHelloOrHelloRetryRequest")
-            }
-            ClientState::Tls12(_) => panic!("Tls12"),
-            ClientState::Tls13(_) => println!("Tls13 (probably expecttraffic)"),
-        }
-
-        let send = client_socket
-            .inner
-            .core
-            .common
-            .send
-            .sendable_tls
-            .take();
-        for (idx, record) in send.iter().enumerate() {
-            println!("client -> server record #{idx}");
-            hex_dump(record);
-
-            let mut vec_input = VecInput::default();
-            let read = vec_input
-                .read(&mut &record[..])
-                .unwrap();
-            assert_eq!(read, record.len());
-            server_socket
-                .inner
-                .core
-                .process_new_packets(&mut vec_input, None)
-                .unwrap();
-        }
-
-        print!("server state ");
-        let state = server_socket
-            .inner
-            .core
-            .state
-            .as_ref()
-            .unwrap();
-        match state {
-            ServerState::ReadClientHello(_) => panic!("ReadClientHello"),
-            ServerState::ChooseConfig(_) => panic!("ChooseConfig"),
-            ServerState::ClientHello(_) => panic!("ClientHello"),
-            ServerState::Tls12(_) => panic!("Tls12"),
-            ServerState::Tls13(tls13) => println!("Tls13"),
-        }
-
-        // Server emits a session ticket which we'll give to the client
-        let send = server_socket
-            .inner
-            .core
-            .common
-            .send
-            .sendable_tls
-            .take();
-        println!("{} handshake records constructed by server", send.len());
-        for (idx, record) in send.iter().enumerate() {
-            let mut vec_input = VecInput::default();
-            let read = vec_input
-                .read(&mut &record[..])
-                .unwrap();
-            assert_eq!(read, record.len());
-            client_socket
-                .inner
-                .core
-                .process_new_packets(&mut vec_input, None)
-                .unwrap();
-            println!("client accepted ticket");
-        }
-
-        // Handshake is finished. Server and client should have nothing to send.
-        assert!(
-            server_socket
-                .inner
-                .core
-                .common
-                .send
-                .sendable_tls
-                .peek()
-                .is_none()
-        );
-        assert!(
-            client_socket
-                .inner
-                .core
-                .common
-                .send
-                .sendable_tls
-                .peek()
-                .is_none()
-        );
-
-        println!("sending application data client -> server");
-
         let client_message = b"client sends application data";
-        let sent = client_socket
-            .send(client_message)
-            .unwrap();
-        assert_eq!(sent, client_message.len());
-
-        let send = client_socket
-            .inner
-            .core
-            .common
-            .send
-            .sendable_tls
-            .take();
-        for (idx, record) in send.iter().enumerate() {
-            println!("client -> server record #{idx}");
-            hex_dump(record);
-
-            let mut vec_input = VecInput::default();
-            let read = vec_input
-                .read(&mut &record[..])
-                .unwrap();
-            assert_eq!(read, record.len());
-            let unborrowed = server_socket
-                .inner
-                .core
-                .process_new_packets(&mut vec_input, None)
-                .unwrap()
-                .unwrap();
-            let payload = unborrowed.reborrow(&Delocator::new(vec_input.filled()));
-
-            assert_eq!(payload.bytes(), client_message);
-        }
-
         let server_message = b"server sends application data";
-        let sent = server_socket
-            .send(server_message)
-            .unwrap();
-        assert_eq!(sent, server_message.len());
 
-        let send = server_socket
-            .inner
-            .core
-            .common
-            .send
-            .sendable_tls
-            .take();
-        for (idx, record) in send.iter().enumerate() {
-            let mut vec_input = VecInput::default();
-            let read = vec_input
-                .read(&mut &record[..])
+        let mut client_sent_message = false;
+        let mut server_received_message = false;
+        let mut server_sent_message = false;
+        let mut client_received_message = false;
+        let mut receive_buf = [0; 8096];
+        let mut iters = 0;
+        loop {
+            assert!(iters < 100);
+            if !client_sent_message {
+                let sent = client_socket
+                    .send(client_message)
+                    .unwrap();
+                assert_eq!(sent, client_message.len());
+                client_sent_message = true;
+            }
+
+            if !server_sent_message && server_received_message {
+                let sent = server_socket
+                    .send(server_message)
+                    .unwrap();
+                assert_eq!(sent, server_message.len());
+
+                server_sent_message = true;
+            }
+
+            // Call recv on server and client sockets at each iteration to drive the handshake and
+            // packet processing machine until application data comes through
+            let server_recvd = server_socket
+                .recv(&mut receive_buf)
                 .unwrap();
-            assert_eq!(read, record.len());
-            let unborrowed = client_socket
-                .inner
-                .core
-                .process_new_packets(&mut vec_input, None)
-                .unwrap()
+            if client_sent_message
+                && !server_received_message
+                && server_recvd == client_message.len()
+            {
+                server_received_message = true;
+                assert_eq!(&receive_buf[..client_message.len()], client_message);
+            } else {
+                assert_eq!(server_recvd, 0);
+            }
+
+            let client_recvd = client_socket
+                .recv(&mut receive_buf)
                 .unwrap();
-            let payload = unborrowed.reborrow(&Delocator::new(vec_input.filled()));
-            assert_eq!(payload.bytes(), server_message);
+            if server_sent_message && client_recvd == server_message.len() {
+                client_received_message = true;
+                assert_eq!(&receive_buf[..server_message.len()], server_message);
+            } else {
+                assert_eq!(client_recvd, 0);
+            }
+
+            if server_received_message
+                && client_received_message
+                && client_sent_message
+                && server_sent_message
+            {
+                break;
+            }
+
+            iters += 1;
         }
     }
 
