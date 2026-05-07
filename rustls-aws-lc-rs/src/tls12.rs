@@ -324,7 +324,6 @@ impl MessageEncrypter for GcmMessageEncrypter {
             typ: msg.typ,
             version: msg.version,
             // TODO(timg): what epoch and sequence here?
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: None,
             payload,
         })
@@ -412,7 +411,6 @@ impl MessageEncrypter for ChaCha20Poly1305MessageEncrypter {
             typ: msg.typ,
             version: msg.version,
             // TODO(timg): what epoch and sequence here?
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: None,
             payload,
         })

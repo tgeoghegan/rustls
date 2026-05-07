@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use crate::crypto::cipher::Payload;
 use crate::error::InvalidMessage;
 use crate::msgs::{
-    Codec, DTLS_HANDSHAKE_HEADER_SIZE, DTLS_HEADER_SIZE, HANDSHAKE_HEADER_SIZE, HEADER_SIZE,
-    ListLength, NonEmpty, Reader, SizedPayload, TlsListElement,
+    Codec, DTLS_HANDSHAKE_HEADER_SIZE, HANDSHAKE_HEADER_SIZE, ListLength, NonEmpty, Reader,
+    SizedPayload, TlsListElement,
 };
 
 #[non_exhaustive]
@@ -172,6 +172,7 @@ enum_builder! {
         Handshake => 0x16,
         ApplicationData => 0x17,
         Heartbeat => 0x18,
+        Dtls13Ciphertext => 0x20,
     }
 }
 
@@ -198,13 +199,15 @@ impl ProtocolVersion {
         self == Self::DTLSv1_0 || self == Self::DTLSv1_2 || self == Self::DTLSv1_3
     }
 
-    pub fn record_header_size(self) -> usize {
-        if self.is_datagram_tls() {
-            DTLS_HEADER_SIZE
-        } else {
-            HEADER_SIZE
-        }
-    }
+    // I think this method is impossible to implement due to variable length DTLS 1.3 header so let's see what happens!
+    // pub fn record_header_size(self) -> usize {
+    //     todo!("account for DTLS 1.3 variable header here");
+    //     if self.is_datagram_tls() {
+    //         DTLS_HEADER_SIZE
+    //     } else {
+    //         HEADER_SIZE
+    //     }
+    // }
 
     pub fn handshake_header_size(self) -> usize {
         if self.is_datagram_tls() {

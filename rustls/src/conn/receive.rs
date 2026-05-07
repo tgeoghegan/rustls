@@ -14,11 +14,9 @@ use crate::crypto::cipher::{Decrypted, DecryptionState, EncodedMessage, Payload}
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error, PeerMisbehaved};
 use crate::log::{trace, warn};
-#[cfg(feature = "dtls")]
-use crate::msgs::EpochAndSequence;
 use crate::msgs::{
     AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, Delocator,
-    HandshakeAlignedProof, Locator, Message, MessagePayload, TlsInputBuffer,
+    EpochAndSequence, HandshakeAlignedProof, Locator, Message, MessagePayload, TlsInputBuffer,
 };
 use crate::quic::QuicOutput;
 
@@ -288,18 +286,14 @@ impl ReceivePath {
             let message = unborrowed.reborrow(&Delocator::new(buffer));
             // TODO(timg): I think this is where we should look at epoch and sequence number. Reject
             // messages from old epoch? Buffer messages from a new one?
-            match self.protocol {
-                #[cfg(feature = "dtls")]
-                Protocol::Udp => {
-                    self.deframer
-                        .input_message_dtls(message, bounds)?;
-                    self.deframer.coalesce_dtls(buffer)
-                }
-                _ => {
-                    self.deframer
-                        .input_message(message, bounds);
-                    self.deframer.coalesce(buffer)?
-                }
+            if self.protocol.is_dtls() {
+                self.deframer
+                    .input_message_dtls(message, bounds)?;
+                self.deframer.coalesce_dtls(buffer);
+            } else {
+                self.deframer
+                    .input_message(message, bounds);
+                self.deframer.coalesce(buffer)?;
             }
         }
     }
@@ -625,7 +619,6 @@ impl Input<'_> {
 struct InboundUnborrowedMessage {
     typ: ContentType,
     version: ProtocolVersion,
-    #[cfg(feature = "dtls")]
     epoch_and_sequence: Option<EpochAndSequence>,
     bounds: Range<usize>,
 }
@@ -635,7 +628,6 @@ impl InboundUnborrowedMessage {
         Self {
             typ: msg.typ,
             version: msg.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: msg.epoch_and_sequence,
             bounds: locator.locate(msg.payload),
         }
@@ -645,7 +637,6 @@ impl InboundUnborrowedMessage {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: self.epoch_and_sequence,
             payload: delocator.slice_from_range(&self.bounds),
         }

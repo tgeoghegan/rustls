@@ -729,9 +729,7 @@ impl EchState {
         // Construct the inner hello message that will be used for the transcript.
         let inner_hello_msg = Message {
             version: match (self.protocol, retryreq) {
-                #[cfg(feature = "dtls")]
                 (Protocol::Udp, Some(_)) => ProtocolVersion::DTLSv1_2,
-                #[cfg(feature = "dtls")]
                 (Protocol::Udp, None) => ProtocolVersion::DTLSv1_0,
                 // <https://datatracker.ietf.org/doc/html/rfc8446#section-5.1>:
                 // "This value MUST be set to 0x0303 for all records generated

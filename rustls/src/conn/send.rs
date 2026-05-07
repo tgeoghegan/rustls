@@ -1,8 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-#[cfg(feature = "dtls")]
-use crate::EpochAndSequence;
 use crate::common_state::Protocol;
 use crate::crypto::cipher::{
     EncodedMessage, EncryptionState, MessageEncrypter, OutboundOpaque, OutboundPlain,
@@ -11,9 +9,9 @@ use crate::crypto::cipher::{
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
 use crate::log::{debug, error};
-use crate::msgs::{AlertLevel, Message, MessageFragmenter};
-#[cfg(feature = "dtls")]
-use crate::msgs::{Codec, MessagePayload};
+use crate::msgs::{
+    AlertLevel, Codec, EpochAndSequence, Message, MessageFragmenter, MessagePayload,
+};
 use crate::tls13::key_schedule::KeyScheduleTrafficSend;
 use crate::vecbuf::ChunkVecBuffer;
 
@@ -32,7 +30,6 @@ pub(crate) struct SendPath {
     pub(crate) refresh_traffic_keys_pending: bool,
     negotiated_version: Option<ProtocolVersion>,
     pub(crate) tls13_key_schedule: Option<Box<KeyScheduleTrafficSend>>,
-    #[cfg(feature = "dtls")]
     handshake_sequence_number: u16,
 }
 
@@ -51,7 +48,6 @@ impl SendPath {
             refresh_traffic_keys_pending: false,
             negotiated_version: None,
             tls13_key_schedule: None,
-            #[cfg(feature = "dtls")]
             handshake_sequence_number: 0,
         }
     }
@@ -70,8 +66,6 @@ impl SendPath {
             .fragment_payload(
                 ContentType::ApplicationData,
                 ProtocolVersion::TLSv1_2,
-                #[cfg(feature = "dtls")]
-                None,
                 payload.clone(),
             );
 
@@ -107,8 +101,6 @@ impl SendPath {
             .fragment_payload(
                 ContentType::ApplicationData,
                 ProtocolVersion::TLSv1_2,
-                #[cfg(feature = "dtls")]
-                None,
                 payload,
             );
 
@@ -136,23 +128,21 @@ impl SendPath {
         let len = payload.len();
         let typ = ContentType::ApplicationData;
 
-        match self.protocol {
+        if self.protocol.is_dtls() {
             // For DTLS, we don't fragment application data, instead expecting clients to chunk up
             // application layer messages appropriately themselves.
-            #[cfg(feature = "dtls")]
-            Protocol::Udp => self.send_single_fragment(EncodedMessage {
+            self.send_single_fragment(EncodedMessage {
                 typ,
                 version: ProtocolVersion::DTLSv1_2,
                 epoch_and_sequence: self.dtls_epoch_and_sequence(),
                 payload,
-            }),
-            Protocol::Tcp | Protocol::Quic(_) => {
-                let iter = self
-                    .message_fragmenter
-                    .fragment_payload(typ, ProtocolVersion::TLSv1_2, None, payload);
-                for m in iter {
-                    self.send_single_fragment(m);
-                }
+            });
+        } else {
+            let iter = self
+                .message_fragmenter
+                .fragment_payload(typ, ProtocolVersion::TLSv1_2, payload);
+            for m in iter {
+                self.send_single_fragment(m);
             }
         }
 
@@ -281,11 +271,11 @@ impl SendPath {
         match (self.protocol, &m.payload) {
             // DTLS handshake messages can be fragmented into multiple records which contain
             // information necessary for reassembly.
-            #[cfg(feature = "dtls")]
             (Protocol::Udp, MessagePayload::Handshake { parsed, encoded }) => {
                 for m in self
                     .message_fragmenter
                     .fragment_dtls_handshake_message(
+                        m.version,
                         self.dtls_epoch_and_sequence()
                             .expect("epoch and sequence should be set for DTLS"),
                         parsed.0.handshake_type(),
@@ -308,7 +298,6 @@ impl SendPath {
                     );
                 }
             }
-            #[cfg(feature = "dtls")]
             (Protocol::Udp, MessagePayload::HandshakeFlight(encoded)) => {
                 let epoch_and_sequence = self
                     .dtls_epoch_and_sequence()
@@ -316,6 +305,7 @@ impl SendPath {
                 for m in self
                     .message_fragmenter
                     .fragment_dtls_handshake_message_flight(
+                        m.version,
                         epoch_and_sequence,
                         self.handshake_sequence_number,
                         encoded,
@@ -337,7 +327,6 @@ impl SendPath {
             }
             // Other DTLS messages are required to fit into a single record. Application data should
             // be chunked by the application before being handled off to rustls.
-            #[cfg(feature = "dtls")]
             (Protocol::Udp, _) => self.send_fragment(
                 m.encoded_message(self.dtls_epoch_and_sequence())
                     .borrow_outbound(),
@@ -345,10 +334,7 @@ impl SendPath {
             ),
             // TLS messages can be fragmented into multiple TCP or QUIC packets
             _ => {
-                let msg = m.encoded_message(
-                    #[cfg(feature = "dtls")]
-                    None,
-                );
+                let msg = m.encoded_message(None);
                 for m in self
                     .message_fragmenter
                     .fragment_message(&msg)
@@ -397,10 +383,8 @@ impl SendPath {
             return;
         }
 
-        let message = Message::build_key_update_notify().encoded_message(
-            #[cfg(feature = "dtls")]
-            self.dtls_epoch_and_sequence(),
-        );
+        let message =
+            Message::build_key_update_notify().encoded_message(self.dtls_epoch_and_sequence());
         self.queued_key_update_message = Some(
             self.encrypt_state
                 .encrypt_outgoing(message.borrow_outbound())
@@ -413,13 +397,13 @@ impl SendPath {
         }
     }
 
-    #[cfg(feature = "dtls")]
     fn dtls_epoch_and_sequence(&self) -> Option<EpochAndSequence> {
-        match self.protocol {
-            Protocol::Udp => Some(EpochAndSequence::from_sequence_number(
+        if self.protocol.is_dtls() {
+            Some(EpochAndSequence::from_sequence_number(
                 self.encrypt_state.write_seq(),
-            )),
-            _ => None,
+            ))
+        } else {
+            None
         }
     }
 

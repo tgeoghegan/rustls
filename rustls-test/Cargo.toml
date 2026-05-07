@@ -8,7 +8,6 @@ publish = false
 default = ["aws-lc-rs", "brotli", "log", "ring", "zlib"]
 aws-lc-rs = ["dep:rustls-aws-lc-rs"]
 brotli = ["rustls/brotli"]
-dtls = ["rustls/dtls", "rustls-ring/dtls", "rustls-aws-lc-rs/dtls"]
 fips = ["rustls-aws-lc-rs/fips"]
 log = ["rustls/log", "rustls-util/log"]
 ring = ["dep:rustls-ring"]

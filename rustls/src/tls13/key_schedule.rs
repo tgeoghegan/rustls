@@ -941,7 +941,6 @@ impl KeyScheduleSuite {
         // TODO(timg): double check whether this uses 1.2 versions for backward
         // compat
         let protocol_version = match self.protocol {
-            #[cfg(feature = "dtls")]
             Protocol::Udp => ProtocolVersion::DTLSv1_3,
             _ => ProtocolVersion::TLSv1_3,
         };

@@ -6,10 +6,9 @@ use crate::crypto::cipher::EncryptionState;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::msgs::{
-    Codec, HEADER_SIZE, MAX_FRAGMENT_LEN, MessageHeader, Reader, hex, read_opaque_message_header,
+    Codec, DTLS_12_HEADER_SIZE, EpochAndSequence, HEADER_SIZE, MAX_FRAGMENT_LEN, MessageHeader,
+    Reader, UnifiedHeader, hex, read_opaque_message_header,
 };
-#[cfg(feature = "dtls")]
-use crate::msgs::{DTLS_HEADER_SIZE, EpochAndSequence};
 
 /// A TLS message with encoded (but not necessarily encrypted) payload.
 #[expect(clippy::exhaustive_structs)]
@@ -20,7 +19,6 @@ pub struct EncodedMessage<P> {
     /// The protocol version of this message.
     pub version: ProtocolVersion,
     /// The epoch and sequence number, if DTLS is in use.
-    #[cfg(feature = "dtls")]
     pub epoch_and_sequence: Option<EpochAndSequence>,
     /// The payload of this message.
     pub payload: P,
@@ -31,7 +29,6 @@ impl<P> EncodedMessage<P> {
     pub fn new(typ: ContentType, version: ProtocolVersion, payload: P) -> Self {
         Self {
             typ,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: None,
             version,
             payload,
@@ -39,19 +36,17 @@ impl<P> EncodedMessage<P> {
     }
 
     /// The size of the record layer header for this message.
-    #[cfg(feature = "dtls")]
     pub fn header_size(&self) -> usize {
-        if self.epoch_and_sequence.is_some() {
-            DTLS_HEADER_SIZE
-        } else {
-            HEADER_SIZE
+        match self.version {
+            ProtocolVersion::DTLSv1_3 => UnifiedHeader::header_length(
+                self.epoch_and_sequence
+                    .unwrap()
+                    .sequence_number
+                    .0,
+            ),
+            p if p.is_datagram_tls() => DTLS_12_HEADER_SIZE,
+            _ => HEADER_SIZE,
         }
-    }
-
-    /// The size of the record layer header for this message.
-    #[cfg(not(feature = "dtls"))]
-    pub fn header_size(&self) -> usize {
-        HEADER_SIZE
     }
 }
 
@@ -64,7 +59,6 @@ impl<'a> EncodedMessage<Payload<'a>> {
         let MessageHeader {
             typ,
             version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence,
             len,
         } = read_opaque_message_header(r)?;
@@ -76,7 +70,6 @@ impl<'a> EncodedMessage<Payload<'a>> {
         Ok(Self {
             typ,
             version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence,
             payload: Payload::Borrowed(content),
         })
@@ -87,16 +80,8 @@ impl<'a> EncodedMessage<Payload<'a>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: self.epoch_and_sequence,
-            payload: OutboundOpaque::from_byte_slice(
-                match self.version {
-                    #[cfg(feature = "dtls")]
-                    ProtocolVersion::DTLSv1_2 | ProtocolVersion::DTLSv1_3 => DTLS_HEADER_SIZE,
-                    _ => HEADER_SIZE,
-                },
-                self.payload.bytes(),
-            ),
+            payload: OutboundOpaque::from_byte_slice(self.header_size(), self.payload.bytes()),
         }
     }
 
@@ -105,7 +90,6 @@ impl<'a> EncodedMessage<Payload<'a>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: self.epoch_and_sequence,
             payload: self.payload.bytes().into(),
         }
@@ -116,7 +100,6 @@ impl<'a> EncodedMessage<Payload<'a>> {
         Self {
             typ: self.typ,
             version: self.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: self.epoch_and_sequence,
             payload: self.payload.into_owned(),
         }
@@ -175,7 +158,6 @@ impl<'a> EncodedMessage<InboundOpaque<'a>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: self.epoch_and_sequence,
             payload: &self.payload.into_inner()[range],
         }
@@ -190,7 +172,6 @@ impl<'a> EncodedMessage<InboundOpaque<'a>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: self.epoch_and_sequence,
             payload: self.payload.into_inner(),
         }
@@ -204,7 +185,6 @@ impl EncodedMessage<OutboundPlain<'_>> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: self.epoch_and_sequence,
             payload,
         }
@@ -219,26 +199,33 @@ impl EncodedMessage<OutboundPlain<'_>> {
 impl EncodedMessage<OutboundOpaque> {
     /// Encode this message to a vector of bytes.
     pub fn encode(self) -> Vec<u8> {
-        let length = self.payload.len() as u16;
-        let mut encoded_payload = self.payload.payload;
-        encoded_payload[0] = self.typ.into();
-        encoded_payload[1..3].copy_from_slice(&self.version.to_array());
-        // TODO(timg) this is not great
-        #[cfg(feature = "dtls")]
-        if let Some(EpochAndSequence {
-            epoch,
-            sequence_number,
-        }) = self.epoch_and_sequence
-        {
-            encoded_payload[3..5].copy_from_slice(&(epoch).to_be_bytes());
-            encoded_payload[5..11].copy_from_slice(&(sequence_number.0).to_be_bytes()[2..]);
-            encoded_payload[11..13].copy_from_slice(&(length).to_be_bytes());
+        if self.version == ProtocolVersion::DTLSv1_3 {
+            let unified_header = UnifiedHeader::from_encoded_message(&self);
+            let mut encoded =
+                Vec::with_capacity(unified_header.encoded_length() + self.payload.len());
+
+            unified_header.encode(&mut encoded);
+            encoded.extend(&self.payload.payload[self.payload.header_size..]);
+
+            encoded
         } else {
-            encoded_payload[3..5].copy_from_slice(&(length).to_be_bytes());
+            let length = self.payload.len() as u16;
+            let mut encoded_payload = self.payload.payload;
+            encoded_payload[0] = self.typ.into();
+            encoded_payload[1..3].copy_from_slice(&self.version.to_array());
+            if let Some(EpochAndSequence {
+                epoch,
+                sequence_number,
+            }) = self.epoch_and_sequence
+            {
+                encoded_payload[3..5].copy_from_slice(&(epoch).to_be_bytes());
+                encoded_payload[5..11].copy_from_slice(&(sequence_number.0).to_be_bytes()[2..]);
+                encoded_payload[11..13].copy_from_slice(&(length).to_be_bytes());
+            } else {
+                encoded_payload[3..5].copy_from_slice(&(length).to_be_bytes());
+            }
+            encoded_payload
         }
-        #[cfg(not(feature = "dtls"))]
-        encoded_payload[3..5].copy_from_slice(&(length).to_be_bytes());
-        encoded_payload
     }
 }
 

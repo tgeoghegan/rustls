@@ -6,13 +6,13 @@ use crate::crypto::cipher::{EncodedMessage, InboundOpaque, MessageError};
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage};
 use crate::msgs::codec::{Codec, Reader, U24};
-#[cfg(feature = "dtls")]
 use crate::msgs::{
-    DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment, MessageHeader, read_opaque_message_header,
+    DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment, EpochAndSequence, MessageHeader,
+    UnifiedHeader, read_opaque_message_header,
 };
 
 mod buffers;
-#[cfg(all(feature = "dtls", test))]
+#[cfg(test)]
 mod dtls_test;
 use buffers::Coalescer;
 pub(crate) use buffers::{Delocator, Locator, SliceInput, TlsInputBuffer, VecInput};
@@ -55,33 +55,74 @@ pub(crate) struct Deframer {
 
 impl Deframer {
     pub(crate) fn deframe<'a>(&mut self, buf: &'a mut [u8]) -> Option<Result<Deframed<'a>, Error>> {
-        let mut reader = Reader::new(buf.get(self.processed..)?);
+        let unprocessed_buf = buf.get(self.processed..)?;
 
-        let MessageHeader {
+        let mut reader = Reader::new(unprocessed_buf);
+        let (typ, version, epoch_and_sequence, len) = if unprocessed_buf.len() > 0
+            && UnifiedHeader::is_unified_header(unprocessed_buf[0])
+        {
+            let UnifiedHeader {
+                connection_id: _,
+                sequence_number,
+                length,
+                epoch_low_bits,
+            } = match UnifiedHeader::read(&mut reader) {
+                Ok(header) => header,
+                Err(err) => return Some(Err(err.into())),
+            };
+
+            // If there's no length in the unified header, then assume the record occupies the
+            // entirety of the provided buffer, which is in turn assumed to be a whole datagram.
+            let length = length.unwrap_or_else(|| buf.len() as u16);
+
+            (
+                ContentType::Dtls13Ciphertext,
+                ProtocolVersion::DTLSv1_3,
+                // TODO(timg): the epoch and sequence in the unified header are likely truncated
+                Some(EpochAndSequence::new(
+                    epoch_low_bits as u16,
+                    sequence_number as u64,
+                )),
+                length,
+            )
+        } else {
+            let MessageHeader {
+                typ,
+                version,
+                epoch_and_sequence,
+                len,
+            } = match read_opaque_message_header(&mut reader) {
+                Ok(header) => header,
+                Err(err) => {
+                    let err = match err {
+                        MessageError::TooShortForHeader | MessageError::TooShortForLength => {
+                            return None;
+                        }
+                        MessageError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
+                        MessageError::MessageTooLarge => InvalidMessage::MessageTooLarge,
+                        MessageError::InvalidContentType => InvalidMessage::InvalidContentType,
+                        MessageError::UnknownProtocolVersion => {
+                            InvalidMessage::UnknownProtocolVersion
+                        }
+                    };
+                    return Some(Err(err.into()));
+                }
+            };
+            (typ, version, epoch_and_sequence, len)
+        };
+
+        // TODO(timg): this is a hack, we need something we can call .header_size on
+        let header_size = EncodedMessage {
             typ,
             version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence,
-            len,
-        } = match read_opaque_message_header(&mut reader) {
-            Ok(header) => header,
-            Err(err) => {
-                let err = match err {
-                    MessageError::TooShortForHeader | MessageError::TooShortForLength => {
-                        return None;
-                    }
-                    MessageError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
-                    MessageError::MessageTooLarge => InvalidMessage::MessageTooLarge,
-                    MessageError::InvalidContentType => InvalidMessage::InvalidContentType,
-                    MessageError::UnknownProtocolVersion => InvalidMessage::UnknownProtocolVersion,
-                };
-                return Some(Err(err.into()));
-            }
-        };
+            payload: [0u8; 0],
+        }
+        .header_size();
 
         // we now have a TLS header and body on the front of `self.buf`.  remove
         // it from the front.
-        let end = self.processed + version.record_header_size() + len as usize;
+        let end = self.processed + header_size + len as usize;
         let head = buf.get_mut(..end)?;
         // This bound, returned from the function, INCLUDES the TLS record header. However
         // message.payload DOES NOT, and starts at (possibly) the handshake header.
@@ -92,9 +133,8 @@ impl Deframer {
             message: EncodedMessage {
                 typ,
                 version,
-                #[cfg(feature = "dtls")]
                 epoch_and_sequence,
-                payload: InboundOpaque(&mut head[bounds.start + version.record_header_size()..]),
+                payload: InboundOpaque(&mut head[bounds.start + header_size..]),
             },
             bounds,
         }))
@@ -157,13 +197,14 @@ impl Deframer {
     ///
     /// `bounds` is the position within the containing buffer of the record payload. That is, it
     /// begins at the start of the first handshake header.
-    #[cfg(feature = "dtls")]
     pub(crate) fn input_message_dtls(
         &mut self,
         msg: EncodedMessage<&'_ [u8]>,
         bounds: Range<usize>,
     ) -> Result<(), Error> {
-        debug_assert_eq!(msg.typ, ContentType::Handshake);
+        debug_assert!(
+            msg.typ == ContentType::Handshake || msg.typ == ContentType::Dtls13Ciphertext
+        );
         debug_assert!(msg.version.is_datagram_tls());
 
         // Using DissectHandshakeIter wouldn't be appropriate here because parsing DTLS handshake
@@ -289,7 +330,6 @@ impl Deframer {
             let msg = EncodedMessage {
                 typ: ContentType::Handshake,
                 version: first.version,
-                #[cfg(feature = "dtls")]
                 epoch_and_sequence: None,
                 payload: delocator.slice_from_range(&first.bounds),
             };
@@ -339,7 +379,6 @@ impl Deframer {
     ///
     /// [1]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.2.2
     /// [2]: https://datatracker.ietf.org/doc/html/rfc9147#section-5.2
-    #[cfg(feature = "dtls")]
     pub(crate) fn coalesce_dtls(&mut self, containing_buffer: &mut [u8]) {
         // Sort the spans by sequence number and fragment offset so we can reorder
         // containing_buffer.
@@ -506,7 +545,6 @@ impl Deframer {
             typ: ContentType::Handshake,
             version: next_span.version,
             // We emit reassembled messages here so no need to include epoch or sequence number.
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: None,
             payload: Delocator::new(containing_buffer).slice_from_range(&next_span.bounds),
         }
@@ -701,7 +739,6 @@ mod tests {
         let msg = EncodedMessage {
             typ: ContentType::Handshake,
             version: ProtocolVersion::TLSv1_3,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: None,
             payload: &within[range.start..range.end],
         };

@@ -183,7 +183,6 @@ mod client_hello {
 
                 emit_hello_retry_request(
                     match st.protocol {
-                        #[cfg(feature = "dtls")]
                         Protocol::Udp => ProtocolVersion::DTLSv1_3,
                         _ => ProtocolVersion::TLSv1_3,
                     },
@@ -546,7 +545,6 @@ mod client_hello {
         });
 
         let protocol_version = match protocol {
-            #[cfg(feature = "dtls")]
             Protocol::Udp => ProtocolVersion::DTLSv1_2,
             _ => ProtocolVersion::TLSv1_2,
         };
@@ -629,7 +627,6 @@ mod client_hello {
         group: NamedGroup,
     ) {
         let legacy_version = match version {
-            #[cfg(feature = "dtls")]
             ProtocolVersion::DTLSv1_3 => ProtocolVersion::DTLSv1_2,
             _ => ProtocolVersion::DTLSv1_2,
         };

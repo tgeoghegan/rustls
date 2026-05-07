@@ -15,7 +15,6 @@ default = ["aws-lc-sys", "std"]
 aws-lc-sys = ["aws-lc-rs/aws-lc-sys"]
 fips = ["aws-lc-rs/fips"]
 std = []
-dtls = ["rustls/dtls"]
 
 [dependencies]
 aws-lc-rs = { workspace = true, features = ["prebuilt-nasm"] }

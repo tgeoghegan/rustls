@@ -390,10 +390,8 @@ impl Codec<'_> for u32 {
 
 /// A 48 bit unsigned integer.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[cfg(feature = "dtls")]
 pub struct U48(pub u64);
 
-#[cfg(feature = "dtls")]
 impl Codec<'_> for U48 {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let be_bytes = u64::to_be_bytes(self.0);

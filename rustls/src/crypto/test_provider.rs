@@ -396,7 +396,6 @@ impl MessageEncrypter for Tls13Cipher {
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
             version: m.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: m.epoch_and_sequence,
             payload,
         })
@@ -466,7 +465,6 @@ impl MessageEncrypter for Tls12Cipher {
         Ok(EncodedMessage {
             typ: m.typ,
             version: m.version,
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: m.epoch_and_sequence,
             payload,
         })

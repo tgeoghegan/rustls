@@ -7,7 +7,6 @@
 use std::boxed::Box;
 use std::fmt::Debug;
 use std::net::UdpSocket;
-use std::println;
 use std::sync::Arc;
 
 use pki_types::ServerName;
@@ -267,8 +266,8 @@ mod tests {
     use std::fmt::Display;
     use std::io::Read;
     use std::sync::{Arc, Mutex};
+    use std::vec;
     use std::vec::Vec;
-    use std::{print, println, vec};
 
     use crate::RootCertStore;
     use crate::client::danger::{ServerIdentity, SignatureVerificationInput};
@@ -538,7 +537,7 @@ mod tests {
                     .unwrap();
                 let peek_server_recv = server_recv.back().unwrap();
 
-                println!("server recv: {peek_server_recv:?}");
+                std::println!("server recv: {peek_server_recv:?}");
 
                 // This is DTLS 1.3, so message should have a unified header on it, whose first byte
                 // is not a TLS content type but instead a bitmask describing the unified header.

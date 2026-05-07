@@ -302,7 +302,6 @@ impl MessageEncrypter for GcmMessageEncrypter {
             typ: msg.typ,
             version: msg.version,
             // TODO(timg): insert epoch and sequence as appropriate
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: None,
             payload,
         })

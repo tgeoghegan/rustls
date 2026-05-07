@@ -3,8 +3,6 @@ use alloc::boxed::Box;
 use aws_lc_rs::hkdf::KeyType;
 use aws_lc_rs::{aead, hkdf, hmac};
 use pki_types::FipsStatus;
-#[cfg(feature = "dtls")]
-use rustls::EpochAndSequence;
 use rustls::crypto::cipher::{
     AeadKey, EncodedMessage, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter, Nonce,
     OutboundOpaque, OutboundPlain, Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
@@ -14,7 +12,7 @@ use rustls::crypto::{self, CipherSuite};
 use rustls::enums::{ContentType, ProtocolVersion};
 use rustls::error::Error;
 use rustls::version::TLS13_VERSION;
-use rustls::{CipherSuiteCommon, ConnectionTrafficSecrets, Tls13CipherSuite};
+use rustls::{CipherSuiteCommon, ConnectionTrafficSecrets, EpochAndSequence, Tls13CipherSuite};
 
 /// The TLS1.3 ciphersuite TLS_CHACHA20_POLY1305_SHA256
 pub static TLS13_CHACHA20_POLY1305_SHA256: &Tls13CipherSuite = &Tls13CipherSuite {
@@ -261,13 +259,6 @@ impl MessageEncrypter for AeadMessageEncrypter {
             .seal_in_place_append_tag(nonce, aad, &mut payload)
             .map_err(|_| Error::EncryptError)?;
 
-        #[cfg(feature = "dtls")]
-        let epoch_and_sequence = if self.protocol.is_datagram_tls() {
-            Some(EpochAndSequence::from_sequence_number(seq))
-        } else {
-            None
-        };
-
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
             // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
@@ -279,8 +270,11 @@ impl MessageEncrypter for AeadMessageEncrypter {
             } else {
                 ProtocolVersion::TLSv1_2
             },
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence,
+            epoch_and_sequence: if self.protocol.is_datagram_tls() {
+                Some(EpochAndSequence::from_sequence_number(seq))
+            } else {
+                None
+            },
             payload,
         })
     }
@@ -338,13 +332,6 @@ impl MessageEncrypter for GcmMessageEncrypter {
             .seal_in_place_append_tag(nonce, aad, &mut payload)
             .map_err(|_| Error::EncryptError)?;
 
-        #[cfg(feature = "dtls")]
-        let epoch_and_sequence = if self.protocol.is_datagram_tls() {
-            Some(EpochAndSequence::from_sequence_number(seq))
-        } else {
-            None
-        };
-
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
             // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
@@ -356,8 +343,11 @@ impl MessageEncrypter for GcmMessageEncrypter {
             } else {
                 ProtocolVersion::TLSv1_2
             },
-            #[cfg(feature = "dtls")]
-            epoch_and_sequence,
+            epoch_and_sequence: if self.protocol.is_datagram_tls() {
+                Some(EpochAndSequence::from_sequence_number(seq))
+            } else {
+                None
+            },
             payload,
         })
     }

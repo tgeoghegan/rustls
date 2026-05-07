@@ -199,7 +199,6 @@ impl ExpectServerHello {
             ProtocolVersion::TLSv1_3 if tls13_supported => {
                 self.with_version::<Tls13CipherSuite>(server_hello, &input, output)
             }
-            #[cfg(feature = "dtls")]
             ProtocolVersion::DTLSv1_3 if config.supports_version(ProtocolVersion::DTLSv1_3) => {
                 self.with_version::<Tls13CipherSuite>(server_hello, &input, output)
             }
@@ -216,7 +215,6 @@ impl ExpectServerHello {
 
                 self.with_version::<Tls12CipherSuite>(server_hello, &input, output)
             }
-            #[cfg(feature = "dtls")]
             ProtocolVersion::DTLSv1_2 if config.supports_version(ProtocolVersion::DTLSv1_2) => {
                 // TODO(timg): all this 0-RTT stuff
                 self.with_version::<Tls12CipherSuite>(server_hello, &input, output)
@@ -748,7 +746,6 @@ fn emit_client_hello_for_retry(
     let mut chp_payload = ClientHelloPayload {
         client_version: match input.protocol {
             Protocol::Tcp | Protocol::Quic(_) => ProtocolVersion::TLSv1_2,
-            #[cfg(feature = "dtls")]
             Protocol::Udp => ProtocolVersion::DTLSv1_2,
         },
         random: input.random,
@@ -831,14 +828,15 @@ fn emit_client_hello_for_retry(
     };
 
     let ch = Message {
+        // TODO(timg): I think we might need to say DTLS 1.3 here and lower the place where we lie
+        // about 1.2 to like the cipher/message layer, because we need to know the real protocol to
+        // make encoding decision
         version: match (input.protocol, retryreq) {
-            #[cfg(feature = "dtls")]
             // <https://datatracker.ietf.org/doc/html/rfc9147#section-4>:
             // "This value MUST be set to {254, 253} for all records..."
             (Protocol::Udp, Some(_)) => ProtocolVersion::DTLSv1_2,
             // "... other than the initial ClientHello [...], where it may also
             // be {254, 255} for compatibility purposes."
-            #[cfg(feature = "dtls")]
             (Protocol::Udp, None) => ProtocolVersion::DTLSv1_0,
             // <https://datatracker.ietf.org/doc/html/rfc8446#section-5.1>:
             // "This value MUST be set to 0x0303 for all records generated

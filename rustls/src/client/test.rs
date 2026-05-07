@@ -531,11 +531,8 @@ fn client_requiring_rpk_receives_server_ee(
     let mut encrypter = fake_server_crypto.server_handshake_encrypter();
     let enc_ee = encrypter
         .encrypt(
-            ee.encoded_message(
-                #[cfg(feature = "dtls")]
-                None,
-            )
-            .borrow_outbound(),
+            ee.encoded_message(None)
+                .borrow_outbound(),
             0,
         )
         .unwrap();

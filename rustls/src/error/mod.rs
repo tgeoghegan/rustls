@@ -952,6 +952,8 @@ pub enum InvalidMessage {
     UnknownHelloRetryRequestExtension,
     /// The peer sent a TLS1.3 Certificate with an unknown extension
     UnknownCertificateExtension,
+    /// Invalid unified header in a DTLS 1.3 record
+    InvalidDtls13UnifiedHeader,
 }
 
 impl From<InvalidMessage> for AlertDescription {

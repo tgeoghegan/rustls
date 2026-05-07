@@ -366,7 +366,6 @@ impl Protocol {
     pub(crate) fn wire_protocol_version(&self) -> ProtocolVersion {
         match self {
             Self::Tcp | Self::Quic(_) => ProtocolVersion::TLSv1_2,
-            #[cfg(feature = "dtls")]
             Self::Udp => ProtocolVersion::DTLSv1_2,
         }
     }
@@ -405,11 +404,11 @@ impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
             payload: MessagePayload::HandshakeFlight(self.handshake_messages),
         };
 
+        std::println!("finishing a flgiht with version {:?}", m.version);
+
         output.send_msg(m, TLS13);
     }
 }
 
 pub(crate) type HandshakeFlightTls12<'a> = HandshakeFlight<'a, false, false>;
-pub(crate) type HandshakeFlightDtls12<'a> = HandshakeFlight<'a, false, true>;
 pub(crate) type HandshakeFlightTls13<'a> = HandshakeFlight<'a, true, false>;
-pub(crate) type HandshakeFlightDtls13<'a> = HandshakeFlight<'a, true, true>;

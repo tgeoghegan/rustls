@@ -286,7 +286,6 @@ where
                 typ,
                 version,
                 // TODO(timg): insert epoch and sequence as appropriate
-                #[cfg(feature = "dtls")]
                 epoch_and_sequence: None,
                 payload,
             };
@@ -1383,7 +1382,6 @@ impl RawTls {
             typ,
             version,
             // TODO(timg): insert epoch and sequence as appropriate
-            #[cfg(feature = "dtls")]
             epoch_and_sequence: None,
             payload: InboundOpaque(left),
         };
@@ -1819,7 +1817,6 @@ mod plaintext {
                 typ: ContentType::ApplicationData,
                 version: ProtocolVersion::TLSv1_2,
                 // TODO(timg): insert epoch and sequence as appropriate
-                #[cfg(feature = "dtls")]
                 epoch_and_sequence: None,
                 payload,
             })

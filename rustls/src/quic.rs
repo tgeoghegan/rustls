@@ -396,7 +396,6 @@ impl<Side: SideData> ConnectionCommon<Side> {
             EncodedMessage {
                 typ: ContentType::Handshake,
                 version: ProtocolVersion::TLSv1_3,
-                #[cfg(feature = "dtls")]
                 epoch_and_sequence: None,
                 payload: &self.deframer_buffer.filled()[range.start..range.end],
             },

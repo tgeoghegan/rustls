@@ -15,7 +15,6 @@ rustls-test = { workspace = true, default-features = false }
 [features]
 default = []
 aws-lc-rs = ["rustls-aws-lc-rs"]
-dtls = ["rustls/dtls"]
 fips = ["rustls-aws-lc-rs/fips", "aws-lc-rs"]
 graviola = ["dep:rustls-graviola"]
 ring = ["dep:rustls-ring"]
