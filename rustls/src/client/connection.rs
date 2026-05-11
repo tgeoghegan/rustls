@@ -427,7 +427,11 @@ impl ClientConnectionData {
 #[derive(Debug)]
 pub struct ClientSide;
 
-impl crate::conn::SideData for ClientSide {}
+impl crate::conn::SideData for ClientSide {
+    fn label() -> &'static str {
+        "client"
+    }
+}
 
 impl crate::conn::private::Side for ClientSide {
     type Data = ClientConnectionData;

@@ -884,7 +884,10 @@ impl<'q> Output<'_> for SideCommonOutput<'_, 'q> {
 
 /// Data specific to the peer's side (client or server).
 #[expect(private_bounds)]
-pub trait SideData: private::Side {}
+pub trait SideData: private::Side {
+    /// Label identifying this side. Useful for debugging.
+    fn label() -> &'static str;
+}
 
 pub(crate) mod private {
     use super::*;

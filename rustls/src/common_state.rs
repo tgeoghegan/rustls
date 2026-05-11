@@ -406,8 +406,6 @@ impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
             payload: MessagePayload::HandshakeFlight(self.handshake_messages),
         };
 
-        std::println!("finishing a flgiht with version {:?}", m.version);
-
         output.send_msg(m, TLS13);
     }
 }

@@ -634,7 +634,11 @@ impl SideOutput for ServerConnectionData {
 #[derive(Debug)]
 pub struct ServerSide;
 
-impl crate::conn::SideData for ServerSide {}
+impl crate::conn::SideData for ServerSide {
+    fn label() -> &'static str {
+        "server"
+    }
+}
 
 impl crate::conn::private::Side for ServerSide {
     type Data = ServerConnectionData;

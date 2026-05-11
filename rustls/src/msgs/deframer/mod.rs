@@ -432,13 +432,6 @@ impl Deframer {
                 .spans[index]
                 .dtls_fragment_fields
                 .unwrap();
-            // TODO(timg): this assert is wrong: a misbehaving peer could send zero length fragments
-            // and we should ignore them gracefully. Probably we want to omit such fragments before
-            // we get to this function.
-            debug_assert_ne!(
-                current_fragment_length, 0,
-                "should never encounter zero length fragment"
-            );
 
             let (coalesce_into_seq, coalsce_into_offset, _) = self.spans[first_fragment_index]
                 .dtls_fragment_fields
