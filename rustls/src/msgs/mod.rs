@@ -31,6 +31,8 @@
 //!
 //! <https://langsec.org/ForWantOfANail-h2hc2014.pdf>
 
+use core::cmp::min_by_key;
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -876,9 +878,8 @@ pub(crate) struct UnifiedHeader {
     /// An absent connection ID is represented by an empty `Vec`.
     // TODO: implement connection IDs. We assume them to be 0 length/absent for now.
     connection_id: Vec<u8>,
-    sequence_number: u16,
+    epoch_and_sequence: EpochAndSequence,
     length: Option<u16>,
-    epoch_low_bits: u8,
 }
 
 impl UnifiedHeader {
@@ -894,23 +895,34 @@ impl UnifiedHeader {
     }
 
     pub(crate) fn from_encoded_message(message: &EncodedMessage<OutboundOpaque>) -> Self {
+        // truncate epoch to 2 bits
+        let epoch_low_bits = message
+            .epoch_and_sequence
+            .unwrap()
+            .epoch
+            & 0b11;
+        // truncate sequence number to 16 bits
+        // TODO(timg): truncate to 8 if it fits?
+        let sequence_number = message
+            .epoch_and_sequence
+            .unwrap()
+            .sequence_number
+            .0
+            & 0xffff;
         Self {
             connection_id: Vec::new(),
-            sequence_number: message
-                .epoch_and_sequence
-                .unwrap()
-                .as_sequence_number() as u16,
+            epoch_and_sequence: EpochAndSequence::new(epoch_low_bits, sequence_number),
+
             length: Some(message.payload.as_ref().len() as u16),
-            epoch_low_bits: (message
-                .epoch_and_sequence
-                .unwrap()
-                .epoch
-                & 0b11) as u8,
         }
     }
 
     pub(crate) fn encoded_length(&self) -> usize {
-        Self::header_length(self.sequence_number as u64)
+        Self::header_length(
+            self.epoch_and_sequence
+                .sequence_number
+                .0,
+        )
     }
 
     /// Compute the encoded length of the unified header given the sequnce number, since that value
@@ -918,29 +930,29 @@ impl UnifiedHeader {
     pub(crate) fn header_length(sequence_number: u64) -> usize {
         1 + // bitmask
             0 + // Assume no connection IDs for now
-            // TODO(timg): I guess we truncate the sequence (ostensibly U48) down to 16 bits? Seems
-            // odd that the unified header disagrees on seq length with the inner message.
-            Self::sequence_number_size(sequence_number as u16) +
+            Self::sequence_number_size(sequence_number) + // 1 or 2 bytes for seq
             // TODO(timg): should we always include length when we send?
             2
     }
 
     /// Encoded size of the sequence number. Smaller values may be encoded in 1 byte.
-    fn sequence_number_size(sequence_number: u16) -> usize {
-        if sequence_number <= u8::MAX as u16 {
+    fn sequence_number_size(sequence_number: u64) -> usize {
+        if sequence_number <= u8::MAX as u64 {
             1
         } else {
             2
         }
     }
-}
 
-impl<'a> Codec<'a> for UnifiedHeader {
-    fn encode(&self, bytes: &mut Vec<u8>) {
+    pub(crate) fn encode(&self, bytes: &mut Vec<u8>) {
+        let sequence_number = self
+            .epoch_and_sequence
+            .sequence_number
+            .0;
         let mut header = Vec::with_capacity(
             1 + // bitmask
             self.connection_id.len() + // Connection ID, may be 0
-            Self::sequence_number_size(self.sequence_number) +
+            Self::sequence_number_size(sequence_number) +
             if self.length.is_some() {2} else {0}, // length, if present
         );
 
@@ -955,27 +967,30 @@ impl<'a> Codec<'a> for UnifiedHeader {
             // header.extend(self.connection_id);
         }
 
-        if Self::sequence_number_size(self.sequence_number) == 2 {
+        if Self::sequence_number_size(sequence_number) == 2 {
             bitmask |= Self::S_BIT_MASK;
-            self.sequence_number.encode(&mut header);
+            (sequence_number as u16).encode(&mut header);
         } else {
-            debug_assert!(self.sequence_number <= u8::MAX as u16);
-            (self.sequence_number as u8).encode(&mut header);
+            debug_assert!(sequence_number <= u8::MAX as u64);
+            (sequence_number as u8).encode(&mut header);
         }
         if let Some(length) = self.length {
             bitmask |= Self::L_BIT_MASK;
             length.encode(&mut header);
         }
 
-        debug_assert!(self.epoch_low_bits <= Self::EE_BITS_MASK);
-        bitmask |= self.epoch_low_bits;
+        debug_assert!(self.epoch_and_sequence.epoch <= Self::EE_BITS_MASK as u16);
+        bitmask |= self.epoch_and_sequence.epoch as u8;
 
         header[0] = bitmask;
 
         bytes.extend(header);
     }
 
-    fn read(r: &mut Reader<'a>) -> Result<Self, InvalidMessage> {
+    fn read(
+        r: &mut Reader<'_>,
+        latest_epoch_and_sequence: EpochAndSequence,
+    ) -> Result<Self, InvalidMessage> {
         let bitfield = u8::read(r)?;
 
         if bitfield & Self::FIXED_BITS_MASK != Self::FIXED_BITS {
@@ -988,7 +1003,8 @@ impl<'a> Codec<'a> for UnifiedHeader {
             // how do we smuggle that information into a call to `Codec::read`?
         }
 
-        let sequence_number = if bitfield & Self::S_BIT_MASK > 0 {
+        let long_seq = bitfield & Self::S_BIT_MASK > 0;
+        let truncated_sequence_number = if long_seq {
             // bit set: 2 byte seq
             u16::read(r)?
         } else {
@@ -996,19 +1012,50 @@ impl<'a> Codec<'a> for UnifiedHeader {
             u8::read(r)? as u16
         };
 
+        // Reconstruct the sequence number based on the truncated sequence number in a DTLS 1.3
+        // unified header, per [RFC 9147, section 4.2.2][1]:
+        //
+        // > [I]mplementations SHOULD reconstruct the sequence number by computing the full
+        // > sequence number which is numerically closest to one plus the sequence number of
+        // > the highest successfully deprotected record in the current epoch.
+        //
+        // [1]: https://datatracker.ietf.org/doc/html/rfc9147#section-4.2.2
+        let latest_seq = latest_epoch_and_sequence
+            .sequence_number
+            .0;
+        // First candidate: clear low bits of highest sequence we've seen and OR in the truncated
+        // sequence number
+        let reconstructed_seq_0: u64 = latest_seq
+            & if long_seq {
+                0xffff_ffff_ffff_0000
+            } else {
+                0xffff_ffff_ffff_ff00
+            }
+            | truncated_sequence_number as u64;
+        // Second candidate: flip the first bit to the left of the truncated portion
+        let reconstructed_seq_1 = reconstructed_seq_0 ^ if long_seq { 0x1_ffff } else { 0x0100 };
+        // Use whichever is closest to latest_seq+1
+        let sequence_number = min_by_key(reconstructed_seq_0, reconstructed_seq_1, |v| {
+            v.abs_diff(latest_seq + 1)
+        });
+
         let length = if bitfield & Self::L_BIT_MASK > 0 {
             Some(u16::read(r)?)
         } else {
             None
         };
 
+        // Infer the 16 bit epoch based on the low bits in the header and most recently seen epoch.
         let epoch_low_bits = bitfield & Self::EE_BITS_MASK;
+        let epoch_and_sequence = EpochAndSequence::new(
+            latest_epoch_and_sequence.epoch | (epoch_low_bits as u16),
+            sequence_number,
+        );
 
         Ok(Self {
             connection_id: Vec::new(),
-            sequence_number,
             length,
-            epoch_low_bits,
+            epoch_and_sequence,
         })
     }
 }

@@ -174,7 +174,7 @@ mod client_hello {
 
             output.output(OutputEvent::HandshakeKind(HandshakeKind::Full));
 
-            let mut flight = HandshakeFlightTls12::new(&mut transcript);
+            let mut flight = HandshakeFlightTls12::new(&mut transcript, st.protocol.is_dtls());
 
             let Tls12Extensions {
                 alpn_protocol,
@@ -320,7 +320,7 @@ mod client_hello {
         }
 
         let session_id = input.client_hello.session_id;
-        let mut flight = HandshakeFlightTls12::new(&mut transcript);
+        let mut flight = HandshakeFlightTls12::new(&mut transcript, protocol.is_dtls());
         let Tls12Extensions {
             alpn_protocol,
             send_ticket,

@@ -251,6 +251,15 @@ impl ReceivePath {
                 return Err(PeerMisbehaved::MessageInterleavedWithHandshakeMessage.into());
             }
 
+            // TODO(timg): should do some DTLS anti-replay here, checking sequence #s against a
+            // sliding window
+
+            // Increment sequence only after deprotecting a message, including checking for replays.
+            // > This check SHOULD happen after deprotecting the record; otherwise, the record
+            // > discard might itself serve as a timing channel for the record number.
+            // <https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1>
+            self.deframer.increment_sequence();
+
             match message.payload.len() {
                 0 => {
                     if self.seen_consecutive_empty_fragments
@@ -284,8 +293,6 @@ impl ReceivePath {
             }
 
             let message = unborrowed.reborrow(&Delocator::new(buffer));
-            // TODO(timg): I think this is where we should look at epoch and sequence number. Reject
-            // messages from old epoch? Buffer messages from a new one?
             if self.protocol.is_dtls() {
                 self.deframer
                     .input_message_dtls(message, bounds)?;

@@ -97,7 +97,6 @@ fn single_handshake_fragment(version: ProtocolVersion) {
     .to_unencrypted_opaque()
     .encode();
     let record_wire_bytes_len = record_wire_bytes.len();
-    std::println!("encoded record: {record_wire_bytes_len} {record_wire_bytes:?}");
 
     // Deframe the record to parse its header and get the body as an InboundOpaque
     let mut deframer = Deframer::default();
@@ -188,6 +187,8 @@ fn multiple_handshake_fragment_in_order(
     }
 
     let mut deframer = Deframer::default();
+    deframer.set_epoch(start_epoch);
+    deframer.set_sequence(start_sequence);
 
     // Deframe records and feed messages into the deframer to be coalesced. We should not
     // get a complete span until all records are fed in.
@@ -200,8 +201,8 @@ fn multiple_handshake_fragment_in_order(
         // For DTLS 1.3, the unified header carries only the truncated epoch and sequence so check
         // that we reassembled them properly.
         assert_eq!(
-            message.epoch_and_sequence,
-            records[record_idx].epoch_and_sequence
+            message.epoch_and_sequence, records[record_idx].epoch_and_sequence,
+            "{record_idx}"
         );
 
         // Simulate in-place decryption
@@ -237,14 +238,14 @@ fn multiple_handshake_fragment_in_order_dtls_13() {
 }
 
 #[test]
-fn multiple_handshake_fragment_in_order_dtls_12_large_epoch_and_sequence() {
+fn multiple_handshake_fragment_in_order_large_epoch_and_sequence_dtls_12() {
     // Use epoch and sequence values too large to fit in 2 or 16 bits, respectively. This shouldn't
     // make a difference in DTLS 1.2
     multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_2, 11, 70000);
 }
 
 #[test]
-fn multiple_handshake_fragment_in_order_dtls_13_large_epoch_and_sequence() {
+fn multiple_handshake_fragment_in_order_large_epoch_and_sequence_dtls_13() {
     // Use epoch and sequence values too large to fit in 2 or 16 bits, respectively. This makes the
     // values too big to fit into their respective fields in the DTLS 1.3 unified header, forcing
     // "Reconstructing the Sequence Number and Epoch".
@@ -323,6 +324,7 @@ fn multiple_handshake_fragment_overlapping(version: ProtocolVersion) {
     }
 
     let mut deframer = Deframer::default();
+    deframer.set_epoch(5);
 
     // Deframe records and feed messages into the deframer to be coalesced. We should not
     // get a complete span until all records are fed in.
@@ -423,6 +425,7 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1(version: Pro
     }
 
     let mut deframer = Deframer::default();
+    deframer.set_epoch(5);
 
     // Deframe records and feed messages into the deframer to be coalesced.
     let mut saw_first_message = false;
@@ -526,6 +529,7 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2(version: Pro
     }
 
     let mut deframer = Deframer::default();
+    deframer.set_epoch(5);
 
     // Deframe records and feed messages into the deframer to be coalesced.
     let mut saw_first_message = false;
@@ -662,6 +666,7 @@ fn single_record_multiple_handshake_messages(version: ProtocolVersion) {
     .encode();
 
     let mut deframer = Deframer::default();
+    deframer.set_epoch(11);
 
     // Deframe the record and feed it into the deframer to be coalesced.
     let Deframed { message, bounds } = deframer
@@ -766,14 +771,11 @@ fn handshake_messages_span_records(version: ProtocolVersion) {
         }
         .to_unencrypted_opaque()
         .encode();
-        std::println!(
-            "encoded record: {} {encoded_record:?}",
-            encoded_record.len()
-        );
         encoded_records.extend_from_slice(&encoded_record.as_slice());
     }
 
     let mut deframer = Deframer::default();
+    deframer.set_epoch(11);
 
     // Deframe records and feed messages into the deframer to be coalesced.
     for record_idx in 0..records.len() {
@@ -792,7 +794,8 @@ fn handshake_messages_span_records(version: ProtocolVersion) {
                 message
                     .epoch_and_sequence
                     .unwrap()
-                    .as_sequence_number(),
+                    .sequence_number
+                    .0,
             )
         };
         let bounds = bounds.start + header_size..bounds.end;
@@ -883,6 +886,7 @@ fn multiple_fragments_application_data(version: ProtocolVersion) {
     wire_bytes.extend(encoded_second_record);
 
     let mut deframer = Deframer::default();
+    deframer.set_epoch(3);
 
     for (record, expect_start, expect_end) in [
         (first_record, 0, encoded_first_record_len),

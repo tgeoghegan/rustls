@@ -1331,7 +1331,10 @@ impl ExpectFinished {
                 .set_handshake_encrypter(output.send());
         }
 
-        let mut flight = HandshakeFlightTls13::new(&mut st.hs.transcript);
+        let mut flight = HandshakeFlightTls13::new(
+            &mut st.hs.transcript,
+            input.message.version.is_datagram_tls(),
+        );
 
         /* Send our authentication/finished messages.  These are still encrypted
          * with our handshake keys. */

@@ -147,7 +147,7 @@ impl MessageFragmenter {
             let length = U24(handshake_payload.len() as u32);
 
             let mut fragment_offset = 0;
-            while fragment_offset < handshake_payload.len() {
+            loop {
                 if record_capacity - curr_record.len() <= DTLS_HANDSHAKE_HEADER_SIZE {
                     // There's no room left in the current record for a handshake fragment. Start a
                     // new record.
@@ -190,6 +190,10 @@ impl MessageFragmenter {
                         && fragment_offset == handshake_payload.len())
                 {
                     finish_record(&mut curr_record);
+                }
+
+                if fragment_offset == handshake_payload.len() {
+                    break;
                 }
             }
 

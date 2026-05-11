@@ -264,17 +264,12 @@ mod tests {
     use std::cmp::min;
     use std::collections::VecDeque;
     use std::fmt::Display;
-    use std::io::Read;
     use std::sync::{Arc, Mutex};
     use std::vec;
     use std::vec::Vec;
 
-    use crate::RootCertStore;
     use crate::client::danger::{ServerIdentity, SignatureVerificationInput};
-    use crate::client::hs::ClientState;
-    use crate::crypto::{Identity, SignatureScheme, TEST_PROVIDER, test_provider};
-    use crate::msgs::{Delocator, VecInput, hex};
-    use crate::server::hs::ServerState;
+    use crate::crypto::{Identity, SignatureScheme, TEST_PROVIDER};
     use crate::verify::{HandshakeSignatureValid, PeerVerified, ServerVerifier};
 
     use pki_types::pem::PemObject;
@@ -335,7 +330,7 @@ mod tests {
         }
 
         fn recv<B: AsMut<[u8]>>(&mut self, mut buf: B) -> Result<usize, Self::Error> {
-            let mut read_into = buf.as_mut();
+            let read_into = buf.as_mut();
 
             let mut receive_queue = self.receive.lock().unwrap();
 
@@ -385,23 +380,20 @@ mod tests {
     struct AcceptsEverythingServerVerifier {}
 
     impl ServerVerifier for AcceptsEverythingServerVerifier {
-        fn verify_identity(
-            &self,
-            identity: &ServerIdentity<'_>,
-        ) -> Result<PeerVerified, crate::Error> {
+        fn verify_identity(&self, _: &ServerIdentity<'_>) -> Result<PeerVerified, crate::Error> {
             Ok(PeerVerified::assertion())
         }
 
         fn verify_tls12_signature(
             &self,
-            input: &SignatureVerificationInput<'_>,
+            _: &SignatureVerificationInput<'_>,
         ) -> Result<HandshakeSignatureValid, crate::Error> {
             Ok(HandshakeSignatureValid::assertion())
         }
 
         fn verify_tls13_signature(
             &self,
-            input: &SignatureVerificationInput<'_>,
+            _: &SignatureVerificationInput<'_>,
         ) -> Result<HandshakeSignatureValid, crate::Error> {
             Ok(HandshakeSignatureValid::assertion())
         }
@@ -421,7 +413,7 @@ mod tests {
             false
         }
 
-        fn hash_config(&self, h: &mut dyn Hasher) {}
+        fn hash_config(&self, _: &mut dyn Hasher) {}
     }
 
     #[test]
@@ -470,11 +462,7 @@ mod tests {
 
     #[test]
     fn dtls_13_full_handshake_and_application_data() {
-        let root_store = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-        };
-
-        let (mut client_transport, mut server_transport) = InMemoryBuffers::pair();
+        let (client_transport, server_transport) = InMemoryBuffers::pair();
 
         let mut test_provider_13_only = TEST_PROVIDER.clone();
         test_provider_13_only.tls12_cipher_suites = std::borrow::Cow::Owned(Vec::new());
@@ -583,11 +571,7 @@ mod tests {
 
     #[test]
     fn dtls_12_full_handshake_and_application_data() {
-        let root_store = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-        };
-
-        let (mut client_transport, mut server_transport) = InMemoryBuffers::pair();
+        let (client_transport, server_transport) = InMemoryBuffers::pair();
 
         let mut test_provider_12_only = TEST_PROVIDER.clone();
         test_provider_12_only.tls13_cipher_suites = std::borrow::Cow::Owned(Vec::new());
@@ -622,12 +606,13 @@ mod tests {
         let mut receive_buf = [0; 8096];
         let mut iters = 0;
         loop {
-            assert!(iters < 100);
+            assert!(iters < 10);
             if !client_sent_message {
                 let sent = client_socket
                     .send(client_message)
                     .unwrap();
                 assert_eq!(sent, client_message.len());
+                std::println!("client sent message");
                 client_sent_message = true;
             }
 
@@ -636,8 +621,35 @@ mod tests {
                     .send(server_message)
                     .unwrap();
                 assert_eq!(sent, server_message.len());
+                std::println!("server sent message");
 
                 server_sent_message = true;
+            }
+
+            {
+                // Peek at message received by server
+                let server_recv = server_socket
+                    .inner
+                    .inner
+                    .receive
+                    .lock()
+                    .unwrap();
+                let peek_server_recv = server_recv.back();
+
+                std::println!("server recv: {peek_server_recv:?}");
+            }
+
+            {
+                // Peek at message received by client
+                let client_recv = client_socket
+                    .inner
+                    .inner
+                    .receive
+                    .lock()
+                    .unwrap();
+                let peek_client_recv = client_recv.back();
+
+                std::println!("client recv: {peek_client_recv:?}");
             }
 
             // Call recv on server and client sockets at each iteration to drive the handshake and
@@ -645,13 +657,17 @@ mod tests {
             let server_recvd = server_socket
                 .recv(&mut receive_buf)
                 .unwrap();
+
+            std::println!("server recv {server_recvd}");
             if client_sent_message
                 && !server_received_message
                 && server_recvd == client_message.len()
             {
+                std::println!("server recv something");
                 server_received_message = true;
                 assert_eq!(&receive_buf[..client_message.len()], client_message);
             } else {
+                std::println!("server recv 0");
                 assert_eq!(server_recvd, 0);
             }
 
@@ -675,6 +691,17 @@ mod tests {
 
             iters += 1;
         }
+    }
+
+    #[test]
+    fn anti_replay() {
+        // We should maintain a sliding window of seen TLS record sequence
+        // numbers, per epoch(?). Replayed sequence numbers should be rejected.
+        // Replayed sequence numbers outside the replay window will get through.
+        // <https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1>
+        //
+        // I guess send some traffic, copy a record out of client send buffer,
+        // then send it again
     }
 
     fn hex_dump<B: AsRef<[u8]>>(buf: B) {

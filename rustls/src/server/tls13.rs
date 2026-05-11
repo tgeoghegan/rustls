@@ -277,7 +277,7 @@ mod client_hello {
             ));
 
             let mut ocsp_response = signer.ocsp.as_deref();
-            let mut flight = HandshakeFlightTls13::new(&mut transcript);
+            let mut flight = HandshakeFlightTls13::new(&mut transcript, st.protocol.is_dtls());
             let (
                 Tls13Extensions {
                     certificate_types,
@@ -1445,7 +1445,10 @@ impl ExpectFinished {
         let (key_schedule_traffic, exporter, resumption) =
             key_schedule_before_finished.into_traffic(self.hs.transcript.current_hash());
 
-        let mut flight = HandshakeFlightTls13::new(&mut self.hs.transcript);
+        let mut flight = HandshakeFlightTls13::new(
+            &mut self.hs.transcript,
+            input.message.version.is_datagram_tls(),
+        );
         for _ in 0..self.hs.send_tickets {
             Self::emit_ticket(
                 &mut flight,

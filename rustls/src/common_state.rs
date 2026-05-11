@@ -371,18 +371,20 @@ impl Protocol {
     }
 }
 
-pub(crate) struct HandshakeFlight<'a, const TLS13: bool, const DTLS: bool> {
+pub(crate) struct HandshakeFlight<'a, const TLS13: bool> {
     pub(crate) transcript: &'a mut HandshakeHash,
     /// The handshake type and encoded payload of each handshake message in the
     /// flight.
     handshake_messages: Vec<(HandshakeType, Vec<u8>)>,
+    is_dtls: bool,
 }
 
-impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
-    pub(crate) fn new(transcript: &'a mut HandshakeHash) -> Self {
+impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
+    pub(crate) fn new(transcript: &'a mut HandshakeHash, is_dtls: bool) -> Self {
         Self {
             transcript,
             handshake_messages: Vec::new(),
+            is_dtls,
         }
     }
 
@@ -395,7 +397,7 @@ impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
 
     pub(crate) fn finish(self, output: &mut dyn Output<'_>) {
         let m = Message {
-            version: match (TLS13, DTLS) {
+            version: match (TLS13, self.is_dtls) {
                 (true, true) => ProtocolVersion::DTLSv1_3,
                 (true, false) => ProtocolVersion::TLSv1_3,
                 (false, true) => ProtocolVersion::DTLSv1_2,
@@ -410,5 +412,5 @@ impl<'a, const TLS13: bool, const DTLS: bool> HandshakeFlight<'a, TLS13, DTLS> {
     }
 }
 
-pub(crate) type HandshakeFlightTls12<'a> = HandshakeFlight<'a, false, false>;
-pub(crate) type HandshakeFlightTls13<'a> = HandshakeFlight<'a, true, false>;
+pub(crate) type HandshakeFlightTls12<'a> = HandshakeFlight<'a, false>;
+pub(crate) type HandshakeFlightTls13<'a> = HandshakeFlight<'a, true>;

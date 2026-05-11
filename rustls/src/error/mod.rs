@@ -954,6 +954,8 @@ pub enum InvalidMessage {
     UnknownCertificateExtension,
     /// Invalid unified header in a DTLS 1.3 record
     InvalidDtls13UnifiedHeader,
+    /// Message is from wrong epoch in DTLS
+    WrongEpoch,
 }
 
 impl From<InvalidMessage> for AlertDescription {
