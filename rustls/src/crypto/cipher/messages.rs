@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ops::{Deref, DerefMut, Range};
 
+use crate::common_state::Protocol;
 use crate::crypto::cipher::EncryptionState;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
@@ -24,6 +25,20 @@ pub struct EncodedMessage<P> {
     pub payload: P,
 }
 
+/// Contextual information for encoding messages.
+#[derive(Clone, Debug)]
+pub struct EncodingContext {
+    /// The transport this message is being delivered over.
+    transport: Protocol,
+    /// The actual (D)TLS protocol version in use for this message, which often
+    /// is not the version encoded into the message, for backward compatibility
+    /// reasons.
+    actual_version: ProtocolVersion,
+    /// Whether the payload is encrypted on the wire. For example, `ClientHello`
+    /// is sent in plaintext because no keys have yet been negotiated.
+    encrypted_payload: bool,
+}
+
 impl<P> EncodedMessage<P> {
     /// Create a new `EncodedMessage` with the given fields.
     pub fn new(typ: ContentType, version: ProtocolVersion, payload: P) -> Self {
@@ -37,14 +52,16 @@ impl<P> EncodedMessage<P> {
 
     /// The size of the record layer header for this message.
     pub fn header_size(&self) -> usize {
-        match self.version {
-            ProtocolVersion::DTLSv1_3 => UnifiedHeader::header_length(
-                self.epoch_and_sequence
-                    .unwrap()
-                    .sequence_number
-                    .0,
-            ),
-            p if p.is_datagram_tls() => DTLS_12_HEADER_SIZE,
+        match (self.version, self.typ) {
+            (ProtocolVersion::DTLSv1_3, ContentType::Dtls13Ciphertext) => {
+                UnifiedHeader::header_length(
+                    self.epoch_and_sequence
+                        .unwrap()
+                        .sequence_number
+                        .0,
+                )
+            }
+            (p, _) if p.is_datagram_tls() => DTLS_12_HEADER_SIZE,
             _ => HEADER_SIZE,
         }
     }
@@ -199,7 +216,7 @@ impl EncodedMessage<OutboundPlain<'_>> {
 impl EncodedMessage<OutboundOpaque> {
     /// Encode this message to a vector of bytes.
     pub fn encode(self) -> Vec<u8> {
-        if self.version == ProtocolVersion::DTLSv1_3 {
+        if self.version == ProtocolVersion::DTLSv1_3 && self.typ == ContentType::Dtls13Ciphertext {
             let unified_header = UnifiedHeader::from_encoded_message(&self);
             let mut encoded =
                 Vec::with_capacity(unified_header.encoded_length() + self.payload.len());

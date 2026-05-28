@@ -86,6 +86,10 @@ impl crate::conn::StateMachine for ServerState {
             _ => Err(Error::HandshakeNotComplete),
         }
     }
+
+    fn ready_for_traffic(&self) -> bool {
+        matches!(self, Self::Tls13(tls13::Tls13State::Traffic(_)))
+    }
 }
 
 pub(super) struct Tls12Extensions {

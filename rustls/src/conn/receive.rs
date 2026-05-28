@@ -116,7 +116,18 @@ impl ReceivePath {
                 .recv
                 .receive_message(msg, hs_aligned, output.other.send)
             {
-                Ok(Some(input)) => st.handle(input, &mut output),
+                Ok(Some(input)) => {
+                    let st = st.handle(input, &mut output);
+
+                    if st
+                        .as_ref()
+                        .is_ok_and(|st| st.ready_for_traffic())
+                    {
+                        std::println!("state machine ready for traffic");
+                    }
+
+                    st
+                }
                 Ok(None) => Ok(st),
                 Err(e) => Err(e),
             };

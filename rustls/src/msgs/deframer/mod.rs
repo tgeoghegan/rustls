@@ -719,7 +719,7 @@ impl FragmentSpan {
     fn new(version: ProtocolVersion, size: Option<usize>, bounds: Range<usize>) -> Self {
         Self {
             version,
-            size: None,
+            size,
             bounds,
             dtls_fragment_fields: None,
             is_coalesced: false,

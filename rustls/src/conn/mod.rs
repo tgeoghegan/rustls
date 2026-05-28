@@ -914,6 +914,7 @@ pub(crate) trait StateMachine: Sized {
         self,
         send_keys: &Option<Box<KeyScheduleTrafficSend>>,
     ) -> Result<(PartiallyExtractedSecrets, Box<dyn KernelState + 'static>), Error>;
+    fn ready_for_traffic(&self) -> bool;
 }
 
 const DEFAULT_RECEIVED_PLAINTEXT_LIMIT: usize = 16 * 1024;
