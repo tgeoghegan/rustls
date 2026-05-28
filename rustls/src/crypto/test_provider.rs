@@ -5,8 +5,8 @@ use core::time::Duration;
 use std::borrow::Cow;
 
 use crate::crypto::cipher::{
-    AeadKey, EncodedMessage, InboundOpaque, Iv, KeyBlockShape, MessageDecrypter, MessageEncrypter,
-    OutboundOpaque, OutboundPlain, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
+    AeadKey, EncodedMessage, EncodingContext, InboundOpaque, Iv, KeyBlockShape, MessageDecrypter,
+    MessageEncrypter, OutboundOpaque, OutboundPlain, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
     UnsupportedOperationError,
 };
 use crate::crypto::kx::{
@@ -373,11 +373,16 @@ struct Tls13Cipher;
 impl MessageEncrypter for Tls13Cipher {
     fn encrypt(
         &mut self,
+        encoding_context: EncodingContext,
         m: EncodedMessage<OutboundPlain<'_>>,
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(m.header_size(), total_len);
+        let mut payload = OutboundOpaque::with_capacity(
+            encoding_context.header_size(m.version, m.epoch_and_sequence),
+            total_len,
+            encoding_context,
+        );
 
         payload.extend_from_chunks(&m.payload);
         payload.extend_from_slice(&m.typ.to_array());
@@ -444,11 +449,16 @@ struct Tls12Cipher;
 impl MessageEncrypter for Tls12Cipher {
     fn encrypt(
         &mut self,
+        encoding_context: EncodingContext,
         m: EncodedMessage<OutboundPlain<'_>>,
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
         let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(m.header_size(), total_len);
+        let mut payload = OutboundOpaque::with_capacity(
+            encoding_context.header_size(m.version, m.epoch_and_sequence),
+            total_len,
+            encoding_context,
+        );
         payload.extend_from_chunks(&m.payload);
 
         for (p, mask) in payload

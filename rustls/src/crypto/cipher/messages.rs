@@ -2,7 +2,6 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ops::{Deref, DerefMut, Range};
 
-use crate::common_state::Protocol;
 use crate::crypto::cipher::EncryptionState;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
@@ -17,26 +16,13 @@ use crate::msgs::{
 pub struct EncodedMessage<P> {
     /// The content type of this message.
     pub typ: ContentType,
-    /// The protocol version of this message.
+    /// The protocol version of this message. The actual protocol version that
+    /// gets encoded on the wire may differ based on `encoding_context`.
     pub version: ProtocolVersion,
     /// The epoch and sequence number, if DTLS is in use.
     pub epoch_and_sequence: Option<EpochAndSequence>,
     /// The payload of this message.
     pub payload: P,
-}
-
-/// Contextual information for encoding messages.
-#[derive(Clone, Debug)]
-pub struct EncodingContext {
-    /// The transport this message is being delivered over.
-    transport: Protocol,
-    /// The actual (D)TLS protocol version in use for this message, which often
-    /// is not the version encoded into the message, for backward compatibility
-    /// reasons.
-    actual_version: ProtocolVersion,
-    /// Whether the payload is encrypted on the wire. For example, `ClientHello`
-    /// is sent in plaintext because no keys have yet been negotiated.
-    encrypted_payload: bool,
 }
 
 impl<P> EncodedMessage<P> {
@@ -47,22 +33,6 @@ impl<P> EncodedMessage<P> {
             epoch_and_sequence: None,
             version,
             payload,
-        }
-    }
-
-    /// The size of the record layer header for this message.
-    pub fn header_size(&self) -> usize {
-        match (self.version, self.typ) {
-            (ProtocolVersion::DTLSv1_3, ContentType::Dtls13Ciphertext) => {
-                UnifiedHeader::header_length(
-                    self.epoch_and_sequence
-                        .unwrap()
-                        .sequence_number
-                        .0,
-                )
-            }
-            (p, _) if p.is_datagram_tls() => DTLS_12_HEADER_SIZE,
-            _ => HEADER_SIZE,
         }
     }
 }
@@ -93,12 +63,19 @@ impl<'a> EncodedMessage<Payload<'a>> {
     }
 
     /// Convert into an unencrypted [`EncodedMessage<OutboundOpaque>`] (without decrypting).
-    pub fn into_unencrypted_opaque(self) -> EncodedMessage<OutboundOpaque> {
+    pub fn into_unencrypted_opaque(
+        self,
+        encoding_context: EncodingContext,
+    ) -> EncodedMessage<OutboundOpaque> {
         EncodedMessage {
             typ: self.typ,
             version: self.version,
             epoch_and_sequence: self.epoch_and_sequence,
-            payload: OutboundOpaque::from_byte_slice(self.header_size(), self.payload.bytes()),
+            payload: OutboundOpaque::from_byte_slice(
+                encoding_context.header_size(self.version, self.epoch_and_sequence),
+                self.payload.bytes(),
+                encoding_context,
+            ),
         }
     }
 
@@ -108,7 +85,7 @@ impl<'a> EncodedMessage<Payload<'a>> {
             typ: self.typ,
             version: self.version,
             epoch_and_sequence: self.epoch_and_sequence,
-            payload: self.payload.bytes().into(),
+            payload: OutboundPlain::Single(self.payload.bytes()),
         }
     }
 
@@ -196,8 +173,15 @@ impl<'a> EncodedMessage<InboundOpaque<'a>> {
 }
 
 impl EncodedMessage<OutboundPlain<'_>> {
-    pub(crate) fn to_unencrypted_opaque(&self) -> EncodedMessage<OutboundOpaque> {
-        let mut payload = OutboundOpaque::with_capacity(self.header_size(), self.payload.len());
+    pub(crate) fn to_unencrypted_opaque(
+        &self,
+        encoding_context: EncodingContext,
+    ) -> EncodedMessage<OutboundOpaque> {
+        let mut payload = OutboundOpaque::with_capacity(
+            encoding_context.header_size(self.version, self.epoch_and_sequence),
+            self.payload.len(),
+            encoding_context,
+        );
         payload.extend_from_chunks(&self.payload);
         EncodedMessage {
             typ: self.typ,
@@ -209,14 +193,20 @@ impl EncodedMessage<OutboundPlain<'_>> {
 
     #[expect(dead_code)]
     pub(crate) fn encoded_len(&self, record_layer: &EncryptionState) -> usize {
-        self.header_size() + record_layer.encrypted_len(self.payload.len())
+        // TODO(timg): this is wrong, but it's dead code anyway
+        record_layer.encrypted_len(self.payload.len())
     }
 }
 
 impl EncodedMessage<OutboundOpaque> {
     /// Encode this message to a vector of bytes.
     pub fn encode(self) -> Vec<u8> {
-        if self.version == ProtocolVersion::DTLSv1_3 && self.typ == ContentType::Dtls13Ciphertext {
+        if self.version == ProtocolVersion::DTLSv1_3
+            && self
+                .payload
+                .encoding_context
+                .payload_is_encrypted
+        {
             let unified_header = UnifiedHeader::from_encoded_message(&self);
             let mut encoded =
                 Vec::with_capacity(unified_header.encoded_length() + self.payload.len());
@@ -229,7 +219,40 @@ impl EncodedMessage<OutboundOpaque> {
             let length = self.payload.len() as u16;
             let mut encoded_payload = self.payload.payload;
             encoded_payload[0] = self.typ.into();
-            encoded_payload[1..3].copy_from_slice(&self.version.to_array());
+
+            let encoded_version = match (
+                self.payload
+                    .encoding_context
+                    .preserve_version,
+                self.version,
+                self.payload
+                    .encoding_context
+                    .is_initial_handshake,
+            ) {
+                (true, _, _) => self.version,
+                // <https://datatracker.ietf.org/doc/html/rfc9147#section-4>:
+                // "This value MUST be set to {254, 253} for all records..."
+                (false, ProtocolVersion::DTLSv1_3 | ProtocolVersion::DTLSv1_2, false) => {
+                    ProtocolVersion::DTLSv1_2
+                }
+                // "... other than the initial ClientHello [...], where it may also
+                // be {254, 255} for compatibility purposes."
+                (false, ProtocolVersion::DTLSv1_3 | ProtocolVersion::DTLSv1_2, true) => {
+                    ProtocolVersion::DTLSv1_0
+                }
+                // <https://datatracker.ietf.org/doc/html/rfc8446#section-5.1>:
+                // "This value MUST be set to 0x0303 for all records generated
+                //  by a TLS 1.3 implementation ..."
+                (false, ProtocolVersion::TLSv1_3 | ProtocolVersion::TLSv1_2, false) => {
+                    ProtocolVersion::TLSv1_2
+                }
+                // "... other than an initial ClientHello (i.e., one not
+                // generated after a HelloRetryRequest), where it MAY also be
+                // 0x0301 for compatibility purposes"
+                _ => ProtocolVersion::TLSv1_0,
+            };
+
+            encoded_payload[1..3].copy_from_slice(&encoded_version.to_array());
             if let Some(EpochAndSequence {
                 epoch,
                 sequence_number,
@@ -302,7 +325,9 @@ impl<'a> OutboundPlain<'a> {
     pub fn copy_to_vec(&self, vec: &mut Vec<u8>) {
         match *self {
             Self::Single(chunk) => vec.extend_from_slice(chunk),
-            Self::Multiple { chunks, start, end } => {
+            Self::Multiple {
+                chunks, start, end, ..
+            } => {
                 let mut size = 0;
                 for chunk in chunks.iter() {
                     let psize = size;
@@ -376,28 +401,40 @@ impl<'a> From<&'a [u8]> for OutboundPlain<'a> {
 pub struct OutboundOpaque {
     header_size: usize,
     payload: Vec<u8>,
+    /// Contextual information needed to encode this message.
+    encoding_context: EncodingContext,
 }
 
 impl OutboundOpaque {
     /// Create a new value with the given payload capacity.
     ///
     /// (The actual capacity of the returned value will be at least `HEADER_SIZE + capacity`.)
-    pub fn with_capacity(header_size: usize, capacity: usize) -> Self {
+    pub fn with_capacity(
+        header_size: usize,
+        capacity: usize,
+        encoding_context: EncodingContext,
+    ) -> Self {
         let mut prefixed_payload = Vec::with_capacity(header_size + capacity);
         prefixed_payload.resize(header_size, 0);
         Self {
             header_size,
             payload: prefixed_payload,
+            encoding_context,
         }
     }
 
-    pub(crate) fn from_byte_slice(header_size: usize, content: &[u8]) -> Self {
+    pub(crate) fn from_byte_slice(
+        header_size: usize,
+        content: &[u8],
+        encoding_context: EncodingContext,
+    ) -> Self {
         let mut payload = Vec::with_capacity(header_size + content.len());
         payload.resize(header_size, 0);
         payload.extend(content);
         Self {
             header_size,
             payload,
+            encoding_context,
         }
     }
 
@@ -546,6 +583,54 @@ impl Deref for InboundOpaque<'_> {
 impl DerefMut for InboundOpaque<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
+    }
+}
+
+/// Contextual information for encoding messages.
+#[derive(Clone, Debug)]
+pub struct EncodingContext {
+    /// Whether this message is the initial handshake message, e.g., not a retry.
+    pub is_initial_handshake: bool,
+    /// Whether the payload is encrypted on the wire. For example, `ClientHello`
+    /// is sent in plaintext because no keys have yet been negotiated.
+    pub payload_is_encrypted: bool,
+    /// Whether to preserve the version in the EncodedMessage instead of
+    /// downgrading for compatibility.
+    pub preserve_version: bool,
+}
+
+impl EncodingContext {
+    /// The size of the record layer header for this message.
+    pub fn header_size(
+        &self,
+        version: ProtocolVersion,
+        epoch_and_sequence: Option<EpochAndSequence>,
+    ) -> usize {
+        // Encrypted DTLS 1.3 messages use a unified header, unencrypted DTLS
+        // 1.3 and DTLS 1.2 messages use a DTLS header, everything else uses a
+        // TLS header.
+        if version == ProtocolVersion::DTLSv1_3 && self.payload_is_encrypted {
+            UnifiedHeader::header_length(
+                epoch_and_sequence
+                    .unwrap()
+                    .sequence_number
+                    .0,
+            )
+        } else if version.is_datagram_tls() {
+            DTLS_12_HEADER_SIZE
+        } else {
+            HEADER_SIZE
+        }
+    }
+}
+
+impl Default for EncodingContext {
+    fn default() -> Self {
+        Self {
+            is_initial_handshake: false,
+            payload_is_encrypted: false,
+            preserve_version: false,
+        }
     }
 }
 

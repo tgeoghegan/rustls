@@ -99,7 +99,6 @@ impl Deref for KeyScheduleEarlyServer {
 /// See [`KeySchedulePreHandshake`] for more information.
 pub(crate) struct KeyScheduleEarly {
     ks: KeySchedule,
-    protocol: Protocol,
 }
 
 impl KeyScheduleEarly {
@@ -111,7 +110,6 @@ impl KeyScheduleEarly {
     ) -> Self {
         Self {
             ks: KeySchedule::new(local, protocol, suite, secret),
-            protocol,
         }
     }
 
@@ -205,7 +203,6 @@ impl KeyScheduleEarly {
 /// ```
 pub(crate) struct KeySchedulePreHandshake {
     ks: KeySchedule,
-    protocol: Protocol,
 }
 
 impl KeySchedulePreHandshake {
@@ -213,7 +210,6 @@ impl KeySchedulePreHandshake {
     pub(crate) fn new(local: Side, protocol: Protocol, suite: &'static Tls13CipherSuite) -> Self {
         Self {
             ks: KeySchedule::new_with_empty_secret(local, protocol, suite),
-            protocol,
         }
     }
 
@@ -229,28 +225,21 @@ impl KeySchedulePreHandshake {
     ) -> KeyScheduleHandshakeStart {
         self.ks
             .input_secret(shared_secret.secret_bytes());
-        KeyScheduleHandshakeStart {
-            ks: self.ks,
-            protocol: self.protocol,
-        }
+        KeyScheduleHandshakeStart { ks: self.ks }
     }
 }
 
 /// Creates a key schedule with a PSK.
 impl From<KeyScheduleEarlyClient> for KeySchedulePreHandshake {
-    fn from(
-        KeyScheduleEarlyClient(KeyScheduleEarly { ks, protocol }): KeyScheduleEarlyClient,
-    ) -> Self {
-        Self { ks, protocol }
+    fn from(KeyScheduleEarlyClient(KeyScheduleEarly { ks, .. }): KeyScheduleEarlyClient) -> Self {
+        Self { ks }
     }
 }
 
 /// Creates a key schedule with a PSK.
 impl From<KeyScheduleEarlyServer> for KeySchedulePreHandshake {
-    fn from(
-        KeyScheduleEarlyServer(KeyScheduleEarly { ks, protocol }): KeyScheduleEarlyServer,
-    ) -> Self {
-        Self { ks, protocol }
+    fn from(KeyScheduleEarlyServer(KeyScheduleEarly { ks, .. }): KeyScheduleEarlyServer) -> Self {
+        Self { ks }
     }
 }
 
@@ -259,7 +248,6 @@ impl From<KeyScheduleEarlyServer> for KeySchedulePreHandshake {
 /// Created by [`KeySchedulePreHandshake`].
 pub(crate) struct KeyScheduleHandshakeStart {
     ks: KeySchedule,
-    protocol: Protocol,
 }
 
 impl KeyScheduleHandshakeStart {
@@ -370,7 +358,6 @@ impl KeyScheduleHandshakeStart {
 
         KeyScheduleHandshake {
             ks: self.ks,
-            protocol: self.protocol,
             client_handshake_traffic_secret: client_secret,
             server_handshake_traffic_secret: server_secret,
         }
@@ -379,7 +366,6 @@ impl KeyScheduleHandshakeStart {
 
 pub(crate) struct KeyScheduleHandshake {
     ks: KeySchedule,
-    protocol: Protocol,
     client_handshake_traffic_secret: OkmBlock,
     server_handshake_traffic_secret: OkmBlock,
 }
@@ -433,7 +419,7 @@ impl KeyScheduleHandshake {
         debug_assert_eq!(self.ks.side, Side::Server);
 
         let before_finished =
-            KeyScheduleBeforeFinished::new(self.ks, self.protocol, hs_hash, key_log, client_random);
+            KeyScheduleBeforeFinished::new(self.ks, hs_hash, key_log, client_random);
         let (client_secret, server_secret) = (
             &before_finished.current_client_traffic_secret,
             &before_finished.current_server_traffic_secret,
@@ -466,13 +452,8 @@ impl KeyScheduleHandshake {
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
     ) -> (KeyScheduleClientBeforeFinished, hmac::PublicTag) {
-        let before_finished = KeyScheduleBeforeFinished::new(
-            self.ks,
-            self.protocol,
-            pre_finished_hash,
-            key_log,
-            client_random,
-        );
+        let before_finished =
+            KeyScheduleBeforeFinished::new(self.ks, pre_finished_hash, key_log, client_random);
         let tag = before_finished
             .ks
             .sign_finish(&self.client_handshake_traffic_secret, &handshake_hash);
@@ -487,7 +468,6 @@ impl KeyScheduleHandshake {
 /// Keys derived (but not installed) before client's Finished message.
 pub(crate) struct KeyScheduleBeforeFinished {
     ks: KeySchedule,
-    protocol: Protocol,
     current_client_traffic_secret: OkmBlock,
     current_server_traffic_secret: OkmBlock,
     current_exporter_secret: OkmBlock,
@@ -496,7 +476,6 @@ pub(crate) struct KeyScheduleBeforeFinished {
 impl KeyScheduleBeforeFinished {
     fn new(
         mut ks: KeySchedule,
-        protocol: Protocol,
         hs_hash: hash::Output,
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
@@ -526,7 +505,6 @@ impl KeyScheduleBeforeFinished {
 
         Self {
             ks,
-            protocol,
             current_client_traffic_secret,
             current_server_traffic_secret,
             current_exporter_secret,
@@ -543,10 +521,10 @@ impl KeyScheduleBeforeFinished {
     ) {
         let Self {
             ks,
-            protocol,
             current_client_traffic_secret,
             current_server_traffic_secret,
             current_exporter_secret,
+            ..
         } = self;
 
         let resumption_master_secret =
@@ -555,7 +533,6 @@ impl KeyScheduleBeforeFinished {
         (
             KeyScheduleTraffic {
                 ks: ks.inner,
-                protocol,
                 current_client_traffic_secret,
                 current_server_traffic_secret,
             },
@@ -667,7 +644,6 @@ impl KeyScheduleTrafficWithClientFinishedPending {
 /// to be available.
 pub(crate) struct KeyScheduleTraffic {
     ks: KeyScheduleSuite,
-    protocol: Protocol,
     current_client_traffic_secret: OkmBlock,
     current_server_traffic_secret: OkmBlock,
 }
@@ -689,7 +665,6 @@ impl KeyScheduleTraffic {
             KeyScheduleTrafficSend {
                 ks: self.ks,
                 current: send,
-                protocol: self.protocol,
             },
             KeyScheduleTrafficReceive {
                 ks: self.ks,
@@ -703,7 +678,6 @@ impl KeyScheduleTraffic {
 pub(crate) struct KeyScheduleTrafficSend {
     ks: KeyScheduleSuite,
     current: OkmBlock,
-    protocol: Protocol,
 }
 
 impl KeyScheduleTrafficSend {
@@ -714,7 +688,7 @@ impl KeyScheduleTrafficSend {
     }
 
     pub(crate) fn request_key_update_and_update_encrypter(&mut self, send: &mut dyn SendOutput) {
-        send.send_msg(Message::build_key_update_request(), true);
+        send.send_msg(Message::build_key_update_request(), true, false);
         let secret = self.ks.derive_next(&self.current);
         self.ks.set_encrypter(&secret, send);
         self.current = secret;

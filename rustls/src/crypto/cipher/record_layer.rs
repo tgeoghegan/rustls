@@ -2,10 +2,10 @@ use alloc::boxed::Box;
 use core::cmp::min;
 
 use crate::crypto::cipher::{
-    EncodedMessage, InboundOpaque, MessageDecrypter, MessageEncrypter, OutboundOpaque,
-    OutboundPlain,
+    EncodedMessage, EncodingContext, InboundOpaque, MessageDecrypter, MessageEncrypter,
+    OutboundOpaque, OutboundPlain,
 };
-use crate::enums::{ContentType, ProtocolVersion};
+use crate::enums::ProtocolVersion;
 use crate::error::Error;
 use crate::log::trace;
 use crate::msgs::HandshakeAlignedProof;
@@ -41,21 +41,23 @@ impl EncryptionState {
         &mut self,
         plain: EncodedMessage<OutboundPlain<'_>>,
     ) -> EncodedMessage<OutboundOpaque> {
+        assert!(self.version.is_some());
         assert!(self.next_pre_encrypt_action() != PreEncryptAction::Refuse);
         let seq = self.write_seq;
         self.write_seq += 1;
-        let mut outbound_opaque = self
-            .message_encrypter
+        self.message_encrypter
             .as_mut()
             .unwrap()
-            .encrypt(plain, seq)
-            .unwrap();
-
-        if self.version == Some(ProtocolVersion::DTLSv1_3) {
-            outbound_opaque.typ = ContentType::Dtls13Ciphertext;
-        }
-
-        outbound_opaque
+            .encrypt(
+                EncodingContext {
+                    is_initial_handshake: false,
+                    payload_is_encrypted: true,
+                    ..Default::default()
+                },
+                plain,
+                seq,
+            )
+            .unwrap()
     }
 
     /// Set and start using the given `MessageEncrypter` for future outgoing

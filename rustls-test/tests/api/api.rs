@@ -1424,7 +1424,7 @@ fn test_illegal_server_renegotiation_attempt_after_tls13_handshake() {
             vec![],
         )),
     };
-    raw_server.encrypt_and_send(&msg, &mut client);
+    raw_server.encrypt_and_send(true, &msg, &mut client);
     let err = client
         .process_new_packets()
         .unwrap_err();
@@ -1460,7 +1460,7 @@ fn test_illegal_server_renegotiation_attempt_after_tls12_handshake() {
     };
 
     // one is allowed (and elicits a warning alert)
-    raw_server.encrypt_and_send(&msg, &mut client);
+    raw_server.encrypt_and_send(false, &msg, &mut client);
     client.process_new_packets().unwrap();
     raw_server.receive_and_decrypt(&mut client, |m| {
         assert_eq!(m.version, ProtocolVersion::TLSv1_2);
@@ -1469,7 +1469,7 @@ fn test_illegal_server_renegotiation_attempt_after_tls12_handshake() {
     });
 
     // second is fatal
-    raw_server.encrypt_and_send(&msg, &mut client);
+    raw_server.encrypt_and_send(false, &msg, &mut client);
     assert_eq!(
         client
             .process_new_packets()
@@ -1496,7 +1496,7 @@ fn test_illegal_client_renegotiation_attempt_after_tls13_handshake() {
         epoch_and_sequence: None,
         payload: Payload::new(encoding::basic_client_hello(vec![])),
     };
-    raw_client.encrypt_and_send(&msg, &mut server);
+    raw_client.encrypt_and_send(false, &msg, &mut server);
     let err = server
         .process_new_packets()
         .unwrap_err();

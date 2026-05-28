@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 
 use crate::common_state::Protocol;
 use crate::crypto::cipher::{
-    EncodedMessage, EncryptionState, MessageEncrypter, OutboundOpaque, OutboundPlain,
-    PreEncryptAction,
+    EncodedMessage, EncodingContext, EncryptionState, MessageEncrypter, OutboundOpaque,
+    OutboundPlain, PreEncryptAction,
 };
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
@@ -264,10 +264,11 @@ impl SendPath {
         self.send_msg(
             Message::build_alert(level, desc),
             self.encrypt_state.is_encrypting(),
+            false,
         );
     }
 
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, is_retry_req: bool) {
         match (self.protocol, &m.payload) {
             // DTLS handshake messages can be fragmented into multiple records which contain
             // information necessary for reassembly.
@@ -295,6 +296,7 @@ impl SendPath {
                                 .into(),
                         },
                         must_encrypt,
+                        is_retry_req,
                     );
                 }
             }
@@ -320,6 +322,7 @@ impl SendPath {
                             payload: payload_encoding.as_slice().into(),
                         },
                         must_encrypt,
+                        is_retry_req,
                     );
                 }
 
@@ -331,6 +334,7 @@ impl SendPath {
                 m.encoded_message(self.dtls_epoch_and_sequence())
                     .borrow_outbound(),
                 must_encrypt,
+                is_retry_req,
             ),
             // TLS messages can be fragmented into multiple TCP or QUIC packets
             _ => {
@@ -339,7 +343,7 @@ impl SendPath {
                     .message_fragmenter
                     .fragment_message(&msg)
                 {
-                    self.send_fragment(m, must_encrypt);
+                    self.send_fragment(m, must_encrypt, is_retry_req);
                 }
             }
         }
@@ -349,11 +353,16 @@ impl SendPath {
         &mut self,
         fragment: EncodedMessage<OutboundPlain<'a>>,
         must_encrypt: bool,
+        is_retry_req: bool,
     ) {
         if must_encrypt {
             self.send_single_fragment(fragment);
         } else {
-            self.queue_tls_message(fragment.to_unencrypted_opaque());
+            self.queue_tls_message(fragment.to_unencrypted_opaque(EncodingContext {
+                is_initial_handshake: is_retry_req,
+                payload_is_encrypted: false,
+                ..Default::default()
+            }));
         }
     }
 
@@ -431,6 +440,8 @@ impl SendPath {
 impl SendOutput for SendPath {
     fn negotiated_version(&mut self, version: ProtocolVersion) {
         self.negotiated_version = Some(version);
+        self.encrypt_state
+            .set_protocol_version(version);
     }
 
     fn ensure_key_update_queued(&mut self) {
@@ -456,8 +467,8 @@ impl SendOutput for SendPath {
     }
 
     /// Send a raw TLS message, fragmenting it if needed.
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
-        self.send_msg(m, must_encrypt);
+    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, is_retry_req: bool) {
+        self.send_msg(m, must_encrypt, is_retry_req);
     }
 }
 
@@ -474,7 +485,7 @@ pub(crate) trait SendOutput {
 
     fn start_traffic(&mut self);
 
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool);
+    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, is_retry_req: bool);
 }
 
 pub(super) const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;

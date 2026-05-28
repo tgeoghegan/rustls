@@ -149,7 +149,7 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     /// Returns number of bytes transmitted, not including DTLS overhead.
     fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
         let sent = self.core.common.send.buffer_plaintext(
-            OutboundPlain::new(&[bytes.as_ref()]),
+            OutboundPlain::Single(bytes.as_ref()),
             &mut self.buffered_plaintext,
         );
 

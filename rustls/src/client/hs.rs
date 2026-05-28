@@ -832,26 +832,10 @@ fn emit_client_hello_for_retry(
     };
 
     let ch = Message {
-        // TODO(timg): I think we might need to say DTLS 1.3 here and lower the place where we lie
-        // about 1.2 to like the cipher/message layer, because we need to know the real protocol to
-        // make encoding decision
-        version: match (input.protocol, retryreq) {
-            // <https://datatracker.ietf.org/doc/html/rfc9147#section-4>:
-            // "This value MUST be set to {254, 253} for all records..."
-            (Protocol::Udp, Some(_)) => ProtocolVersion::DTLSv1_2,
-            // "... other than the initial ClientHello [...], where it may also
-            // be {254, 255} for compatibility purposes."
-            (Protocol::Udp, None) => ProtocolVersion::DTLSv1_0,
-            // <https://datatracker.ietf.org/doc/html/rfc8446#section-5.1>:
-            // "This value MUST be set to 0x0303 for all records generated
-            //  by a TLS 1.3 implementation ..."
-            (_, Some(_)) => ProtocolVersion::TLSv1_2,
-            // "... other than an initial ClientHello (i.e., one not
-            // generated after a HelloRetryRequest), where it MAY also be
-            // 0x0301 for compatibility purposes"
-            //
-            // (retryreq == None means we're in the "initial ClientHello" case)
-            (_, None) => ProtocolVersion::TLSv1_0,
+        version: if input.protocol.is_dtls() {
+            ProtocolVersion::DTLSv1_2
+        } else {
+            ProtocolVersion::TLSv1_2
         },
         payload: MessagePayload::handshake(chp),
     };
@@ -863,7 +847,7 @@ fn emit_client_hello_for_retry(
     }
 
     transcript_buffer.add_message(&ch);
-    output.send_msg(ch, false);
+    output.send_msg(ch, false, retryreq.is_some());
 
     // Calculate the hash of ClientHello and use it to derive EarlyTrafficSecret
     let early_data_key_schedule =

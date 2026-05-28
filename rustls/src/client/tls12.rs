@@ -484,7 +484,7 @@ fn emit_certificate(
     };
 
     hs.transcript.add_message(&cert);
-    output.send_msg(cert, false);
+    output.send_msg(cert, false, false);
 }
 
 fn emit_client_kx(
@@ -513,7 +513,7 @@ fn emit_client_kx(
     };
 
     hs.transcript.add_message(&ckx);
-    output.send_msg(ckx, false);
+    output.send_msg(ckx, false, false);
 }
 
 fn emit_certverify(
@@ -538,7 +538,7 @@ fn emit_certverify(
     };
 
     hs.transcript.add_message(&m);
-    output.send_msg(m, false);
+    output.send_msg(m, false, false);
     Ok(())
 }
 
@@ -548,6 +548,7 @@ fn emit_ccs(hs: &HandshakeState, output: &mut dyn Output<'_>) {
             version: hs.protocol.wire_protocol_version(),
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         },
+        false,
         false,
     );
 }
@@ -570,7 +571,7 @@ fn emit_finished(
     };
 
     hs.transcript.add_message(&f);
-    output.send_msg(f, true);
+    output.send_msg(f, true, false);
 }
 
 struct ServerKxDetails {

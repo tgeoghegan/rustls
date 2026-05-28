@@ -299,7 +299,7 @@ mod tests {
     use std::vec;
 
     use super::MessageFragmenter;
-    use crate::crypto::cipher::{EncodedMessage, OutboundPlain, Payload};
+    use crate::crypto::cipher::{EncodedMessage, EncodingContext, OutboundPlain, Payload};
     use crate::enums::{ContentType, ProtocolVersion};
     use crate::msgs::HEADER_SIZE;
 
@@ -314,7 +314,12 @@ mod tests {
         assert_eq!(&m.version, version);
         assert_eq!(m.payload.to_vec(), bytes);
 
-        let buf = m.to_unencrypted_opaque().encode();
+        let buf = m
+            .to_unencrypted_opaque(EncodingContext {
+                payload_is_encrypted: false,
+                ..Default::default()
+            })
+            .encode();
 
         assert_eq!(total_len, buf.len());
     }

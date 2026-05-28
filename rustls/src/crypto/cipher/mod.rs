@@ -12,7 +12,8 @@ use crate::suites::ConnectionTrafficSecrets;
 
 mod messages;
 pub use messages::{
-    EncodedMessage, InboundOpaque, MessageError, OutboundOpaque, OutboundPlain, Payload,
+    EncodedMessage, EncodingContext, InboundOpaque, MessageError, OutboundOpaque, OutboundPlain,
+    Payload,
 };
 
 mod record_layer;
@@ -166,6 +167,7 @@ pub trait MessageEncrypter: Send + Sync {
     /// `seq` which can be used to derive a unique [`Nonce`].
     fn encrypt(
         &mut self,
+        encoding_context: EncodingContext,
         msg: EncodedMessage<OutboundPlain<'_>>,
         seq: u64,
     ) -> Result<EncodedMessage<OutboundOpaque>, Error>;

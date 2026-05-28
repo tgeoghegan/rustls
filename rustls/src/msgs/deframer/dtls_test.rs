@@ -1,5 +1,6 @@
 use crate::EpochAndSequence;
 use crate::crypto::CipherSuite;
+use crate::crypto::cipher::EncodingContext;
 use crate::enums::HandshakeType;
 use crate::msgs::{
     ClientExtensions, ClientHelloPayload, Codec, Compression, DTLS_12_HEADER_SIZE,
@@ -94,7 +95,7 @@ fn single_handshake_fragment(version: ProtocolVersion) {
             .as_slice()
             .into(),
     }
-    .to_unencrypted_opaque()
+    .to_unencrypted_opaque(EncodingContext::default())
     .encode();
     let record_wire_bytes_len = record_wire_bytes.len();
 
@@ -180,7 +181,7 @@ fn multiple_handshake_fragment_in_order(
                     .as_slice()
                     .into(),
             }
-            .to_unencrypted_opaque()
+            .to_unencrypted_opaque(EncodingContext::default())
             .encode()
             .as_slice(),
         );
@@ -317,7 +318,7 @@ fn multiple_handshake_fragment_overlapping(version: ProtocolVersion) {
                     .as_slice()
                     .into(),
             }
-            .to_unencrypted_opaque()
+            .to_unencrypted_opaque(EncodingContext::default())
             .encode()
             .as_slice(),
         );
@@ -418,7 +419,7 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1(version: Pro
                     .as_slice()
                     .into(),
             }
-            .to_unencrypted_opaque()
+            .to_unencrypted_opaque(EncodingContext::default())
             .encode()
             .as_slice(),
         );
@@ -522,7 +523,7 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2(version: Pro
                     .as_slice()
                     .into(),
             }
-            .to_unencrypted_opaque()
+            .to_unencrypted_opaque(EncodingContext::default())
             .encode()
             .as_slice(),
         );
@@ -662,7 +663,7 @@ fn single_record_multiple_handshake_messages(version: ProtocolVersion) {
             .as_slice()
             .into(),
     }
-    .to_unencrypted_opaque()
+    .to_unencrypted_opaque(EncodingContext::default())
     .encode();
 
     let mut deframer = Deframer::default();
@@ -769,7 +770,7 @@ fn handshake_messages_span_records(version: ProtocolVersion) {
                 .as_slice()
                 .into(),
         }
-        .to_unencrypted_opaque()
+        .to_unencrypted_opaque(EncodingContext::default())
         .encode();
         encoded_records.extend_from_slice(&encoded_record.as_slice());
     }
@@ -866,7 +867,7 @@ fn multiple_fragments_application_data(version: ProtocolVersion) {
         payload: MessagePayload::new(ContentType::ApplicationData, version, &[1; 32]).unwrap(),
     }
     .encoded_message(Some(EpochAndSequence::new(3, 11)))
-    .into_unencrypted_opaque();
+    .into_unencrypted_opaque(EncodingContext::default());
 
     let encoded_first_record = first_record.clone().encode();
     let encoded_first_record_len = encoded_first_record.len();
@@ -876,7 +877,7 @@ fn multiple_fragments_application_data(version: ProtocolVersion) {
         payload: MessagePayload::new(ContentType::ApplicationData, version, &[4; 92]).unwrap(),
     }
     .encoded_message(Some(EpochAndSequence::new(3, 12)))
-    .into_unencrypted_opaque();
+    .into_unencrypted_opaque(EncodingContext::default());
 
     let encoded_second_record = second_record.clone().encode();
     let encoded_second_record_len = encoded_second_record.len();

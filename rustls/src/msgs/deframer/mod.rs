@@ -7,8 +7,8 @@ use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage};
 use crate::msgs::codec::{Codec, Reader, U24};
 use crate::msgs::{
-    DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment, EpochAndSequence, MessageHeader,
-    UnifiedHeader, read_opaque_message_header,
+    DTLS_12_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment, EpochAndSequence,
+    HEADER_SIZE, MessageHeader, UnifiedHeader, read_opaque_message_header,
 };
 
 mod buffers;
@@ -63,15 +63,18 @@ impl Deframer {
         let unprocessed_buf = buf.get(self.processed..)?;
 
         let mut reader = Reader::new(unprocessed_buf);
-        let (typ, version, epoch_and_sequence, len) = if unprocessed_buf.len() > 0
+        let (typ, version, epoch_and_sequence, len, header_size) = if unprocessed_buf.len() > 0
             && UnifiedHeader::is_unified_header(unprocessed_buf[0])
         {
-            let UnifiedHeader {
-                connection_id: _,
-                length,
-                epoch_and_sequence,
-            } = match UnifiedHeader::read(&mut reader, self.latest_epoch_and_sequence) {
-                Ok(header) => header,
+            let (
+                header_size,
+                UnifiedHeader {
+                    connection_id: _,
+                    length,
+                    epoch_and_sequence,
+                },
+            ) = match UnifiedHeader::read(&mut reader, self.latest_epoch_and_sequence) {
+                Ok(header) => (header.encoded_length(), header),
                 Err(err) => return Some(Err(err.into())),
             };
 
@@ -103,6 +106,7 @@ impl Deframer {
                 ProtocolVersion::DTLSv1_3,
                 Some(epoch_and_sequence),
                 length,
+                header_size,
             )
         } else {
             let MessageHeader {
@@ -127,17 +131,20 @@ impl Deframer {
                     return Some(Err(err.into()));
                 }
             };
-            (typ, version, epoch_and_sequence, len)
+            (
+                typ,
+                version,
+                epoch_and_sequence,
+                len,
+                // If we're here, then there wasn't a unified header on the record, and so DTLS 1.2
+                // and 1.3 records have the same header size.
+                if version.is_datagram_tls() {
+                    DTLS_12_HEADER_SIZE
+                } else {
+                    HEADER_SIZE
+                },
+            )
         };
-
-        // TODO(timg): this is a hack, we need something we can call .header_size on
-        let header_size = EncodedMessage {
-            typ,
-            version,
-            epoch_and_sequence,
-            payload: [0u8; 0],
-        }
-        .header_size();
 
         // we now have a TLS header and body on the front of `self.buf`.  remove
         // it from the front.

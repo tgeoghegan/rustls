@@ -36,6 +36,8 @@ use core::cmp::min_by_key;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+#[cfg(test)]
+use crate::crypto::cipher::EncodingContext;
 use crate::crypto::cipher::{EncodedMessage, MessageError, OutboundOpaque, Payload};
 use crate::enums::{ContentType, ContentTypeName, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, InvalidMessage};
@@ -103,7 +105,7 @@ mod handshake_test;
 pub mod fuzzing {
     pub use super::deframer::fuzz_deframer;
     use super::{Codec, EncodedMessage, Message, MessageFragmenter, Payload, Reader};
-    use crate::server::ServerSessionValue;
+    use crate::{crypto::cipher::EncodingContext, server::ServerSessionValue};
 
     pub fn fuzz_fragmenter(data: &[u8]) {
         let mut rdr = Reader::new(data);
@@ -142,7 +144,7 @@ pub mod fuzzing {
         //println!("msg = {:#?}", m);
         let enc = msg
             .encoded_message(None)
-            .into_unencrypted_opaque()
+            .into_unencrypted_opaque(EncodingContext::default())
             .encode();
         //println!("data = {:?}", &data[..rdr.used()]);
         assert_eq!(enc, data[..data.len() - rdr.left()]);
@@ -199,9 +201,9 @@ impl<'a> Message<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn into_wire_bytes(self) -> Vec<u8> {
+    pub(crate) fn into_wire_bytes(self, encoding_context: &EncodingContext) -> Vec<u8> {
         self.encoded_message(None)
-            .into_unencrypted_opaque()
+            .into_unencrypted_opaque(encoding_context.clone())
             .encode()
     }
 
@@ -1121,7 +1123,11 @@ mod tests {
                 continue;
             };
 
-            let enc = msg.into_wire_bytes();
+            let enc = msg.into_wire_bytes(&EncodingContext {
+                payload_is_encrypted: true,
+                preserve_version: true,
+                ..Default::default()
+            });
             assert_eq!(bytes.to_vec(), enc);
             assert_eq!(bytes[..bytes.len() - rd.left()].to_vec(), enc);
         }
@@ -1205,7 +1211,11 @@ mod tests {
     fn into_wire_format() {
         // Message::into_wire_bytes() include both message-level and handshake-level headers
         assert_eq!(
-            Message::build_key_update_request().into_wire_bytes(),
+            Message::build_key_update_request().into_wire_bytes(&EncodingContext {
+                payload_is_encrypted: true,
+                preserve_version: true,
+                ..Default::default()
+            }),
             &[0x16, 0x3, 0x4, 0x0, 0x5, 0x18, 0x0, 0x0, 0x1, 0x1]
         );
     }
@@ -1222,7 +1232,11 @@ mod tests {
                 typ: m.typ,
                 version: m.version,
                 epoch_and_sequence: None,
-                payload: OutboundOpaque::from_byte_slice(m.header_size(), m.payload.bytes()),
+                payload: OutboundOpaque::from_byte_slice(
+                    HEADER_SIZE,
+                    m.payload.bytes(),
+                    EncodingContext::default(),
+                ),
             }
             .encode();
             assert!(!out.is_empty());

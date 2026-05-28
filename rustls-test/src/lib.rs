@@ -11,7 +11,7 @@ use rustls::client::{
     ClientSessionKey, ServerVerifierBuilder, Tls13Session, WantsClientCert, WebPkiServerVerifier,
 };
 use rustls::crypto::cipher::{
-    EncodedMessage, InboundOpaque, MessageDecrypter, MessageEncrypter, Payload,
+    EncodedMessage, EncodingContext, InboundOpaque, MessageDecrypter, MessageEncrypter, Payload,
 };
 use rustls::crypto::kx::{NamedGroup, SupportedKxGroup};
 use rustls::crypto::{
@@ -1348,12 +1348,20 @@ impl RawTls {
 
     pub fn encrypt_and_send(
         &mut self,
+        is_initial_handshake: bool,
         msg: &EncodedMessage<Payload<'_>>,
         peer: &mut impl Connection,
     ) {
         let data = self
             .encrypter
-            .encrypt(msg.borrow_outbound(), self.enc_seq)
+            .encrypt(
+                EncodingContext {
+                    is_initial_handshake,
+                    payload_is_encrypted: true,
+                },
+                msg.borrow_outbound(),
+                self.enc_seq,
+            )
             .unwrap()
             .encode();
         self.enc_seq += 1;
@@ -1767,8 +1775,8 @@ pub fn certificate_error_expecting_name(expected: &str) -> CertificateError {
 mod plaintext {
     use rustls::ConnectionTrafficSecrets;
     use rustls::crypto::cipher::{
-        AeadKey, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter, OutboundOpaque,
-        OutboundPlain, Tls13AeadAlgorithm, UnsupportedOperationError,
+        AeadKey, EncodingContext, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter,
+        OutboundOpaque, OutboundPlain, Tls13AeadAlgorithm, UnsupportedOperationError,
     };
 
     use super::*;
@@ -1807,10 +1815,15 @@ mod plaintext {
     impl MessageEncrypter for Encrypter {
         fn encrypt(
             &mut self,
+            encoding_context: EncodingContext,
             msg: EncodedMessage<OutboundPlain<'_>>,
             _seq: u64,
         ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
-            let mut payload = OutboundOpaque::with_capacity(msg.header_size(), msg.payload.len());
+            let mut payload = OutboundOpaque::with_capacity(
+                encoding_context.header_size(msg.version, msg.epoch_and_sequence),
+                msg.payload.len(),
+                encoding_context,
+            );
             payload.extend_from_chunks(&msg.payload);
 
             Ok(EncodedMessage {
