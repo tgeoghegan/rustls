@@ -587,7 +587,7 @@ impl DerefMut for InboundOpaque<'_> {
 }
 
 /// Contextual information for encoding messages.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct EncodingContext {
     /// Whether this message is the initial handshake message, e.g., not a retry.
     pub is_initial_handshake: bool,

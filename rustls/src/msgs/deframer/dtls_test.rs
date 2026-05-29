@@ -41,10 +41,20 @@ fn check_reassembled_message(
     idx: usize,
     original_message: &EncodedMessage<Payload<'_>>,
     reassembled_message: &EncodedMessage<&[u8]>,
+    encrypted_dtls13: bool,
 ) {
     assert_eq!(reassembled_message.typ, original_message.typ, "idx: {idx}");
+    // Encrypted DTLS 1.3 messages will have a unified header on the wire and
+    // will be interpreted as having ProtocolVersion::DTLSv1_3. For other
+    // messages, regardless of the original message's protocol version, the
+    // message on the wire will have version 1.2.
     assert_eq!(
-        reassembled_message.version, original_message.version,
+        reassembled_message.version,
+        if encrypted_dtls13 {
+            ProtocolVersion::DTLSv1_3
+        } else {
+            ProtocolVersion::DTLSv1_2
+        },
         "idx: {idx}"
     );
     assert_eq!(reassembled_message.epoch_and_sequence, None, "idx: {idx}");
@@ -66,8 +76,8 @@ fn check_reassembled_message(
     Message::try_from(reassembled_message.clone()).unwrap();
 }
 
-fn single_handshake_fragment(version: ProtocolVersion) {
-    let header_size = if version == ProtocolVersion::DTLSv1_2 {
+fn single_handshake_fragment(version: ProtocolVersion, encrypted: bool) {
+    let header_size = if version == ProtocolVersion::DTLSv1_2 || !encrypted {
         DTLS_12_HEADER_SIZE
     } else {
         UnifiedHeader::header_length(0)
@@ -95,7 +105,10 @@ fn single_handshake_fragment(version: ProtocolVersion) {
             .as_slice()
             .into(),
     }
-    .to_unencrypted_opaque(EncodingContext::default())
+    .to_unencrypted_opaque(EncodingContext {
+        payload_is_encrypted: encrypted,
+        ..Default::default()
+    })
     .encode();
     let record_wire_bytes_len = record_wire_bytes.len();
 
@@ -127,25 +140,43 @@ fn single_handshake_fragment(version: ProtocolVersion) {
 
     // We should get the whole handshake message out of the deframer
     let reassembled_message = deframer.message(message_span, &record_wire_bytes);
-    check_reassembled_message(0, &record, &reassembled_message);
+    check_reassembled_message(
+        0,
+        &record,
+        &reassembled_message,
+        encrypted && version == ProtocolVersion::DTLSv1_3,
+    );
 }
 
 #[test]
-fn single_handshake_fragment_dtls_12() {
-    single_handshake_fragment(ProtocolVersion::DTLSv1_2);
+fn single_handshake_fragment_dtls_12_unencrypted() {
+    single_handshake_fragment(ProtocolVersion::DTLSv1_2, false);
 }
 
 #[test]
-fn single_handshake_fragment_dtls_13() {
-    single_handshake_fragment(ProtocolVersion::DTLSv1_3);
+fn single_handshake_fragment_dtls_12_encrypted() {
+    single_handshake_fragment(ProtocolVersion::DTLSv1_2, true);
+}
+
+#[test]
+fn single_handshake_fragment_dtls_13_unencrypted() {
+    // Sending unencrypted handshake messages means no unified header
+    single_handshake_fragment(ProtocolVersion::DTLSv1_3, false);
+}
+
+#[test]
+fn single_handshake_fragment_dtls_13_encrypted() {
+    // Encrypted handshake messages means a unified header
+    single_handshake_fragment(ProtocolVersion::DTLSv1_3, true);
 }
 
 fn multiple_handshake_fragment_in_order(
     version: ProtocolVersion,
     start_epoch: u16,
     start_sequence: u64,
+    encrypted: bool,
 ) {
-    let header_size = if version == ProtocolVersion::DTLSv1_2 {
+    let header_size = if version == ProtocolVersion::DTLSv1_2 || !encrypted {
         DTLS_12_HEADER_SIZE
     } else {
         UnifiedHeader::header_length(start_sequence)
@@ -181,7 +212,10 @@ fn multiple_handshake_fragment_in_order(
                     .as_slice()
                     .into(),
             }
-            .to_unencrypted_opaque(EncodingContext::default())
+            .to_unencrypted_opaque(EncodingContext {
+                payload_is_encrypted: encrypted,
+                ..Default::default()
+            })
             .encode()
             .as_slice(),
         );
@@ -223,26 +257,45 @@ fn multiple_handshake_fragment_in_order(
 
             // We should get the whole handshake message out of the deframer
             let reassembled_handshake_message = deframer.message(message_span, &encoded_records);
-            check_reassembled_message(record_idx, &record, &reassembled_handshake_message);
+            check_reassembled_message(
+                record_idx,
+                &record,
+                &reassembled_handshake_message,
+                version == ProtocolVersion::DTLSv1_3 && encrypted,
+            );
         }
     }
 }
 
 #[test]
-fn multiple_handshake_fragment_in_order_dtls_12() {
-    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_2, 3, 11);
+fn multiple_handshake_fragment_in_order_unencrypted_dtls_12() {
+    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_2, 3, 11, false);
 }
 
 #[test]
-fn multiple_handshake_fragment_in_order_dtls_13() {
-    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_3, 3, 11);
+fn multiple_handshake_fragment_in_order_encrypted_dtls_12() {
+    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_2, 3, 11, true);
+}
+
+#[test]
+fn multiple_handshake_fragment_in_order_unencrypted_dtls_13() {
+    // Send an unencrypted handshake message, as would be the case for a ClientHello, so that a full
+    // DTLS record header is written and not a unified header
+    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_3, 3, 11, false);
+}
+
+#[test]
+fn multiple_handshake_fragment_in_order_encrypted_dtls_13() {
+    // Send an encrypted handshake message, as would be the case once keys are negotiated, so that a
+    // unified header is written
+    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_3, 3, 11, true);
 }
 
 #[test]
 fn multiple_handshake_fragment_in_order_large_epoch_and_sequence_dtls_12() {
     // Use epoch and sequence values too large to fit in 2 or 16 bits, respectively. This shouldn't
     // make a difference in DTLS 1.2
-    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_2, 11, 70000);
+    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_2, 11, 70000, false);
 }
 
 #[test]
@@ -251,7 +304,7 @@ fn multiple_handshake_fragment_in_order_large_epoch_and_sequence_dtls_13() {
     // values too big to fit into their respective fields in the DTLS 1.3 unified header, forcing
     // "Reconstructing the Sequence Number and Epoch".
     // <https://datatracker.ietf.org/doc/html/rfc9147#section-4.2.2>
-    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_3, 11, 70000);
+    multiple_handshake_fragment_in_order(ProtocolVersion::DTLSv1_3, 11, 70000, false);
 }
 
 fn multiple_handshake_fragment_overlapping(version: ProtocolVersion) {
@@ -318,7 +371,10 @@ fn multiple_handshake_fragment_overlapping(version: ProtocolVersion) {
                     .as_slice()
                     .into(),
             }
-            .to_unencrypted_opaque(EncodingContext::default())
+            .to_unencrypted_opaque(EncodingContext {
+                payload_is_encrypted: true,
+                ..Default::default()
+            })
             .encode()
             .as_slice(),
         );
@@ -355,7 +411,12 @@ fn multiple_handshake_fragment_overlapping(version: ProtocolVersion) {
 
             // We should get the whole handshake message out of the deframer
             let reassembled_handshake_message = deframer.message(message_span, &encoded_records);
-            check_reassembled_message(record_idx, &record, &reassembled_handshake_message);
+            check_reassembled_message(
+                record_idx,
+                &record,
+                &reassembled_handshake_message,
+                version == ProtocolVersion::DTLSv1_3,
+            );
         }
     }
 }
@@ -419,7 +480,10 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1(version: Pro
                     .as_slice()
                     .into(),
             }
-            .to_unencrypted_opaque(EncodingContext::default())
+            .to_unencrypted_opaque(EncodingContext {
+                payload_is_encrypted: true,
+                ..Default::default()
+            })
             .encode()
             .as_slice(),
         );
@@ -451,13 +515,23 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1(version: Pro
             // last iteration of this loop, at which point both will be in the buffer, ordered by
             // handshake seq.
             let reassembled_handshake_message = deframer.message(span, &encoded_records);
-            check_reassembled_message(record_idx, &first_record, &reassembled_handshake_message);
+            check_reassembled_message(
+                record_idx,
+                &first_record,
+                &reassembled_handshake_message,
+                version == ProtocolVersion::DTLSv1_3,
+            );
 
             saw_first_message = true;
 
             let span = deframer.complete_span().unwrap();
             let reassembled_handshake_message = deframer.message(span, &encoded_records);
-            check_reassembled_message(record_idx, &second_record, &reassembled_handshake_message);
+            check_reassembled_message(
+                record_idx,
+                &second_record,
+                &reassembled_handshake_message,
+                version == ProtocolVersion::DTLSv1_3,
+            );
         }
     }
 
@@ -523,7 +597,10 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2(version: Pro
                     .as_slice()
                     .into(),
             }
-            .to_unencrypted_opaque(EncodingContext::default())
+            .to_unencrypted_opaque(EncodingContext {
+                payload_is_encrypted: true,
+                ..Default::default()
+            })
             .encode()
             .as_slice(),
         );
@@ -558,6 +635,7 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2(version: Pro
                     record_idx,
                     &first_record,
                     &reassembled_handshake_message,
+                    version == ProtocolVersion::DTLSv1_3,
                 );
                 saw_first_message = true;
             } else {
@@ -565,6 +643,7 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2(version: Pro
                     record_idx,
                     &second_record,
                     &reassembled_handshake_message,
+                    version == ProtocolVersion::DTLSv1_3,
                 );
                 saw_second_message = true;
             }
@@ -663,7 +742,10 @@ fn single_record_multiple_handshake_messages(version: ProtocolVersion) {
             .as_slice()
             .into(),
     }
-    .to_unencrypted_opaque(EncodingContext::default())
+    .to_unencrypted_opaque(EncodingContext {
+        payload_is_encrypted: true,
+        ..Default::default()
+    })
     .encode();
 
     let mut deframer = Deframer::default();
@@ -770,7 +852,10 @@ fn handshake_messages_span_records(version: ProtocolVersion) {
                 .as_slice()
                 .into(),
         }
-        .to_unencrypted_opaque(EncodingContext::default())
+        .to_unencrypted_opaque(EncodingContext {
+            payload_is_encrypted: true,
+            ..Default::default()
+        })
         .encode();
         encoded_records.extend_from_slice(&encoded_record.as_slice());
     }
@@ -862,12 +947,16 @@ fn handshake_messages_span_records_dtls_13() {
 }
 
 fn multiple_fragments_application_data(version: ProtocolVersion) {
+    let encoding_context = EncodingContext {
+        payload_is_encrypted: true,
+        ..Default::default()
+    };
     let first_record = Message {
         version: version,
         payload: MessagePayload::new(ContentType::ApplicationData, version, &[1; 32]).unwrap(),
     }
     .encoded_message(Some(EpochAndSequence::new(3, 11)))
-    .into_unencrypted_opaque(EncodingContext::default());
+    .into_unencrypted_opaque(encoding_context);
 
     let encoded_first_record = first_record.clone().encode();
     let encoded_first_record_len = encoded_first_record.len();
@@ -877,7 +966,7 @@ fn multiple_fragments_application_data(version: ProtocolVersion) {
         payload: MessagePayload::new(ContentType::ApplicationData, version, &[4; 92]).unwrap(),
     }
     .encoded_message(Some(EpochAndSequence::new(3, 12)))
-    .into_unencrypted_opaque(EncodingContext::default());
+    .into_unencrypted_opaque(encoding_context);
 
     let encoded_second_record = second_record.clone().encode();
     let encoded_second_record_len = encoded_second_record.len();
@@ -910,7 +999,7 @@ fn multiple_fragments_application_data(version: ProtocolVersion) {
             message.typ = ContentType::ApplicationData;
         }
         assert_eq!(message.typ, record.typ);
-        assert_eq!(message.version, record.version);
+        assert_eq!(message.version, version);
         assert_eq!(message.epoch_and_sequence, record.epoch_and_sequence);
         assert_eq!(message.payload, record.payload.as_ref());
     }
