@@ -123,7 +123,7 @@ impl ReceivePath {
                         .as_ref()
                         .is_ok_and(|st| st.ready_for_traffic())
                     {
-                        std::println!("state machine ready for traffic");
+                        std::println!("{} state machine ready for traffic", Side::label());
                     }
 
                     st

@@ -128,19 +128,30 @@ impl SendPath {
         let len = payload.len();
         let typ = ContentType::ApplicationData;
 
+        let version = self
+            .negotiated_version
+            .expect("protocol must be negotiated by the time we send application data");
+
         if self.protocol.is_dtls() {
             // For DTLS, we don't fragment application data, instead expecting clients to chunk up
             // application layer messages appropriately themselves.
             self.send_single_fragment(EncodedMessage {
                 typ,
-                version: ProtocolVersion::DTLSv1_2,
+                // TODO(timg): this is icky: self.negotiated_version gets set based on a ciphersuite
+                // value, which doesn't distinguish between DTLS and TLS, so we have to fix up
+                // protocol version here.
+                version: if version == ProtocolVersion::TLSv1_3 {
+                    ProtocolVersion::DTLSv1_3
+                } else {
+                    ProtocolVersion::DTLSv1_2
+                },
                 epoch_and_sequence: self.dtls_epoch_and_sequence(),
                 payload,
             });
         } else {
             let iter = self
                 .message_fragmenter
-                .fragment_payload(typ, ProtocolVersion::TLSv1_2, payload);
+                .fragment_payload(typ, version, payload);
             for m in iter {
                 self.send_single_fragment(m);
             }

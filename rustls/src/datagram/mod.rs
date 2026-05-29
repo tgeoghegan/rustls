@@ -497,7 +497,6 @@ mod tests {
         let mut receive_buf = [0; 8096];
         let mut iters = 0;
         let mut server_saw_handshake = false;
-        let mut client_saw_handshake = false;
 
         loop {
             assert!(iters < 10);
@@ -531,8 +530,9 @@ mod tests {
                     std::println!("server recv: {peek_server_recv:?}");
 
                     if server_saw_handshake {
-                        // This is DTLS 1.3, so message should have a unified header on it, whose first byte
-                        // is not a TLS content type but instead a bitmask describing the unified header.
+                        // This is DTLS 1.3, so message should have a unified header on it, whose
+                        // first byte is not a TLS content type but instead a bitmask describing the
+                        // unified header.
                         assert!((32u8..63).contains(&peek_server_recv[0]));
                     } else {
                         // The first handshake message is an unencrypted handshake message and does not
@@ -546,7 +546,9 @@ mod tests {
             }
 
             {
-                // Peek at message received by server so we can verify its encoding
+                // Peek at message received by server so we can verify its encoding. By the time we
+                // get here, the client will already have handled the server hello via a call to
+                // pending_io, so we'll never see the unencrypted server hello here.
                 let client_recv = client_socket
                     .inner
                     .inner
@@ -557,16 +559,9 @@ mod tests {
                 if let Some(peek_client_recv) = client_recv.back() {
                     std::println!("client recv: {peek_client_recv:?}");
 
-                    if client_saw_handshake {
-                        // This is DTLS 1.3, so message should have a unified header on it, whose first byte
-                        // is not a TLS content type but instead a bitmask describing the unified header.
-                        assert!((32u8..63).contains(&peek_client_recv[0]));
-                        client_saw_handshake = true;
-                    } else {
-                        // The first handshake message is an unencrypted handshake message and does not
-                        // get a unified header.
-                        assert_eq!(peek_client_recv[0], 22);
-                    }
+                    // This is DTLS 1.3, so message should have a unified header on it, whose first byte
+                    // is not a TLS content type but instead a bitmask describing the unified header.
+                    assert!((32u8..63).contains(&peek_client_recv[0]));
                 } else {
                     std::println!("empty client recv");
                 }
