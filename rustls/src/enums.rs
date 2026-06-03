@@ -199,16 +199,6 @@ impl ProtocolVersion {
         self == Self::DTLSv1_0 || self == Self::DTLSv1_2 || self == Self::DTLSv1_3
     }
 
-    // I think this method is impossible to implement due to variable length DTLS 1.3 header so let's see what happens!
-    // pub fn record_header_size(self) -> usize {
-    //     todo!("account for DTLS 1.3 variable header here");
-    //     if self.is_datagram_tls() {
-    //         DTLS_HEADER_SIZE
-    //     } else {
-    //         HEADER_SIZE
-    //     }
-    // }
-
     pub fn handshake_header_size(self) -> usize {
         if self.is_datagram_tls() {
             DTLS_HANDSHAKE_HEADER_SIZE

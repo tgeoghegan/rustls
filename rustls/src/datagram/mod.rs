@@ -15,23 +15,27 @@ use crate::client::ClientSide;
 use crate::common_state::Protocol;
 use crate::conn::ConnectionCore;
 use crate::crypto::cipher::OutboundPlain;
-use crate::msgs::{ClientExtensionsInput, Delocator, ServerExtensionsInput, SliceInput, U48};
+use crate::msgs::{ClientExtensionsInput, Delocator, ServerExtensionsInput, SliceInput};
 use crate::server::ServerSide;
 use crate::vecbuf::ChunkVecBuffer;
 use crate::{ClientConfig, ServerConfig, SideData};
 
 /// Errors encountered while sending or receiving data on a `DtlsSocket`.
 #[derive(Debug)]
-pub(crate) enum Error {
+pub enum Error {
+    /// Some other error occurred.
     Other(Box<dyn std::error::Error>),
 }
 
-pub(crate) struct ClientDtlsSocket<SocketLike> {
+/// The client side of a DTLS socket.
+pub struct ClientDtlsSocket<SocketLike> {
     inner: DtlsSocket<SocketLike, ClientSide>,
 }
 
 impl<SocketLike: UdpSocketLike> ClientDtlsSocket<SocketLike> {
-    pub(crate) fn new(
+    /// Create a new `ClientDtlsSocket` using the provided DTLS configuration,
+    /// wrapping some socket-like primitive.
+    pub fn new(
         config: ClientConfig,
         server_name: ServerName<'static>,
         inner: SocketLike,
@@ -56,7 +60,7 @@ impl<SocketLike: UdpSocketLike> ClientDtlsSocket<SocketLike> {
     /// into EncodedMessage.
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
-    fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+    pub fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
         self.inner.send(bytes)
     }
 
@@ -66,16 +70,19 @@ impl<SocketLike: UdpSocketLike> ClientDtlsSocket<SocketLike> {
     /// into EncodedMessage.
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
-    fn recv<B: AsMut<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+    pub fn recv<B: AsMut<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
         self.inner.recv(bytes)
     }
 }
 
+/// The server side of a DTLS socket.
 pub struct ServerDtlsSocket<SocketLike> {
     inner: DtlsSocket<SocketLike, ServerSide>,
 }
 
 impl<SocketLike: UdpSocketLike> ServerDtlsSocket<SocketLike> {
+    /// Create a new `ServerDtlsSocket` using the provided DTLS configuration,
+    /// wrapping some socket-like primitive.
     pub fn new(config: ServerConfig, inner: SocketLike) -> Result<Self, Error> {
         let connection_core = ConnectionCore::for_server(
             Arc::new(config),
@@ -97,7 +104,7 @@ impl<SocketLike: UdpSocketLike> ServerDtlsSocket<SocketLike> {
     /// into EncodedMessage.
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
-    fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+    pub fn send<B: AsRef<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
         self.inner.send(bytes)
     }
 
@@ -107,7 +114,7 @@ impl<SocketLike: UdpSocketLike> ServerDtlsSocket<SocketLike> {
     /// into EncodedMessage.
     ///
     /// Returns number of bytes transmitted, not including DTLS overhead.
-    fn recv<B: AsMut<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
+    pub fn recv<B: AsMut<[u8]>>(&mut self, bytes: B) -> Result<usize, Error> {
         self.inner.recv(bytes)
     }
 }
@@ -115,10 +122,6 @@ impl<SocketLike: UdpSocketLike> ServerDtlsSocket<SocketLike> {
 /// Wraps a [`std::net::UdpSocket`] with the timeout and retransmission logic
 /// for handshake messages.
 pub(crate) struct DtlsSocket<SocketLike, Side: SideData> {
-    /// Current epoch.
-    epoch: u16,
-    /// Current sequence number.
-    sequence: U48,
     /// Inner socket on which messages will be received and sent.
     inner: SocketLike,
     /// Connection internals
@@ -132,8 +135,6 @@ pub(crate) struct DtlsSocket<SocketLike, Side: SideData> {
 impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
     fn new(inner: SocketLike, core: ConnectionCore<Side>) -> Self {
         Self {
-            epoch: 0,
-            sequence: U48(0),
             inner,
             core,
             buffered_plaintext: ChunkVecBuffer::new(None),
@@ -236,7 +237,8 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
 
 /// Something akin to a UDP socket which can send and receive data, but does not
 /// implement [`std::io::Write`] or [`std::io::Read`].
-pub(crate) trait UdpSocketLike {
+pub trait UdpSocketLike {
+    /// Errors returned by this `UdpSocketLike`'s methods.
     type Error: std::error::Error + 'static;
 
     /// Send data.
@@ -261,6 +263,7 @@ impl UdpSocketLike for UdpSocket {
 #[cfg(test)]
 mod tests {
     use core::hash::Hasher;
+    use std::borrow::Cow;
     use std::cmp::min;
     use std::collections::VecDeque;
     use std::fmt::Display;
@@ -460,32 +463,63 @@ mod tests {
         assert_eq!(&buf[..9], messages[1]);
     }
 
-    #[test]
-    fn full_handshake_and_application_data_dtls_13() {
+    enum AllowedTlsVersion {
+        Dtls12Only,
+        Dtls13Only,
+        Both,
+    }
+
+    /// Construct a DTLS socket pair configured to exchange messages. Only the provided DTLS
+    /// version(s) will be supported. Both sockets will be at the start of their respective
+    /// handshake state machines. Calling either `send` or `recv` on the client socket will cause it
+    /// to send a `ClientHello`, which the server socket will process if and when its own `send` or
+    /// `recv` methods are called.
+    fn test_setup(
+        allowed: AllowedTlsVersion,
+    ) -> (
+        ClientDtlsSocket<InMemoryBuffers>,
+        ServerDtlsSocket<InMemoryBuffers>,
+    ) {
         let (client_transport, server_transport) = InMemoryBuffers::pair();
 
-        let mut test_provider_13_only = TEST_PROVIDER.clone();
-        test_provider_13_only.tls12_cipher_suites = std::borrow::Cow::Owned(Vec::new());
+        let mut test_provider = TEST_PROVIDER.clone();
+        match allowed {
+            AllowedTlsVersion::Dtls12Only => {
+                test_provider.tls13_cipher_suites = Cow::Owned(Vec::new());
+            }
+            AllowedTlsVersion::Dtls13Only => {
+                test_provider.tls12_cipher_suites = Cow::Owned(Vec::new());
+            }
+            // test provider comes with 1.2 and 1.3 ciphersuites by default, so leave it alone
+            AllowedTlsVersion::Both => (),
+        }
 
-        let client_config = ClientConfig::builder(Arc::new(test_provider_13_only.clone()))
+        let client_config = ClientConfig::builder(Arc::new(test_provider.clone()))
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptsEverythingServerVerifier {}))
             .with_no_client_auth()
             .unwrap();
 
-        let mut client_socket = ClientDtlsSocket::new(
+        let client_socket = ClientDtlsSocket::new(
             client_config,
             "example.org".try_into().unwrap(),
             client_transport,
         )
         .unwrap();
 
-        let server_config = ServerConfig::builder(Arc::new(test_provider_13_only.clone()))
+        let server_config = ServerConfig::builder(Arc::new(test_provider.clone()))
             .with_no_client_auth()
             .with_single_cert(server_identity(), server_key())
             .unwrap();
 
-        let mut server_socket = ServerDtlsSocket::new(server_config, server_transport).unwrap();
+        let server_socket = ServerDtlsSocket::new(server_config, server_transport).unwrap();
+
+        (client_socket, server_socket)
+    }
+
+    #[test]
+    fn full_handshake_and_application_data_dtls_13() {
+        let (mut client_socket, mut server_socket) = test_setup(AllowedTlsVersion::Dtls13Only);
 
         let client_message = b"client sends application data";
         let server_message = b"server sends application data";
@@ -606,30 +640,7 @@ mod tests {
 
     #[test]
     fn full_handshake_and_application_data_dtls_12() {
-        let (client_transport, server_transport) = InMemoryBuffers::pair();
-
-        let mut test_provider_12_only = TEST_PROVIDER.clone();
-        test_provider_12_only.tls13_cipher_suites = std::borrow::Cow::Owned(Vec::new());
-
-        let client_config = ClientConfig::builder(Arc::new(test_provider_12_only.clone()))
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptsEverythingServerVerifier {}))
-            .with_no_client_auth()
-            .unwrap();
-
-        let mut client_socket = ClientDtlsSocket::new(
-            client_config,
-            "example.org".try_into().unwrap(),
-            client_transport,
-        )
-        .unwrap();
-
-        let server_config = ServerConfig::builder(Arc::new(test_provider_12_only.clone()))
-            .with_no_client_auth()
-            .with_single_cert(server_identity(), server_key())
-            .unwrap();
-
-        let mut server_socket = ServerDtlsSocket::new(server_config, server_transport).unwrap();
+        let (mut client_socket, mut server_socket) = test_setup(AllowedTlsVersion::Dtls12Only);
 
         let client_message = b"client sends application data";
         let server_message = b"server sends application data";
@@ -729,14 +740,110 @@ mod tests {
     }
 
     #[test]
-    fn anti_replay() {
+    fn anti_replay_dtls_12() {
         // We should maintain a sliding window of seen TLS record sequence
         // numbers, per epoch(?). Replayed sequence numbers should be rejected.
         // Replayed sequence numbers outside the replay window will get through.
         // <https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1>
-        //
-        // I guess send some traffic, copy a record out of client send buffer,
-        // then send it again
+        let (mut client_socket, mut server_socket) = test_setup(AllowedTlsVersion::Dtls12Only);
+
+        let client_message = b"client sends application data";
+        let server_message = b"server sends application data";
+        let mut receive_buf = [0; 8096];
+
+        // Client send: send client hello, buffer plaintext
+        assert_eq!(
+            client_socket
+                .send(client_message)
+                .unwrap(),
+            client_message.len()
+        );
+
+        // Server recv: process client hello, send server hello
+        assert_eq!(
+            server_socket
+                .recv(&mut receive_buf)
+                .unwrap(),
+            0,
+        );
+
+        // Client recv: process server hello
+        assert_eq!(
+            client_socket
+                .recv(&mut receive_buf)
+                .unwrap(),
+            0
+        );
+
+        // Server recv: process client finished, become ready for traffic
+        assert_eq!(
+            server_socket
+                .recv(&mut receive_buf)
+                .unwrap(),
+            0,
+        );
+
+        // Client recv: process server finished, become ready for traffic, encrypt buffered
+        // plaintext and send it
+        assert_eq!(
+            client_socket
+                .recv(&mut receive_buf)
+                .unwrap(),
+            0
+        );
+
+        // Peek at application data message received by server
+        let replayed = server_socket
+            .inner
+            .inner
+            .receive
+            .lock()
+            .unwrap()
+            .back()
+            .unwrap()
+            .clone();
+        std::println!("server recv: {replayed:?}");
+        // Make sure the record is application data as expected
+        assert_eq!(replayed[0], 23);
+
+        // Server recv: receive client message
+        assert_eq!(
+            server_socket
+                .recv(&mut receive_buf)
+                .unwrap(),
+            client_message.len()
+        );
+        assert_eq!(&receive_buf[..client_message.len()], client_message);
+
+        // Replay the record into the server's transport and it should get rejected.
+        assert_eq!(
+            client_socket
+                .inner
+                .inner
+                .send(&replayed)
+                .unwrap(),
+            replayed.len()
+        );
+
+        // Server recv: should reject replayed message. This doesn't yield an
+        // error all the way up here, so we check the receive path's replay
+        // counter.
+        assert_eq!(
+            server_socket
+                .recv(&mut receive_buf)
+                .unwrap(),
+            0
+        );
+
+        assert_eq!(
+            server_socket
+                .inner
+                .core
+                .common
+                .recv
+                .discarded_replayed_records,
+            1
+        );
     }
 
     fn hex_dump<B: AsRef<[u8]>>(buf: B) {

@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::mem;
 use core::ops::Range;
@@ -16,7 +17,7 @@ use crate::error::{AlertDescription, Error, PeerMisbehaved};
 use crate::log::{trace, warn};
 use crate::msgs::{
     AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, Delocator,
-    EpochAndSequence, HandshakeAlignedProof, Locator, Message, MessagePayload, TlsInputBuffer,
+    EpochAndSequence, HandshakeAlignedProof, Locator, Message, MessagePayload, TlsInputBuffer, U48,
 };
 use crate::quic::QuicOutput;
 
@@ -36,6 +37,20 @@ pub(crate) struct ReceivePath {
     seen_consecutive_empty_fragments: u8,
 
     pub(crate) tls13_tickets_received: u32,
+
+    /// How many DTLS records have been discarded for being replayed ([1], [2]).
+    /// This is tracked only in test configurations.
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1
+    /// [2]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
+    #[cfg(test)]
+    pub(crate) discarded_replayed_records: usize,
+    /// Sliding window of observed sequence numbers, used to reject replayed
+    /// DTLS records ([1], [2]).
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1
+    /// [2]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
+    observed_sequence_numbers: Vec<U48>,
 }
 
 impl ReceivePath {
@@ -51,6 +66,9 @@ impl ReceivePath {
             deframer: Deframer::default(),
             seen_consecutive_empty_fragments: 0,
             tls13_tickets_received: 0,
+            #[cfg(test)]
+            discarded_replayed_records: 0,
+            observed_sequence_numbers: Vec::new(),
         }
     }
 
@@ -89,8 +107,8 @@ impl ReceivePath {
                     if let Error::DecryptError = e {
                         st.handle_decrypt_error();
                     }
-                    *state = Err(e.clone());
                     input.discard(self.deframer.take_discard());
+                    *state = Err(e.clone());
                     return Err(e);
                 }
             };
@@ -262,8 +280,28 @@ impl ReceivePath {
                 return Err(PeerMisbehaved::MessageInterleavedWithHandshakeMessage.into());
             }
 
+            if let Some(EpochAndSequence {
+                epoch: _epoch,
+                sequence_number,
+            }) = message.epoch_and_sequence
+            {
+                if self.check_dtls_replay(sequence_number) {
+                    // Silently discard invalid records ([1], [2]) but increment the replay counter
+                    // for tests
+                    //
+                    // [1]: https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.2
+                    // [2]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.7
+                    #[cfg(test)]
+                    {
+                        self.discarded_replayed_records += 1;
+                    }
+                    self.deframer.discard_processed();
+                    return Err(Error::ReplayedDtlsRecord);
+                }
+            }
             // TODO(timg): should do some DTLS anti-replay here, checking sequence #s against a
             // sliding window
+            //message.version
 
             // Increment sequence only after deprotecting a message, including checking for replays.
             // > This check SHOULD happen after deprotecting the record; otherwise, the record
@@ -439,6 +477,12 @@ impl ReceivePath {
         }
 
         Err(err)
+    }
+
+    /// Check whether the sequence number of an incoming DTLS record indicates
+    /// it's a replay and should be discarded.
+    fn check_dtls_replay(&self, sequence: U48) -> bool {
+        todo!()
     }
 }
 

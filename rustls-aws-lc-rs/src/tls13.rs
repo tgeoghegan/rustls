@@ -267,15 +267,7 @@ impl MessageEncrypter for AeadMessageEncrypter {
 
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
-            // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
-            // protocol version. Correspondingly all DTLS 1.3 records claim to be DTLSv1_2.
-            // see https://www.rfc-editor.org/rfc/rfc8446#section-5.1 and
-            // https://datatracker.ietf.org/doc/html/rfc9147#section-4
-            version: if self.protocol.is_datagram_tls() {
-                ProtocolVersion::DTLSv1_2
-            } else {
-                ProtocolVersion::TLSv1_2
-            },
+            version: msg.version,
             epoch_and_sequence: if self.protocol.is_datagram_tls() {
                 Some(EpochAndSequence::from_sequence_number(seq))
             } else {
@@ -345,15 +337,7 @@ impl MessageEncrypter for GcmMessageEncrypter {
 
         Ok(EncodedMessage {
             typ: ContentType::ApplicationData,
-            // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
-            // protocol version. Correspondingly all DTLS 1.3 records claim to be DTLSv1_2.
-            // see https://www.rfc-editor.org/rfc/rfc8446#section-5.1 and
-            // https://datatracker.ietf.org/doc/html/rfc9147#section-4
-            version: if self.protocol.is_datagram_tls() {
-                ProtocolVersion::DTLSv1_2
-            } else {
-                ProtocolVersion::TLSv1_2
-            },
+            version: msg.version,
             epoch_and_sequence: if self.protocol.is_datagram_tls() {
                 Some(EpochAndSequence::from_sequence_number(seq))
             } else {

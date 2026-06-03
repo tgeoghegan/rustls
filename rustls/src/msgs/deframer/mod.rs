@@ -179,7 +179,7 @@ impl Deframer {
     /// to do so it needs to move the fragments together in the original buffer.
     /// This would not be possible if the messages were borrowing from that buffer.
     ///
-    /// This function is for inputting TLS message fragments. Use [`Self::input_message_dtls`] to
+    /// This function is for inputting TLS message fragments. Use [`Self::input_message_dtls`] for
     /// DTLS records containing handshake fragments.
     pub(crate) fn input_message(&mut self, msg: EncodedMessage<&'_ [u8]>, bounds: Range<usize>) {
         debug_assert_eq!(msg.typ, ContentType::Handshake);

@@ -17,7 +17,7 @@ pub struct EncodedMessage<P> {
     /// The content type of this message.
     pub typ: ContentType,
     /// The protocol version of this message. The actual protocol version that
-    /// gets encoded on the wire may differ based on `encoding_context`.
+    /// gets encoded on the wire may differ.
     pub version: ProtocolVersion,
     /// The epoch and sequence number, if DTLS is in use.
     pub epoch_and_sequence: Option<EpochAndSequence>,

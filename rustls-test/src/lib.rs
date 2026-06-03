@@ -1358,6 +1358,7 @@ impl RawTls {
                 EncodingContext {
                     is_initial_handshake,
                     payload_is_encrypted: true,
+                    ..Default::default()
                 },
                 msg.borrow_outbound(),
                 self.enc_seq,

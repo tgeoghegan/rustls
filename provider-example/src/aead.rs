@@ -2,26 +2,27 @@ use alloc::boxed::Box;
 
 use chacha20poly1305::aead::Buffer;
 use chacha20poly1305::{AeadInPlace, KeyInit, KeySizeUser};
-use rustls::ConnectionTrafficSecrets;
 use rustls::crypto::cipher::{
     AeadKey, EncodedMessage, EncodingContext, InboundOpaque, Iv, KeyBlockShape, MessageDecrypter,
     MessageEncrypter, NONCE_LEN, Nonce, OutboundOpaque, OutboundPlain, Tls12AeadAlgorithm,
     Tls13AeadAlgorithm, UnsupportedOperationError, make_tls12_aad, make_tls13_aad,
 };
 use rustls::enums::{ContentType, ProtocolVersion};
+use rustls::{ConnectionTrafficSecrets, EpochAndSequence};
 
 pub(crate) struct Chacha20Poly1305;
 
 impl Tls13AeadAlgorithm for Chacha20Poly1305 {
     fn encrypter(
         &self,
-        _protocol: ProtocolVersion,
+        protocol: ProtocolVersion,
         key: AeadKey,
         iv: Iv,
     ) -> Box<dyn MessageEncrypter> {
         Box::new(Tls13Cipher(
             chacha20poly1305::ChaCha20Poly1305::new_from_slice(key.as_ref()).unwrap(),
             iv,
+            protocol,
         ))
     }
 
@@ -29,6 +30,7 @@ impl Tls13AeadAlgorithm for Chacha20Poly1305 {
         Box::new(Tls13Cipher(
             chacha20poly1305::ChaCha20Poly1305::new_from_slice(key.as_ref()).unwrap(),
             iv,
+            ProtocolVersion::TLSv1_2,
         ))
     }
 
@@ -83,7 +85,7 @@ impl Tls12AeadAlgorithm for Chacha20Poly1305 {
     }
 }
 
-struct Tls13Cipher(chacha20poly1305::ChaCha20Poly1305, Iv);
+struct Tls13Cipher(chacha20poly1305::ChaCha20Poly1305, Iv, ProtocolVersion);
 
 impl MessageEncrypter for Tls13Cipher {
     fn encrypt(
@@ -110,8 +112,11 @@ impl MessageEncrypter for Tls13Cipher {
             .map(|_| EncodedMessage {
                 typ: ContentType::ApplicationData,
                 version: ProtocolVersion::TLSv1_2,
-                // TODO: insert epoch and sequence as appropriate
-                epoch_and_sequence: None,
+                epoch_and_sequence: if self.2.is_datagram_tls() {
+                    Some(EpochAndSequence::from_sequence_number(seq))
+                } else {
+                    None
+                },
                 payload,
             })
     }
@@ -165,7 +170,7 @@ impl MessageEncrypter for Tls12Cipher {
             .map(|_| EncodedMessage {
                 typ: m.typ,
                 version: m.version,
-                // TODO(timg): insert epoch and sequence as appropriate
+                // TODO: insert epoch and sequence as appropriate
                 epoch_and_sequence: None,
                 payload,
             })
