@@ -5,7 +5,6 @@ use core::ops::Range;
 use std::io::{self, Read};
 
 use super::SendOutput;
-use crate::SideData;
 use crate::common_state::{
     ConnectionOutput, Event, Output, OutputEvent, Side, UnborrowedPayload, maybe_send_fatal_alert,
 };
@@ -18,9 +17,10 @@ use crate::hash_hs::{HandshakeTranscript, Proposal};
 use crate::log::{trace, warn};
 use crate::msgs::{
     AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, Delocator,
-    HandshakeAlignedProof, Locator, Message, MessagePayload,
+    EpochAndSequence, HandshakeAlignedProof, Locator, Message, MessagePayload, TlsInputBuffer, U48,
 };
 use crate::quic::QuicOutput;
+use crate::{EpochAndSequence, SideData};
 
 pub(crate) struct MessageIter<'a, 'm, Side: SideData> {
     input: &'m mut dyn TlsInputBuffer,
@@ -181,6 +181,7 @@ impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side> {
 
 pub(crate) struct ReceivePath {
     side: Side,
+    protocol: Protocol,
     pub(crate) decrypt_state: DecryptionState,
     pub(crate) may_receive_application_data: bool,
     /// If the peer has signaled end of stream.
@@ -194,12 +195,27 @@ pub(crate) struct ReceivePath {
     seen_consecutive_empty_fragments: u8,
 
     pub(crate) tls13_tickets_received: u32,
+
+    /// How many DTLS records have been discarded for being replayed ([1], [2]).
+    /// This is tracked only in test configurations.
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1
+    /// [2]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
+    #[cfg(test)]
+    pub(crate) discarded_replayed_records: usize,
+    /// Sliding window of observed sequence numbers, used to reject replayed
+    /// DTLS records ([1], [2]).
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1
+    /// [2]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
+    _observed_sequence_numbers: Vec<U48>,
 }
 
 impl ReceivePath {
-    pub(crate) fn new(side: Side) -> Self {
+    pub(crate) fn new(side: Side, protocol: Protocol) -> Self {
         Self {
             side,
+            protocol,
             decrypt_state: DecryptionState::new(),
             may_receive_application_data: false,
             has_received_close_notify: false,
@@ -208,6 +224,9 @@ impl ReceivePath {
             deframer: Deframer::default(),
             seen_consecutive_empty_fragments: 0,
             tls13_tickets_received: 0,
+            #[cfg(test)]
+            discarded_replayed_records: 0,
+            _observed_sequence_numbers: Vec::new(),
         }
     }
 
@@ -231,9 +250,11 @@ impl ReceivePath {
                 }));
             }
 
-            let (message, bounds) = loop {
+            let (message, bounds, epoch_and_sequence) = loop {
                 match self.deframe_decrypted(buffer, &locator)? {
-                    DeframeResult::Decrypted(decrypted, bounds) => break (decrypted, bounds),
+                    DeframeResult::Decrypted(decrypted, bounds, epoch_and_sequence) => {
+                        break (decrypted, bounds, epoch_and_sequence);
+                    }
                     DeframeResult::DecryptionFailed => continue,
                     DeframeResult::None => return Ok(None),
                 }
@@ -252,6 +273,32 @@ impl ReceivePath {
                 // https://www.rfc-editor.org/rfc/rfc8446#section-5.1
                 return Err(PeerMisbehaved::MessageInterleavedWithHandshakeMessage.into());
             }
+
+            if let Some(EpochAndSequence {
+                epoch: _epoch,
+                sequence_number,
+            }) = epoch_and_sequence
+            {
+                if self.check_dtls_replay(sequence_number) {
+                    // Silently discard invalid records ([1], [2]) but increment the replay counter
+                    // for tests
+                    //
+                    // [1]: https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.2
+                    // [2]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.7
+                    #[cfg(test)]
+                    {
+                        self.discarded_replayed_records += 1;
+                    }
+                    self.deframer.discard_processed();
+                    return Err(Error::ReplayedDtlsRecord);
+                }
+            }
+
+            // Increment sequence only after deprotecting a message, including checking for replays.
+            // > This check SHOULD happen after deprotecting the record; otherwise, the record
+            // > discard might itself serve as a timing channel for the record number.
+            // <https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1>
+            self.deframer.increment_sequence();
 
             match message.payload.len() {
                 0 => {
@@ -286,9 +333,15 @@ impl ReceivePath {
             }
 
             let message = unborrowed.reborrow(&Delocator::new(buffer));
-            self.deframer
-                .input_message(message.version, bounds, buffer);
-            self.deframer.coalesce(buffer)?;
+            if self.protocol.is_dtls() {
+                self.deframer
+                    .input_message_dtls(message, bounds)?;
+                self.deframer.coalesce_dtls(buffer);
+            } else {
+                self.deframer
+                    .input_message(message.version, bounds, buffer);
+                self.deframer.coalesce(buffer)?;
+            }
         }
     }
 
@@ -297,8 +350,12 @@ impl ReceivePath {
         buffer: &'b mut [u8],
         locator: &Locator,
     ) -> Result<DeframeResult<'b>, Error> {
-        let (message, bounds) = match self.deframer.deframe(buffer) {
-            Some(Ok(Deframed { message, bounds })) => (message, bounds),
+        let (message, bounds, epoch_and_sequence) = match self.deframer.deframe(buffer) {
+            Some(Ok(Deframed {
+                message,
+                bounds,
+                epoch_and_sequence,
+            })) => (message, bounds, epoch_and_sequence),
             Some(Err(err)) => return Err(err),
             None => return Ok(DeframeResult::None),
         };
@@ -330,6 +387,7 @@ impl ReceivePath {
                     want_close_before_decrypt: false,
                 },
                 bounds,
+                epoch_and_sequence,
             ));
         }
 
@@ -340,7 +398,11 @@ impl ReceivePath {
             Some(decrypted) => {
                 // After decryption, the payload is shorter
                 let bounds = locator.locate(decrypted.plaintext.payload);
-                Ok(DeframeResult::Decrypted(decrypted, bounds))
+                Ok(DeframeResult::Decrypted(
+                    decrypted,
+                    bounds,
+                    epoch_and_sequence,
+                ))
             }
 
             // failed decryption during trial decryption is not allowed to be
@@ -363,7 +425,7 @@ impl ReceivePath {
     ///
     /// Otherwise the caller must present the returned `Input` to the state machine to
     /// progress the connection.
-    pub(crate) fn receive_message<'a>(
+    fn receive_message<'a>(
         &mut self,
         msg: EncodedMessage<&'a [u8]>,
         aligned_handshake: Option<HandshakeAlignedProof>,
@@ -482,10 +544,17 @@ impl ReceivePath {
 
         Err(err)
     }
+
+    /// Check whether the sequence number of an incoming DTLS record indicates
+    /// it's a replay and should be discarded.
+    fn check_dtls_replay(&self, _sequence: U48) -> bool {
+        warn!("skipping DTLS replay check");
+        false
+    }
 }
 
 enum DeframeResult<'b> {
-    Decrypted(Decrypted<'b>, Range<usize>),
+    Decrypted(Decrypted<'b>, Range<usize>, Option<EpochAndSequence>),
     DecryptionFailed,
     None,
 }
@@ -526,13 +595,14 @@ impl<'m> Output<'m> for CaptureAppData<'_, '_, 'm> {
         transcript: Option<&mut HandshakeTranscript>,
         m: Message<'_>,
         must_encrypt: bool,
+        is_retry_req: bool,
     ) {
         match self.other.quic.as_deref_mut() {
             Some(quic) => quic.send_msg(m, must_encrypt),
             None => self
                 .other
                 .send
-                .send_msg(transcript, m, must_encrypt),
+                .send_msg(transcript, m, must_encrypt, is_retry_req),
         }
     }
 

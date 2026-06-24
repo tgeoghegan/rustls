@@ -11,7 +11,9 @@ use super::config::ServerConfig;
 use super::hs::ServerState;
 use super::{CommonServerSessionValue, ServerSessionKey, ServerSessionValue};
 use crate::check::inappropriate_message;
-use crate::common_state::{Event, HandshakeFlightTls12, HandshakeKind, Output, OutputEvent, Side};
+use crate::common_state::{
+    Event, HandshakeFlightTls12, HandshakeKind, Output, OutputEvent, Protocol, Side,
+};
 use crate::conn::kernel::KernelState;
 use crate::conn::{ConnectionRandoms, Input};
 use crate::crypto::cipher::{MessageDecrypter, MessageEncrypter, Payload};
@@ -149,6 +151,7 @@ mod client_hello {
                     suite,
                     st.using_ems,
                     output,
+                    st.protocol,
                     input,
                     st.sni,
                     st.resumption_data,
@@ -172,12 +175,17 @@ mod client_hello {
 
             output.output(OutputEvent::HandshakeKind(HandshakeKind::Full));
 
-            let mut flight = HandshakeFlightTls12::new(transcript);
+            let mut flight = HandshakeFlightTls12::new(transcript, st.protocol.is_dtls());
 
             let Tls12Extensions {
                 alpn_protocol,
                 send_ticket,
             } = emit_server_hello(
+                if st.protocol.is_dtls() {
+                    ProtocolVersion::DTLSv1_2
+                } else {
+                    ProtocolVersion::TLSv1_2
+                },
                 &mut flight,
                 &st.config,
                 output,
@@ -208,6 +216,7 @@ mod client_hello {
                 resumption_data: st.resumption_data,
                 using_ems: st.using_ems,
                 send_ticket,
+                protocol: st.protocol,
             };
 
             if doing_client_auth {
@@ -298,6 +307,7 @@ mod client_hello {
         suite: &'static Tls12CipherSuite,
         using_ems: bool,
         output: &mut dyn Output<'_>,
+        protocol: Protocol,
         input: ClientHelloInput<'_>,
         sni: Option<DnsName<'static>>,
         resumption_data: Vec<u8>,
@@ -310,17 +320,24 @@ mod client_hello {
     ) -> Result<ServerState, Error> {
         debug!("Resuming connection");
 
+        let protocol_version = if protocol.is_dtls() {
+            ProtocolVersion::DTLSv1_2
+        } else {
+            ProtocolVersion::TLSv1_2
+        };
+
         if resumedata.extended_ms && !using_ems {
             return Err(PeerMisbehaved::ResumptionAttemptedWithVariedEms.into());
         }
 
         let session_id = input.client_hello.session_id;
 
-        let mut flight = HandshakeFlightTls12::new(transcript);
+        let mut flight = HandshakeFlightTls12::new(transcript, st.protocol.is_dtls());
         let Tls12Extensions {
             alpn_protocol,
             send_ticket,
         } = emit_server_hello(
+            protocol_version,
             &mut flight,
             &config,
             output,
@@ -343,6 +360,7 @@ mod client_hello {
             resumption_data: resumption_data.to_vec(),
             using_ems,
             send_ticket,
+            protocol,
         };
 
         let secrets =
@@ -367,6 +385,7 @@ mod client_hello {
 
             if let Some(ticketer) = hs.config.ticketer.as_deref() {
                 emit_ticket(
+                    protocol_version,
                     &secrets,
                     transcript,
                     using_ems,
@@ -380,7 +399,7 @@ mod client_hello {
                 )?;
             }
         }
-        emit_ccs(output);
+        emit_ccs(protocol_version, output);
 
         let (dec, encrypter) = secrets.make_cipher_pair(Side::Server);
         output.send().set_encrypter(
@@ -390,7 +409,7 @@ mod client_hello {
                 .common
                 .confidentiality_limit,
         );
-        emit_finished(&secrets, transcript, output, &proof);
+        emit_finished(protocol_version, &secrets, transcript, output, &proof);
 
         Ok(Box::new(ExpectCcs {
             hs,
@@ -402,6 +421,7 @@ mod client_hello {
     }
 
     fn emit_server_hello(
+        version: ProtocolVersion,
         flight: &mut HandshakeFlightTls12<'_>,
         config: &ServerConfig,
         output: &mut dyn Output<'_>,
@@ -425,7 +445,7 @@ mod client_hello {
         )?;
 
         let sh = HandshakeMessagePayload(HandshakePayload::ServerHello(ServerHelloPayload {
-            legacy_version: ProtocolVersion::TLSv1_2,
+            legacy_version: version,
             random: Random::from(randoms.server),
             session_id,
             cipher_suite: suite.common.suite,
@@ -858,6 +878,7 @@ impl<const N: usize> Drop for ZeroizingCow<'_, N> {
 }
 
 fn emit_ticket(
+    version: ProtocolVersion,
     secrets: &ConnectionSecrets,
     transcript: &mut HandshakeTranscript,
     using_ems: bool,
@@ -891,7 +912,7 @@ fn emit_ticket(
     let ticket_lifetime = ticketer.lifetime();
 
     let m = Message {
-        version: ProtocolVersion::TLSv1_2,
+        version,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::NewSessionTicket(NewSessionTicketPayload::new(
                 ticket_lifetime,
@@ -900,22 +921,24 @@ fn emit_ticket(
         )),
     };
 
-    output.send_msg(Some(transcript), m, false);
+    output.send_msg(Some(transcript), m, false, false);
     Ok(())
 }
 
-fn emit_ccs(output: &mut dyn Output<'_>) {
+fn emit_ccs(version: ProtocolVersion, output: &mut dyn Output<'_>) {
     output.send_msg(
         None,
         Message {
-            version: ProtocolVersion::TLSv1_2,
+            version,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         },
+        false,
         false,
     );
 }
 
 fn emit_finished(
+    version: ProtocolVersion,
     secrets: &ConnectionSecrets,
     transcript: &mut HandshakeTranscript,
     output: &mut dyn Output<'_>,
@@ -926,13 +949,13 @@ fn emit_finished(
     let verify_data_payload = Payload::Borrowed(&verify_data);
 
     let f = Message {
-        version: ProtocolVersion::TLSv1_2,
+        version,
         payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Finished(
             verify_data_payload,
         ))),
     };
 
-    output.send_msg(Some(transcript), f, true);
+    output.send_msg(Some(transcript), f, true, false);
 }
 
 pub(super) struct ExpectFinished {
@@ -956,6 +979,11 @@ impl ExpectFinished {
             HandshakePayload::Finished
         )?;
 
+        let protocol_version = if self.hs.protocol.is_dtls() {
+            ProtocolVersion::DTLSv1_2
+        } else {
+            ProtocolVersion::TLSv1_2
+        };
         let proof = input.check_aligned_handshake()?;
 
         let vh = transcript.current_hash();
@@ -1003,6 +1031,7 @@ impl ExpectFinished {
                 let now = self.hs.config.current_time()?;
                 if let Some(ticketer) = self.hs.config.ticketer.as_deref() {
                     emit_ticket(
+                        protocol_version,
                         &self.secrets,
                         transcript,
                         self.hs.using_ems,
@@ -1016,7 +1045,7 @@ impl ExpectFinished {
                     )?;
                 }
             }
-            emit_ccs(output);
+            emit_ccs(protocol_version, output);
             output.send().set_encrypter(
                 encrypter,
                 self.secrets
@@ -1024,7 +1053,7 @@ impl ExpectFinished {
                     .common
                     .confidentiality_limit,
             );
-            emit_finished(&self.secrets, transcript, output, &proof);
+            emit_finished(protocol_version, &self.secrets, transcript, output, &proof);
         }
 
         if let Some(identity) = self.peer_identity {
@@ -1066,6 +1095,8 @@ struct HandshakeState {
     resumption_data: Vec<u8>,
     using_ems: bool,
     send_ticket: bool,
+    /// The transport protocol this handshake is being performed over.
+    protocol: Protocol,
 }
 
 // --- Process traffic ---

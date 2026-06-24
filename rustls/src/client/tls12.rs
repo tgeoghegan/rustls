@@ -12,7 +12,7 @@ use super::hs::ClientState;
 use super::{ClientAuthDetails, ServerCertDetails, Tls12Session};
 use crate::ConnectionTrafficSecrets;
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
-use crate::common_state::{HandshakeKind, Output, OutputEvent, Side};
+use crate::common_state::{HandshakeKind, Output, OutputEvent, Protocol, Side};
 use crate::conn::kernel::KernelState;
 use crate::conn::{ConnectionRandoms, Input};
 use crate::crypto::cipher::{MessageDecrypter, MessageEncrypter, Payload};
@@ -129,6 +129,7 @@ mod server_hello {
             let ClientHelloInput {
                 config,
                 session_key,
+                protocol,
                 ..
             } = st.input;
 
@@ -201,6 +202,7 @@ mod server_hello {
                         session_id: server_hello.session_id,
                         session_key,
                         using_ems,
+                        protocol,
                     };
                     return if must_issue_new_ticket {
                         Ok(Box::new(ExpectNewTicket {
@@ -238,6 +240,7 @@ mod server_hello {
                     session_id: server_hello.session_id,
                     session_key,
                     using_ems,
+                    protocol,
                 },
                 randoms,
                 suite,
@@ -484,13 +487,13 @@ fn emit_certificate(
     output: &mut dyn Output<'_>,
 ) {
     let cert = Message {
-        version: ProtocolVersion::TLSv1_2,
+        version: hs.protocol.wire_protocol_version(),
         payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Certificate(
             cert_chain,
         ))),
     };
 
-    output.send_msg(Some(transcript), cert, false);
+    output.send_msg(Some(transcript), cert, false, false);
 }
 
 fn emit_client_kx(
@@ -512,13 +515,13 @@ fn emit_client_kx(
     let pubkey = Payload::new(buf);
 
     let ckx = Message {
-        version: ProtocolVersion::TLSv1_2,
+        version: hs.protocol.wire_protocol_version(),
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::ClientKeyExchange(pubkey),
         )),
     };
 
-    output.send_msg(Some(transcript), ckx, false);
+    output.send_msg(Some(transcript), ckx, false, false);
 }
 
 fn emit_certverify(
@@ -526,7 +529,8 @@ fn emit_certverify(
     signer: Box<dyn Signer>,
     output: &mut dyn Output<'_>,
 ) -> Result<(), Error> {
-    let message = transcript
+    let message = hs
+        .transcript
         .take_handshake_buf()
         .ok_or_else(|| Error::General("Expected transcript".to_owned()))?;
 
@@ -535,23 +539,24 @@ fn emit_certverify(
     let body = DigitallySignedStruct::new(scheme, sig);
 
     let m = Message {
-        version: ProtocolVersion::TLSv1_2,
+        version: hs.protocol.wire_protocol_version(),
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::CertificateVerify(body),
         )),
     };
 
-    output.send_msg(Some(transcript), m, false);
+    output.send_msg(Some(transcript), m, false, false);
     Ok(())
 }
 
-fn emit_ccs(output: &mut dyn Output<'_>) {
+fn emit_ccs(hs: &HandshakeState, output: &mut dyn Output<'_>) {
     output.send_msg(
         None,
         Message {
-            version: ProtocolVersion::TLSv1_2,
+            version: hs.protocol.wire_protocol_version(),
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         },
+        false,
         false,
     );
 }
@@ -567,13 +572,13 @@ fn emit_finished(
     let verify_data_payload = Payload::Borrowed(&verify_data);
 
     let f = Message {
-        version: ProtocolVersion::TLSv1_2,
+        version: hs.protocol.wire_protocol_version(),
         payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Finished(
             verify_data_payload,
         ))),
     };
 
-    output.send_msg(Some(transcript), f, true);
+    output.send_msg(Some(transcript), f, true, false);
 }
 
 struct ServerKxDetails {
@@ -867,7 +872,7 @@ impl ExpectServerDone {
         output.output(OutputEvent::KeyExchangeGroup(skxg));
 
         // 4e. CCS. We are definitely going to switch on encryption.
-        emit_ccs(output);
+        emit_ccs(&self.hs, output);
 
         // 4f. Now commit secrets.
         self.hs.config.key_log.log(
@@ -1127,7 +1132,7 @@ impl ExpectFinished {
         st.save_session();
 
         if let Some((_, encrypter)) = st.resuming.take() {
-            emit_ccs(output);
+            emit_ccs(&st.hs, output);
             output.send().set_encrypter(
                 encrypter,
                 st.secrets
@@ -1183,6 +1188,8 @@ struct HandshakeState {
     session_id: SessionId,
     session_key: ClientSessionKey<'static>,
     using_ems: bool,
+    /// The transport protocol this handshake is being performed over.
+    protocol: Protocol,
 }
 
 // -- Traffic transit state --

@@ -252,7 +252,7 @@ impl ClientHandler<Tls13CipherSuite> for Handler {
             &proof,
         );
 
-        if !key_schedule.protocol().is_quic() {
+        if !key_schedule.protocol().is_quic() && !key_schedule.protocol().is_dtls() {
             emit_fake_ccs(&mut sent_tls13_fake_ccs, output);
         }
 
@@ -479,6 +479,7 @@ pub(super) fn emit_fake_ccs(sent_tls13_fake_ccs: &mut bool, output: &mut dyn Out
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         },
+        false,
         false,
     );
 }
@@ -1281,15 +1282,19 @@ fn emit_finished_tls13(
     )));
 }
 
-fn emit_end_of_early_data_tls13(transcript: &mut HandshakeTranscript, output: &mut dyn Output<'_>) {
+fn emit_end_of_early_data_tls13(
+    version: ProtocolVersion,
+    transcript: &mut HandshakeTranscript,
+    output: &mut dyn Output<'_>,
+) {
     let m = Message {
-        version: ProtocolVersion::TLSv1_3,
+        version,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::EndOfEarlyData,
         )),
     };
 
-    output.send_msg(Some(transcript), m, true);
+    output.send_msg(Some(transcript), m, true, false);
 }
 
 struct ExpectFinished {
@@ -1336,7 +1341,8 @@ impl ExpectFinished {
          * but appears in the transcript after the server Finished. */
         if st.in_early_traffic {
             if !st.hs.key_schedule.protocol().is_quic() {
-                emit_end_of_early_data_tls13(transcript, output);
+                // TODO(DTLS): handle early data and end thereof for DTLS
+                emit_end_of_early_data_tls13(ProtocolVersion::TLSv1_3, transcript, output);
             }
             output.emit(Event::EarlyData(EarlyDataEvent::Finished));
             st.hs
@@ -1344,7 +1350,8 @@ impl ExpectFinished {
                 .set_handshake_encrypter(output.send());
         }
 
-        let mut flight = HandshakeFlightTls13::new(transcript);
+        let mut flight =
+            HandshakeFlightTls13::new(transcript, input.message.version.is_datagram_tls());
 
         /* Send our authentication/finished messages.  These are still encrypted
          * with our handshake keys. */

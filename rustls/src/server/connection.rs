@@ -529,7 +529,7 @@ impl ConnectionCore<ServerSide> {
         extra_exts: ServerExtensionsInput,
         protocol: Protocol,
     ) -> Result<Self, Error> {
-        let mut common = CommonState::new(Side::Server, config.fips());
+        let mut common = CommonState::new(Side::Server, config.fips(), protocol);
         common
             .send
             .set_max_fragment_size(config.max_fragment_size)?;
@@ -551,7 +551,7 @@ impl ConnectionCore<ServerSide> {
         Self::new(
             ReadClientHello::new(protocol).into(),
             ServerConnectionData::default(),
-            CommonState::new(Side::Server, FipsStatus::Unvalidated),
+            CommonState::new(Side::Server, FipsStatus::Unvalidated, protocol),
             HandshakeTranscript::new(),
         )
     }
@@ -594,7 +594,11 @@ impl SideOutput for ServerConnectionData {
 #[derive(Debug)]
 pub struct ServerSide;
 
-impl SideData for ServerSide {}
+impl SideData for ServerSide {
+    fn label() -> &'static str {
+        "server"
+    }
+}
 
 impl crate::conn::private::Side for ServerSide {
     type Data = ServerConnectionData;
