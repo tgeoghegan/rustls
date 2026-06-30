@@ -1308,14 +1308,7 @@ impl ExpectFinished {
         let fin = match ConstantTimeEq::ct_eq(expect_verify_data.as_ref(), finished.bytes()).into()
         {
             true => verify::FinishedMessageVerified::assertion(),
-            false => {
-                // TODO(DTLS): client/server transcripts currently mismatch
-                // because they hash different views of the records.
-                // Circumvent for now to unblock other work.
-                std::println!("client should reject bad server finished");
-                verify::FinishedMessageVerified::assertion()
-                //return Err(PeerMisbehaved::IncorrectFinished.into());
-            }
+            false => return Err(PeerMisbehaved::IncorrectFinished.into()),
         };
 
         st.hs

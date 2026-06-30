@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use core::mem;
 
 use crate::crypto::{HashAlgorithm, hash};
+use crate::enums::ProtocolVersion;
 use crate::msgs::{Codec, HandshakeAlignedProof, HandshakeMessagePayload, Message, MessagePayload};
 
 /// Early stage buffering of handshake payloads.
@@ -61,14 +62,27 @@ impl HandshakeHashBuffer {
     }
 
     /// We now know what hash function the verify_data will use.
-    pub(crate) fn start_hash(self, provider: &'static dyn hash::Hash) -> HandshakeHash {
+    pub(crate) fn start_hash(
+        self,
+        provider: &'static dyn hash::Hash,
+        negotiated_version: ProtocolVersion,
+    ) -> HandshakeHash {
+        let (first, second) = HandshakeHash::split_around_dtls_handshake_fragment_fields(
+            negotiated_version,
+            &self.buffer,
+        );
         let mut ctx = provider.start();
-        ctx.update(&self.buffer);
+        ctx.update(first);
+        ctx.update(second);
         HandshakeHash {
             provider,
             ctx,
             client_auth: match self.client_auth_enabled {
-                true => Some(self.buffer),
+                true => {
+                    let mut buf = first.to_vec();
+                    buf.extend_from_slice(second);
+                    Some(buf)
+                }
                 false => None,
             },
         }
@@ -100,10 +114,18 @@ impl HandshakeHash {
     /// Hash/buffer a handshake message.
     pub(crate) fn add_message(&mut self, m: &Message<'_>) -> &mut Self {
         match &m.payload {
-            MessagePayload::Handshake { encoded, .. } => self.add_raw(encoded.bytes()),
+            MessagePayload::Handshake { encoded, .. } => {
+                // is m.version authoritative here?
+                let (first, second) =
+                    Self::split_around_dtls_handshake_fragment_fields(m.version, encoded.bytes());
+                self.add_raw(first).add_raw(second)
+            }
             MessagePayload::HandshakeFlight(encoded) => {
                 for (_, encoded) in encoded {
-                    self.add(encoded)
+                    let (first, second) =
+                        Self::split_around_dtls_handshake_fragment_fields(m.version, encoded);
+                    self.add(first);
+                    self.add(second);
                 }
 
                 self
@@ -175,6 +197,34 @@ impl HandshakeHash {
     /// The hashing algorithm
     pub(crate) fn algorithm(&self) -> HashAlgorithm {
         self.provider.algorithm()
+    }
+
+    /// In TLS 1.2 or 1.3, the entire handshake payload gets hashed. In DTLS 1.2, the entire
+    /// handshake message including the DTLS-specific message_seq, fragment_offset, and
+    /// fragment_length fields are hashed ([1]). But in DTLS 1.3, those fields are omitted ([2]).
+    ///
+    /// This function takes the encoded handshake message payload and splits it into two slices
+    /// based on protocol version. For TLS 1.2, TLS 1.3 and DTLS 1.2, the entire encoded payload is
+    /// yielded, split across the two slices. For DTLS 1.3, the encoded payload is split around
+    /// bytes 5-12, which are occupied by the omitted fields.
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.2.6
+    /// [2]: https://datatracker.ietf.org/doc/html/rfc9147#section-5.2
+    fn split_around_dtls_handshake_fragment_fields(
+        version: ProtocolVersion,
+        encoded_handshake_payload: &[u8],
+    ) -> (&[u8], &[u8]) {
+        // msg_type (1 byte) + length (3 bytes)
+        let first_slice = &encoded_handshake_payload[..4];
+        let second_slice = if version == ProtocolVersion::DTLSv1_3 {
+            // Skip message_seq (2 bytes) + fragment_offset (3 bytes) + fragment_length (3 bytes)
+            &encoded_handshake_payload[4 + 2 + 3 + 3..]
+        } else {
+            // Remainder of input buffer
+            &encoded_handshake_payload[4..]
+        };
+
+        (first_slice, second_slice)
     }
 }
 
