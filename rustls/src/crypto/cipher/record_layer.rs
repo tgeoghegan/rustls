@@ -45,6 +45,7 @@ impl EncryptionState {
         assert!(self.version.is_some());
         assert!(self.pre_encrypt_action(0) != Some(PreEncryptAction::Refuse));
         let seq = self.write_seq;
+        let epoch_and_sequence = self.epoch_and_sequence(plain.version);
         self.write_seq += 1;
         let encrypter = self.message_encrypter.as_mut().unwrap();
         encrypter
@@ -52,11 +53,7 @@ impl EncryptionState {
                 EncodingContext {
                     is_initial_handshake: false,
                     payload_is_encrypted: true,
-                    epoch_and_sequence: if plain.version.is_datagram_tls() {
-                        Some(EpochAndSequence::from_sequence_number(seq))
-                    } else {
-                        None
-                    },
+                    epoch_and_sequence,
                     ..Default::default()
                 },
                 plain,
@@ -105,6 +102,14 @@ impl EncryptionState {
 
     pub(crate) fn write_seq(&self) -> u64 {
         self.write_seq
+    }
+
+    pub(crate) fn epoch_and_sequence(&self, version: ProtocolVersion) -> Option<EpochAndSequence> {
+        if version.is_datagram_tls() {
+            Some(EpochAndSequence::from_sequence_number(self.write_seq))
+        } else {
+            None
+        }
     }
 }
 

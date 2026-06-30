@@ -177,6 +177,9 @@ impl SendPath {
                 m.to_unencrypted_opaque(EncodingContext {
                     is_initial_handshake: is_retry_req,
                     payload_is_encrypted: false,
+                    epoch_and_sequence: self
+                        .encrypt_state
+                        .epoch_and_sequence(m.version),
                     ..Default::default()
                 })
             }
