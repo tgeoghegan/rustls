@@ -4,8 +4,7 @@ use aws_lc_rs::{aead, tls_prf};
 use pki_types::FipsStatus;
 use rustls::crypto::cipher::{
     AeadKey, EncodedMessage, InboundOpaque, Iv, KeyBlockShape, MessageDecrypter, MessageEncrypter,
-    NONCE_LEN, Nonce, OutboundOpaque, OutboundPlain, Tls12AeadAlgorithm, UnsupportedOperationError,
-    make_tls12_aad,
+    NONCE_LEN, Nonce, Tls12AeadAlgorithm, UnsupportedOperationError, make_tls12_aad,
 };
 use rustls::crypto::kx::{ActiveKeyExchange, KeyExchangeAlgorithm, SharedSecret};
 use rustls::crypto::tls12::{Prf, PrfSecret};
@@ -304,27 +303,30 @@ impl MessageDecrypter for GcmMessageDecrypter {
 impl MessageEncrypter for GcmMessageEncrypter {
     fn encrypt(
         &mut self,
-        msg: EncodedMessage<OutboundPlain<'_>>,
+        msg: &EncodedMessage<()>,
+        plaintext: &mut [u8],
+        plaintext_len: usize,
         seq: u64,
-    ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
-
+    ) -> Result<(), Error> {
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls12_aad(seq, msg.typ, msg.version, msg.payload.len()));
-        payload.extend_from_slice(&nonce.as_ref()[4..]);
-        payload.extend_from_chunks(&msg.payload);
+        let aad = aead::Aad::from(make_tls12_aad(seq, msg.typ, msg.version, plaintext_len));
+
+        // Move the ciphertext to make room for the nonce and then copy it in
+        plaintext.copy_within(0..plaintext_len, GCM_EXPLICIT_NONCE_LEN);
+        plaintext.copy_from_slice(&nonce.as_ref()[4..]);
 
         self.enc_key
-            .seal_in_place_separate_tag(nonce, aad, &mut payload.as_mut()[GCM_EXPLICIT_NONCE_LEN..])
-            .map(|tag| payload.extend_from_slice(tag.as_ref()))
+            .seal_in_place_separate_tag(
+                nonce,
+                aad,
+                &mut plaintext[GCM_EXPLICIT_NONCE_LEN..GCM_EXPLICIT_NONCE_LEN + plaintext_len],
+            )
+            .map(|tag| {
+                plaintext[GCM_EXPLICIT_NONCE_LEN + plaintext_len..].copy_from_slice(tag.as_ref())
+            })
             .map_err(|_| Error::EncryptError)?;
 
-        Ok(EncodedMessage {
-            typ: msg.typ,
-            version: msg.version,
-            payload,
-        })
+        Ok(())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
@@ -390,26 +392,24 @@ impl MessageDecrypter for ChaCha20Poly1305MessageDecrypter {
 impl MessageEncrypter for ChaCha20Poly1305MessageEncrypter {
     fn encrypt(
         &mut self,
-        msg: EncodedMessage<OutboundPlain<'_>>,
+        msg: &EncodedMessage<()>,
+        plaintext: &mut [u8],
+        plaintext_len: usize,
         seq: u64,
-    ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
-
+    ) -> Result<(), Error> {
         let nonce =
             aead::Nonce::assume_unique_for_key(Nonce::new(&self.enc_offset, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls12_aad(seq, msg.typ, msg.version, msg.payload.len()));
-        payload.extend_from_chunks(&msg.payload);
+        let aad = aead::Aad::from(make_tls12_aad(seq, msg.typ, msg.version, plaintext_len));
 
         self.enc_key
-            .seal_in_place_append_tag(nonce, aad, &mut payload)
+            .seal_in_place_separate_tag(nonce, aad, &mut plaintext[..plaintext_len])
+            .map(|tag| {
+                plaintext[plaintext_len..self.enc_key.algorithm().tag_len()]
+                    .copy_from_slice(tag.as_ref())
+            })
             .map_err(|_| Error::EncryptError)?;
 
-        Ok(EncodedMessage {
-            typ: msg.typ,
-            version: msg.version,
-            payload,
-        })
+        Ok(())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {

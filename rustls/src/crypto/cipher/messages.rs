@@ -299,7 +299,7 @@ impl<'a> From<&'a [u8]> for OutboundPlain<'a> {
 /// This outbound type owns all memory for its interior parts.
 /// It results from encryption and is used for io write.
 #[derive(Clone, Debug)]
-pub struct OutboundOpaque(Vec<u8>);
+pub struct OutboundOpaque(pub Vec<u8>);
 
 impl OutboundOpaque {
     /// Create a new value with the given payload capacity.

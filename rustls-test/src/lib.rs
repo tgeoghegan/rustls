@@ -1349,7 +1349,7 @@ impl RawTls {
     ) {
         let data = self
             .encrypter
-            .encrypt(msg.borrow_outbound(), self.enc_seq)
+            .encrypt_outgoing(msg.borrow_outbound(), self.enc_seq)
             .unwrap()
             .encode();
         self.enc_seq += 1;
@@ -1761,8 +1761,8 @@ pub fn certificate_error_expecting_name(expected: &str) -> CertificateError {
 mod plaintext {
     use rustls::ConnectionTrafficSecrets;
     use rustls::crypto::cipher::{
-        AeadKey, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter, OutboundOpaque,
-        OutboundPlain, Tls13AeadAlgorithm, UnsupportedOperationError,
+        AeadKey, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter, Tls13AeadAlgorithm,
+        UnsupportedOperationError,
     };
 
     use super::*;
@@ -1796,17 +1796,13 @@ mod plaintext {
     impl MessageEncrypter for Encrypter {
         fn encrypt(
             &mut self,
-            msg: EncodedMessage<OutboundPlain<'_>>,
+            _msg: &mut EncodedMessage<()>,
+            _plaintext: &mut [u8],
+            _plaintext_len: usize,
             _seq: u64,
-        ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
-            let mut payload = OutboundOpaque::with_capacity(msg.payload.len());
-            payload.extend_from_chunks(&msg.payload);
-
-            Ok(EncodedMessage {
-                typ: ContentType::ApplicationData,
-                version: ProtocolVersion::TLSv1_2,
-                payload,
-            })
+        ) -> Result<(), Error> {
+            // no-op
+            Ok(())
         }
 
         fn encrypted_payload_len(&self, payload_len: usize) -> usize {

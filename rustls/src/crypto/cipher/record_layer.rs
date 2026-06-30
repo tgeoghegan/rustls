@@ -37,10 +37,11 @@ impl EncryptionState {
         assert!(self.pre_encrypt_action(0) != Some(PreEncryptAction::Refuse));
         let seq = self.write_seq;
         self.write_seq += 1;
+
         self.message_encrypter
             .as_mut()
             .unwrap()
-            .encrypt(plain, seq)
+            .encrypt_outgoing(plain, seq)
             .unwrap()
     }
 

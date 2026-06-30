@@ -530,7 +530,7 @@ fn client_requiring_rpk_receives_server_ee(
 
     let mut encrypter = fake_server_crypto.server_handshake_encrypter();
     let enc_ee = encrypter
-        .encrypt(EncodedMessage::<Payload<'_>>::from(ee).borrow_outbound(), 0)
+        .encrypt_outgoing(EncodedMessage::<Payload<'_>>::from(ee).borrow_outbound(), 0)
         .unwrap();
     conn.read_tls(&mut enc_ee.encode().as_slice())
         .unwrap();

@@ -6,8 +6,7 @@ use std::borrow::Cow;
 
 use crate::crypto::cipher::{
     AeadKey, EncodedMessage, InboundOpaque, Iv, KeyBlockShape, MessageDecrypter, MessageEncrypter,
-    OutboundOpaque, OutboundPlain, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
-    UnsupportedOperationError,
+    Tls12AeadAlgorithm, Tls13AeadAlgorithm, UnsupportedOperationError,
 };
 use crate::crypto::kx::{
     KeyExchangeAlgorithm, NamedGroup, SharedSecret, StartedKeyExchange, SupportedKxGroup,
@@ -16,7 +15,6 @@ use crate::crypto::{
     self, CipherSuite, CipherSuiteCommon, GetRandomFailed, HashAlgorithm, SignatureScheme,
     TicketProducer, WebPkiSupportedAlgorithms, hash, hmac, tls12, tls13,
 };
-use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::PeerMisbehaved;
 use crate::pki_types::{
     AlgorithmIdentifier, InvalidSignature, PrivateKeyDer, SignatureVerificationAlgorithm,
@@ -368,31 +366,24 @@ struct Tls13Cipher;
 impl MessageEncrypter for Tls13Cipher {
     fn encrypt(
         &mut self,
-        m: EncodedMessage<OutboundPlain<'_>>,
+        msg: &EncodedMessage<()>,
+        plaintext: &mut [u8],
+        plaintext_len: usize,
         seq: u64,
-    ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
-        let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
+    ) -> Result<(), Error> {
+        msg.payload[plaintext_len..].copy_from_slice(&msg.typ.to_array());
 
-        payload.extend_from_chunks(&m.payload);
-        payload.extend_from_slice(&m.typ.to_array());
-
-        for (p, mask) in payload
-            .as_mut()
+        for (p, mask) in &mut plaintext[..plaintext_len + 1]
             .iter_mut()
             .zip(AEAD_MASK.iter().cycle())
         {
             *p ^= *mask;
         }
 
-        payload.extend_from_slice(&seq.to_be_bytes());
-        payload.extend_from_slice(AEAD_TAG);
+        plaintext[plaintext_len + 1..].copy_from_slice(&seq.to_be_bytes());
+        plaintext[plaintext_len + 1 + seq.to_be_bytes().len()..].copy_from_slice(AEAD_TAG);
 
-        Ok(EncodedMessage {
-            typ: ContentType::ApplicationData,
-            version: ProtocolVersion::TLSv1_2,
-            payload,
-        })
+        Ok(())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
@@ -437,29 +428,22 @@ struct Tls12Cipher;
 impl MessageEncrypter for Tls12Cipher {
     fn encrypt(
         &mut self,
-        m: EncodedMessage<OutboundPlain<'_>>,
+        msg: &EncodedMessage<()>,
+        plaintext: &mut [u8],
+        plaintext_len: usize,
         seq: u64,
-    ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
-        let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = OutboundOpaque::with_capacity(total_len);
-        payload.extend_from_chunks(&m.payload);
-
-        for (p, mask) in payload
-            .as_mut()
+    ) -> Result<(), Error> {
+        for (p, mask) in &mut plaintext[..plaintext_len]
             .iter_mut()
             .zip(AEAD_MASK.iter().cycle())
         {
             *p ^= *mask;
         }
 
-        payload.extend_from_slice(&seq.to_be_bytes());
-        payload.extend_from_slice(AEAD_TAG);
+        plaintext[plaintext_len + 1..].copy_from_slice(&seq.to_be_bytes());
+        plaintext[plaintext_len + 1 + seq.to_be_bytes().len()..].copy_from_slice(AEAD_TAG);
 
-        Ok(EncodedMessage {
-            typ: m.typ,
-            version: m.version,
-            payload,
-        })
+        Ok(())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {

@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
-use core::{array, fmt};
+use core::{array, fmt, iter};
 
 use pki_types::FipsStatus;
 use zeroize::Zeroize;
@@ -157,16 +157,62 @@ pub trait MessageDecrypter: Send + Sync {
 
 /// Objects with this trait can encrypt TLS messages.
 pub trait MessageEncrypter: Send + Sync {
-    /// Encrypt the given TLS message `msg`, using the sequence number
-    /// `seq` which can be used to derive a unique [`Nonce`].
+    /// Encrypt the given TLS message `msg`, using the sequence number `seq` which can be used to
+    /// derive a unique [`Nonce`]. The first `plaintext_len` bytes of `msg.payload` contain the
+    /// plaintext to encrypt, and `msg.payload` must be long enough for the corresponding ciphertext
+    /// to be written to it (i.e., at least `self.encrypted_payload_len(plaintext_len)` bytes long).
+    ///
+    /// `msg.payload` does not include any space reserved for the TLS record header, e.g. by
+    /// [`OutboundOpaque`].
+    ///
+    /// On successful return, the ciphertext will be stored to `msg.payload`.
     fn encrypt(
         &mut self,
-        msg: EncodedMessage<OutboundPlain<'_>>,
+        msg: &EncodedMessage<()>,
+        msg_in_out: &mut [u8],
+        plaintext_len: usize,
         seq: u64,
-    ) -> Result<EncodedMessage<OutboundOpaque>, Error>;
+    ) -> Result<(), Error>;
 
-    /// Return the length of the ciphertext that results from encrypting plaintext of
-    /// length `payload_len`
+    /// Convenience function to convert `EncodedMessage<OutboundPlain<'a>>` to
+    /// `EncodedMessage<OutboundOpaque>`, allocating a buffer big enough for the ciphertext (which
+    /// may be bigger than the plaintext) and a record header.
+    fn encrypt_outgoing<'a>(
+        &mut self,
+        msg: EncodedMessage<OutboundPlain<'a>>,
+        seq: u64,
+    ) -> Result<EncodedMessage<OutboundOpaque>, Error> {
+        // Copy plaintext and pad the buffer with enough zeroes to make room for ciphertext.
+        // This copy is unfortunate; can we get the OutboundPlain to be the right size in the first
+        // place?
+        let encrypted_len = self.encrypted_payload_len(msg.payload.len());
+        let mut payload = OutboundOpaque::with_capacity(encrypted_len);
+        payload.extend_from_chunks(&msg.payload);
+        payload.extend(iter::repeat_n(&0, encrypted_len - msg.payload.len()));
+
+        self.encrypt(
+            &mut EncodedMessage {
+                typ: msg.typ,
+                version: msg.version,
+                payload: (),
+            },
+            payload.as_mut(),
+            msg.payload.len(),
+            seq,
+        )
+        .unwrap();
+
+        Ok(EncodedMessage {
+            typ: msg.typ,
+            // Note: all TLS 1.3 application data records use TLSv1_2 (0x0303) as the legacy record
+            // protocol version, see https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+            version: ProtocolVersion::TLSv1_2,
+            payload,
+        })
+    }
+
+    /// Return the length of the ciphertext that results from encrypting plaintext of length
+    /// `payload_len`
     fn encrypted_payload_len(&self, payload_len: usize) -> usize;
 }
 
