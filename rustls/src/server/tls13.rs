@@ -175,7 +175,13 @@ mod client_hello {
             let Some(chosen_share_and_kxg) = chosen_share_and_kxg else {
                 // We don't have a suitable key share.  Send a HelloRetryRequest
                 // for the mutually_preferred_group.
-                transcript.add_message(input.message);
+                transcript.add(
+                    todo!(),
+                    input
+                        .message
+                        .handshake_message_payload()?
+                        .bytes(),
+                );
 
                 if st.done_retry {
                     return Err(PeerMisbehaved::RefusedToFollowHelloRetryRequest.into());
@@ -250,7 +256,13 @@ mod client_hello {
             }
 
             let full_handshake = resuming.is_none();
-            transcript.add_message(input.message);
+            transcript.add(
+                todo!(),
+                input
+                    .message
+                    .handshake_message_payload()?
+                    .bytes(),
+            );
             let key_schedule = emit_server_hello(
                 &mut transcript,
                 &randoms,
@@ -566,7 +578,12 @@ mod client_hello {
         let client_hello_hash = transcript.hash_given(&[]);
 
         trace!("sending server hello {sh:?}");
-        transcript.add_message(&sh);
+        transcript.add(
+            todo!(),
+            sh.handshake_message_payload()
+                .unwrap()
+                .bytes(),
+        );
         output.send_msg(sh, false, false);
 
         // Start key schedule
@@ -650,7 +667,12 @@ mod client_hello {
 
         trace!("Requesting retry {m:?}");
         transcript.rollup_for_hrr();
-        transcript.add_message(&m);
+        transcript.add(
+            todo!(),
+            m.handshake_message_payload()
+                .unwrap()
+                .bytes(),
+        );
         output.send_msg(m, false, false);
     }
 
@@ -965,7 +987,12 @@ struct ExpectCompressedCertificate {
 
 impl ExpectCompressedCertificate {
     fn handle_input(mut self, Input { message, .. }: Input<'_>) -> Result<ServerState, Error> {
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         let compressed_cert = require_handshake_msg_move!(
             message,
             HandshakeType::CompressedCertificate,
@@ -1019,7 +1046,12 @@ struct ExpectCertificate {
 
 impl ExpectCertificate {
     fn handle_input(mut self, Input { message, .. }: Input<'_>) -> Result<ServerState, Error> {
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         self.handle_certificate(require_handshake_msg_move!(
             message,
             HandshakeType::Certificate,
@@ -1130,7 +1162,12 @@ impl ExpectCertificateVerify {
 
         trace!("client CertificateVerify OK");
 
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         Ok(Box::new(ExpectFinished {
             hs: self.hs,
             key_schedule: self.key_schedule,
@@ -1182,9 +1219,13 @@ impl ExpectEarlyData {
                 let proof = input.check_aligned_handshake()?;
                 self.key_schedule
                     .update_decrypter(output.receive(), &proof);
-                self.hs
-                    .transcript
-                    .add_message(&input.message);
+                self.hs.transcript.add(
+                    todo!(),
+                    input
+                        .message
+                        .handshake_message_payload()?
+                        .bytes(),
+                );
                 Ok(Box::new(ExpectFinished {
                     hs: self.hs,
                     key_schedule: self.key_schedule,
@@ -1434,9 +1475,13 @@ impl ExpectFinished {
 
         // Note: future derivations include Client Finished, but not the
         // main application data keying.
-        self.hs
-            .transcript
-            .add_message(&input.message);
+        self.hs.transcript.add(
+            todo!(),
+            input
+                .message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         let (key_schedule_traffic, exporter, resumption) =
             key_schedule_before_finished.into_traffic(self.hs.transcript.current_hash());

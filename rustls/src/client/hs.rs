@@ -309,6 +309,9 @@ impl ExpectServerHelloOrHelloRetryRequest {
             Some(ProtocolVersion::TLSv1_3) => {
                 output.output(OutputEvent::ProtocolVersion(ProtocolVersion::TLSv1_3));
             }
+            Some(ProtocolVersion::DTLSv1_3) => {
+                output.output(OutputEvent::ProtocolVersion(ProtocolVersion::DTLSv1_3));
+            }
             _ => {
                 return Err(PeerMisbehaved::IllegalHelloRetryRequestWithUnsupportedVersion.into());
             }
@@ -345,12 +348,21 @@ impl ExpectServerHelloOrHelloRetryRequest {
         };
 
         // This is the draft19 change where the transcript became a tree
-        let transcript = self
-            .next
-            .transcript_buffer
-            .start_hash(cs.hash_provider());
+        let transcript = self.next.transcript_buffer.start_hash(
+            cs.hash_provider(),
+            if self.next.input.protocol.is_dtls() {
+                ProtocolVersion::DTLSv1_3
+            } else {
+                ProtocolVersion::TLSv1_3
+            },
+        );
         let mut transcript_buffer = transcript.into_hrr_buffer(&proof);
-        transcript_buffer.add_message(&input.message);
+        transcript_buffer.add(
+            input
+                .message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         // If we offered ECH and the server accepted, we also need to update the separate
         // ECH transcript with the hello retry request message.
@@ -845,7 +857,7 @@ fn emit_client_hello_for_retry(
 
     trace!("Sending ClientHello {ch:#?}");
 
-    transcript_buffer.add_message(&ch);
+    transcript_buffer.add(ch.handshake_message_payload()?.bytes());
     output.send_msg(ch, false, retryreq.is_none());
 
     // Calculate the hash of ClientHello and use it to derive EarlyTrafficSecret

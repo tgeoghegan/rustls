@@ -31,22 +31,9 @@ impl HandshakeHashBuffer {
         self.client_auth_enabled = true;
     }
 
-    /// Hash/buffer a handshake message.
-    pub(crate) fn add_message(&mut self, m: &Message<'_>) {
-        match &m.payload {
-            MessagePayload::Handshake { encoded, .. } => self.add_raw(encoded.bytes()),
-            MessagePayload::HandshakeFlight(encoded) => {
-                for (_, encoded) in encoded {
-                    self.add_raw(encoded)
-                }
-            }
-            _ => {}
-        };
-    }
-
     /// Hash or buffer a byte slice.
-    fn add_raw(&mut self, buf: &[u8]) {
-        self.buffer.extend_from_slice(buf);
+    pub(crate) fn add(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
     }
 
     /// Get the hash value if we were to hash `extra` too.
@@ -111,32 +98,10 @@ impl HandshakeHash {
         self.client_auth = None;
     }
 
-    /// Hash/buffer a handshake message.
-    pub(crate) fn add_message(&mut self, m: &Message<'_>) -> &mut Self {
-        match &m.payload {
-            MessagePayload::Handshake { encoded, .. } => {
-                // is m.version authoritative here?
-                let (first, second) =
-                    Self::split_around_dtls_handshake_fragment_fields(m.version, encoded.bytes());
-                self.add_raw(first).add_raw(second)
-            }
-            MessagePayload::HandshakeFlight(encoded) => {
-                for (_, encoded) in encoded {
-                    let (first, second) =
-                        Self::split_around_dtls_handshake_fragment_fields(m.version, encoded);
-                    self.add(first);
-                    self.add(second);
-                }
-
-                self
-            }
-            _ => self,
-        }
-    }
-
     /// Hash/buffer an encoded handshake message.
-    pub(crate) fn add(&mut self, bytes: &[u8]) {
-        self.add_raw(bytes);
+    pub(crate) fn add(&mut self, version: ProtocolVersion, bytes: &[u8]) {
+        let (first, second) = Self::split_around_dtls_handshake_fragment_fields(version, bytes);
+        self.add_raw(first).add_raw(second);
     }
 
     /// Hash or buffer a byte slice.
@@ -214,14 +179,18 @@ impl HandshakeHash {
         version: ProtocolVersion,
         encoded_handshake_payload: &[u8],
     ) -> (&[u8], &[u8]) {
+        if encoded_handshake_payload.len() < 4 {
+            return (encoded_handshake_payload, &[]);
+        }
         // msg_type (1 byte) + length (3 bytes)
-        let first_slice = &encoded_handshake_payload[..4];
+        let first_slice = &encoded_handshake_payload[..1 + 3];
         let second_slice = if version == ProtocolVersion::DTLSv1_3 {
-            // Skip message_seq (2 bytes) + fragment_offset (3 bytes) + fragment_length (3 bytes)
-            &encoded_handshake_payload[4 + 2 + 3 + 3..]
+            // Skip msg_typ (1 byte) + length (3 bytes) + message_seq (2 bytes) +
+            // fragment_offset (3 bytes) + fragment_length (3 bytes)
+            &encoded_handshake_payload[1 + 3 + 2 + 3 + 3..]
         } else {
             // Remainder of input buffer
-            &encoded_handshake_payload[4..]
+            &encoded_handshake_payload[1 + 3..]
         };
 
         (first_slice, second_slice)
@@ -249,9 +218,9 @@ mod tests {
     #[test]
     fn hashes_correctly() {
         let mut hhb = HandshakeHashBuffer::new();
-        hhb.add_raw(b"hello");
+        hhb.add(b"hello");
         assert_eq!(hhb.buffer.len(), 5);
-        let mut hh = hhb.start_hash(SHA256);
+        let mut hh = hhb.start_hash(SHA256, ProtocolVersion::TLSv1_2);
         assert!(hh.client_auth.is_none());
         hh.add_raw(b"world");
         let h = hh.current_hash();
@@ -263,64 +232,13 @@ mod tests {
     }
 
     #[test]
-    fn hashes_message_types() {
-        // handshake protocol encoding of 0x0e 00 00 00
-        let server_hello_done_message = Message {
-            version: ProtocolVersion::TLSv1_2,
-            payload: MessagePayload::handshake(HandshakeMessagePayload(
-                HandshakePayload::ServerHelloDone,
-            )),
-        };
-
-        let app_data_ignored = Message {
-            version: ProtocolVersion::TLSv1_3,
-            payload: MessagePayload::ApplicationData(Payload::Borrowed(b"hello")),
-        };
-
-        let end_of_early_data_flight = Message {
-            version: ProtocolVersion::TLSv1_3,
-            payload: MessagePayload::HandshakeFlight(Vec::from([(
-                HandshakeType::EndOfEarlyData,
-                Vec::from(b"\x05\x00\x00\x00"),
-            )])),
-        };
-
-        // buffered mode
-        let mut hhb = HandshakeHashBuffer::new();
-        hhb.add_message(&server_hello_done_message);
-        hhb.add_message(&app_data_ignored);
-        hhb.add_message(&end_of_early_data_flight);
-
-        assert_eq!(
-            hhb.start_hash(SHA256)
-                .current_hash()
-                .as_ref(),
-            SHA256
-                .hash(b"\x0e\x00\x00\x00\x05\x00\x00\x00")
-                .as_ref()
-        );
-
-        // non-buffered mode
-        let mut hh = HandshakeHashBuffer::new().start_hash(SHA256);
-        hh.add_message(&server_hello_done_message);
-        hh.add_message(&app_data_ignored);
-        hh.add_message(&end_of_early_data_flight);
-        assert_eq!(
-            hh.current_hash().as_ref(),
-            SHA256
-                .hash(b"\x0e\x00\x00\x00\x05\x00\x00\x00")
-                .as_ref()
-        );
-    }
-
-    #[test]
     fn buffers_correctly() {
         let mut hhb = HandshakeHashBuffer::new();
         hhb.set_client_auth_enabled();
-        hhb.add_raw(b"hello");
+        hhb.add(b"hello");
         assert_eq!(hhb.buffer.len(), 5);
 
-        let mut hh = hhb.start_hash(SHA256);
+        let mut hh = hhb.start_hash(SHA256, ProtocolVersion::TLSv1_2);
         assert_eq!(
             hh.client_auth
                 .as_ref()
@@ -350,10 +268,10 @@ mod tests {
     fn abandon() {
         let mut hhb = HandshakeHashBuffer::new();
         hhb.set_client_auth_enabled();
-        hhb.add_raw(b"hello");
+        hhb.add(b"hello");
         assert_eq!(hhb.buffer.len(), 5);
 
-        let mut hh = hhb.start_hash(SHA256);
+        let mut hh = hhb.start_hash(SHA256, ProtocolVersion::TLSv1_2);
         assert_eq!(
             hh.client_auth
                 .as_ref()
@@ -378,7 +296,7 @@ mod tests {
     fn clones_correctly() {
         let mut hhb = HandshakeHashBuffer::new();
         hhb.set_client_auth_enabled();
-        hhb.add_raw(b"hello");
+        hhb.add(b"hello");
         assert_eq!(hhb.buffer.len(), 5);
 
         // Cloning the HHB should result in the same buffer and client auth state.
@@ -387,11 +305,11 @@ mod tests {
         assert!(hhb_prime.client_auth_enabled);
 
         // Updating the HHB clone shouldn't affect the original.
-        hhb_prime.add_raw(b"world");
+        hhb_prime.add(b"world");
         assert_eq!(hhb_prime.buffer.len(), 10);
         assert_ne!(hhb.buffer, hhb_prime.buffer);
 
-        let hh = hhb.start_hash(SHA256);
+        let hh = hhb.start_hash(SHA256, ProtocolVersion::TLSv1_2);
         let hh_hash = hh.current_hash();
         let hh_hash = hh_hash.as_ref();
 
@@ -405,5 +323,66 @@ mod tests {
         hh_prime.add_raw(b"goodbye");
         assert_eq!(hh.current_hash().as_ref(), hh_hash);
         assert_ne!(hh_prime.current_hash().as_ref(), hh_hash);
+    }
+
+    #[test]
+    fn dtls_versions() {
+        let first_message = [1u8; 20];
+        let second_message = [2u8; 20];
+
+        let mut hhb = HandshakeHashBuffer::new();
+        hhb.add(&first_message);
+
+        let mut hh_tls_12 = hhb
+            .clone()
+            .start_hash(SHA256, ProtocolVersion::TLSv1_2);
+        let mut hh_tls_13 = hhb
+            .clone()
+            .start_hash(SHA256, ProtocolVersion::TLSv1_3);
+        let mut hh_dtls_12 = hhb
+            .clone()
+            .start_hash(SHA256, ProtocolVersion::DTLSv1_2);
+        let mut hh_dtls_13 = hhb
+            .clone()
+            .start_hash(SHA256, ProtocolVersion::DTLSv1_3);
+
+        for (hh, version) in [
+            (&mut hh_tls_12, ProtocolVersion::TLSv1_2),
+            (&mut hh_tls_13, ProtocolVersion::TLSv1_3),
+            (&mut hh_dtls_12, ProtocolVersion::DTLSv1_2),
+            (&mut hh_dtls_13, ProtocolVersion::DTLSv1_3),
+        ] {
+            hh.add(version, &second_message);
+        }
+
+        // Transcript hashes for TLS 1.2, TLS 1.3, DTLS 1.2 should all be the same
+        assert_eq!(
+            hh_tls_12.current_hash().as_ref(),
+            hh_tls_13.current_hash().as_ref()
+        );
+        assert_eq!(
+            hh_tls_12.current_hash().as_ref(),
+            hh_dtls_12.current_hash().as_ref()
+        );
+        // Transcript hash for DTLS 1.3 should differ
+        assert_ne!(
+            hh_tls_12.current_hash().as_ref(),
+            hh_dtls_13.current_hash().as_ref()
+        );
+
+        // Hashing as DTLS 1.3 should be equivalent to hashing bytes [0..4]+[12..] as any other
+        // version
+        let mut hhb = HandshakeHashBuffer::new();
+        hhb.add(&first_message[..4]);
+        hhb.add(&first_message[12..]);
+        let mut hh = hhb
+            .clone()
+            .start_hash(SHA256, ProtocolVersion::TLSv1_2);
+        hh.add_raw(&second_message[..4]);
+        hh.add_raw(&second_message[12..]);
+        assert_eq!(
+            hh_dtls_13.current_hash().as_ref(),
+            hh.current_hash().as_ref()
+        );
     }
 }

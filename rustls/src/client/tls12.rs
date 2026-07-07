@@ -92,8 +92,13 @@ mod server_hello {
             // Start our handshake hash, and input the server-hello.
             let mut transcript = st
                 .transcript_buffer
-                .start_hash(suite.common.hash_provider);
-            transcript.add_message(message);
+                .start_hash(suite.common.hash_provider, ProtocolVersion::TLSv1_2);
+            transcript.add(
+                todo!(),
+                message
+                    .handshake_message_payload()?
+                    .bytes(),
+            );
 
             let mut randoms = ConnectionRandoms::new(st.input.random, server_hello.random);
             randoms
@@ -271,7 +276,12 @@ impl ExpectCertificate {
         Input { message, .. }: Input<'_>,
         _output: &mut dyn Output<'_>,
     ) -> Result<ClientState, Error> {
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         let server_cert_chain = require_handshake_msg_move!(
             message,
             HandshakeType::Certificate,
@@ -379,7 +389,12 @@ struct ExpectCertificateStatus {
 
 impl ExpectCertificateStatus {
     fn handle_input(mut self, Input { message, .. }: Input<'_>) -> Result<ClientState, Error> {
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         let server_cert_ocsp_response = require_handshake_msg_move!(
             message,
             HandshakeType::CertificateStatus,
@@ -422,7 +437,12 @@ impl ExpectServerKx {
             HandshakeType::ServerKeyExchange,
             HandshakePayload::ServerKeyExchange
         )?;
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         let kx = opaque_kx
             .unwrap_given_kxa(self.suite.kx)
@@ -476,14 +496,20 @@ fn emit_certificate(
     cert_chain: CertificateChain<'_>,
     output: &mut dyn Output<'_>,
 ) {
+    let payload = MessagePayload::handshake(HandshakeMessagePayload(
+        HandshakePayload::Certificate(cert_chain),
+    ));
     let cert = Message {
         version: hs.protocol.wire_protocol_version(),
-        payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Certificate(
-            cert_chain,
-        ))),
+        payload,
     };
 
-    hs.transcript.add_message(&cert);
+    hs.transcript.add(
+        todo!(),
+        cert.handshake_message_payload()
+            .unwrap()
+            .bytes(),
+    );
     output.send_msg(cert, false, false);
 }
 
@@ -512,7 +538,12 @@ fn emit_client_kx(
         )),
     };
 
-    hs.transcript.add_message(&ckx);
+    hs.transcript.add(
+        todo!(),
+        ckx.handshake_message_payload()
+            .unwrap()
+            .bytes(),
+    );
     output.send_msg(ckx, false, false);
 }
 
@@ -537,7 +568,8 @@ fn emit_certverify(
         )),
     };
 
-    hs.transcript.add_message(&m);
+    hs.transcript
+        .add(todo!(), m.handshake_message_payload()?.bytes());
     output.send_msg(m, false, false);
     Ok(())
 }
@@ -570,7 +602,12 @@ fn emit_finished(
         ))),
     };
 
-    hs.transcript.add_message(&f);
+    hs.transcript.add(
+        todo!(),
+        &f.handshake_message_payload()
+            .unwrap()
+            .bytes(),
+    );
     output.send_msg(f, true, false);
 }
 
@@ -664,7 +701,12 @@ impl ExpectCertificateRequest {
             HandshakeType::CertificateRequest,
             HandshakePayload::CertificateRequest
         )?;
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            &message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         debug!("Got CertificateRequest {certreq:?}");
 
         // The RFC jovially describes the design here as 'somewhat complicated'
@@ -728,9 +770,13 @@ impl ExpectServerDone {
             }
         }
 
-        self.hs
-            .transcript
-            .add_message(&input.message);
+        self.hs.transcript.add(
+            todo!(),
+            input
+                .message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         let proof = input.check_aligned_handshake()?;
 
@@ -941,7 +987,12 @@ impl ExpectNewTicket {
         Input { message, .. }: Input<'_>,
         _output: &mut dyn Output<'_>,
     ) -> Result<ClientState, Error> {
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         let nst = require_handshake_msg_move!(
             message,
@@ -1113,9 +1164,13 @@ impl ExpectFinished {
             };
 
         // Hash this message too.
-        st.hs
-            .transcript
-            .add_message(&input.message);
+        st.hs.transcript.add(
+            todo!(),
+            input
+                .message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         st.save_session();
 

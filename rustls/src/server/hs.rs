@@ -812,7 +812,7 @@ pub(crate) enum HandshakeHashOrBuffer {
 impl HandshakeHashOrBuffer {
     pub(super) fn start(self, hash: &'static dyn Hash) -> Result<HandshakeHash, Error> {
         match self {
-            Self::Buffer(inner) => Ok(inner.start_hash(hash)),
+            Self::Buffer(inner) => Ok(inner.start_hash(hash, todo!())),
             Self::Hash(inner) if inner.algorithm() == hash.algorithm() => Ok(inner),
             _ => Err(PeerMisbehaved::HandshakeHashVariedAfterRetry.into()),
         }

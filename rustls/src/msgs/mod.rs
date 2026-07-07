@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 use crate::crypto::cipher::EncodingContext;
 use crate::crypto::cipher::{EncodedMessage, MessageError, OutboundOpaque, Payload};
 use crate::enums::{ContentType, ContentTypeName, HandshakeType, ProtocolVersion};
-use crate::error::{AlertDescription, InvalidMessage};
+use crate::error::{AlertDescription, Error, InvalidMessage};
 use crate::verify::DigitallySignedStruct;
 
 #[macro_use]
@@ -209,6 +209,14 @@ impl<'a> Message<'a> {
         match &self.payload {
             MessagePayload::Handshake { parsed, .. } => Some(parsed.0.handshake_type()),
             _ => None,
+        }
+    }
+
+    pub(crate) fn handshake_message_payload(&'a self) -> Result<&'a Payload<'a>, Error> {
+        if let MessagePayload::Handshake { encoded, .. } = &self.payload {
+            Ok(encoded)
+        } else {
+            Err(InvalidMessage::UnexpectedMessage("expected handshake message").into())
         }
     }
 }

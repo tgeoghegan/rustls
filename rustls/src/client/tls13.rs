@@ -104,8 +104,14 @@ impl ClientHandler<Tls13CipherSuite> for Handler {
         // Start our handshake hash, and input the server-hello.
         let mut transcript = st
             .transcript_buffer
-            .start_hash(suite.common.hash_provider);
-        transcript.add_message(&input.message);
+            .start_hash(suite.common.hash_provider, input.message.version);
+        transcript.add(
+            todo!(),
+            input
+                .message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         let mut randoms = ConnectionRandoms::new(st.input.random, server_hello.random);
 
@@ -215,9 +221,13 @@ impl ClientHandler<Tls13CipherSuite> for Handler {
                 // server hello message, and switch the relevant state to the copies for the
                 // inner client hello.
                 Some(mut accepted) => {
-                    accepted
-                        .transcript
-                        .add_message(&input.message);
+                    accepted.transcript.add(
+                        todo!(),
+                        input
+                            .message
+                            .handshake_message_payload()?
+                            .bytes(),
+                    );
                     transcript = accepted.transcript;
                     randoms.client = accepted.random.0;
                     hello.sent_extensions = accepted.sent_extensions;
@@ -514,7 +524,12 @@ impl ExpectEncryptedExtensions {
             HandshakePayload::EncryptedExtensions
         )?;
         debug!("TLS1.3 encrypted extensions: {exts:?}");
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         validate_encrypted_extensions(&self.hello, exts)?;
 
@@ -906,7 +921,12 @@ impl ExpectCertificateRequest {
             HandshakeType::CertificateRequest,
             HandshakePayload::CertificateRequestTls13
         )?;
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         debug!("Got CertificateRequest {certreq:?}");
 
         // Fortunately the problems here in TLS1.2 and prior are corrected in
@@ -993,7 +1013,12 @@ struct ExpectCompressedCertificate {
 
 impl ExpectCompressedCertificate {
     fn handle_input(mut self, Input { message, .. }: Input<'_>) -> Result<ClientState, Error> {
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         let compressed_cert = require_handshake_msg_move!(
             message,
             HandshakeType::CompressedCertificate,
@@ -1053,7 +1078,12 @@ struct ExpectCertificate {
 
 impl ExpectCertificate {
     fn handle_input(mut self, Input { message, .. }: Input<'_>) -> Result<ClientState, Error> {
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         self.handle_cert_payload(require_handshake_msg_move!(
             message,
@@ -1163,7 +1193,12 @@ impl ExpectCertificateVerify {
                 signature: cert_verify,
             })?;
 
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         Ok(Box::new(ExpectFinished {
             hs: self.hs,
@@ -1271,7 +1306,12 @@ fn emit_end_of_early_data_tls13(
         )),
     };
 
-    transcript.add_message(&m);
+    transcript.add(
+        todo!(),
+        m.handshake_message_payload()
+            .unwrap()
+            .bytes(),
+    );
     output.send_msg(m, true, false);
 }
 
@@ -1311,9 +1351,13 @@ impl ExpectFinished {
             false => return Err(PeerMisbehaved::IncorrectFinished.into()),
         };
 
-        st.hs
-            .transcript
-            .add_message(&input.message);
+        st.hs.transcript.add(
+            todo!(),
+            input
+                .message
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         let hash_after_handshake = st.hs.transcript.current_hash();
         /* The EndOfEarlyData message to server is still encrypted with early data keys,

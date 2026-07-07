@@ -406,23 +406,28 @@ impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
 
     pub(crate) fn add(&mut self, hs: HandshakeMessagePayload<'_>) {
         let encoded = hs.get_encoding();
-        self.transcript.add(&encoded);
+        self.transcript
+            .add(self.version(), &encoded);
         self.handshake_messages
             .push((hs.0.handshake_type(), encoded));
     }
 
     pub(crate) fn finish(self, output: &mut dyn Output<'_>) {
         let m = Message {
-            version: match (TLS13, self.is_dtls) {
-                (true, true) => ProtocolVersion::DTLSv1_3,
-                (true, false) => ProtocolVersion::TLSv1_3,
-                (false, true) => ProtocolVersion::DTLSv1_2,
-                (false, false) => ProtocolVersion::TLSv1_2,
-            },
+            version: self.version(),
             payload: MessagePayload::HandshakeFlight(self.handshake_messages),
         };
 
         output.send_msg(m, TLS13, false);
+    }
+
+    fn version(&self) -> ProtocolVersion {
+        match (TLS13, self.is_dtls) {
+            (true, true) => ProtocolVersion::DTLSv1_3,
+            (true, false) => ProtocolVersion::TLSv1_3,
+            (false, true) => ProtocolVersion::DTLSv1_2,
+            (false, false) => ProtocolVersion::TLSv1_2,
+        }
     }
 }
 

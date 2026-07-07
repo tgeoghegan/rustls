@@ -99,7 +99,13 @@ mod client_hello {
                 .start(suite.common.hash_provider)?;
 
             // -- TLS1.2 only from hereon in --
-            transcript.add_message(input.message);
+            transcript.add(
+                todo!(),
+                input
+                    .message
+                    .handshake_message_payload()?
+                    .bytes(),
+            );
 
             if input
                 .client_hello
@@ -559,7 +565,12 @@ impl ExpectCertificate {
         Input { message, .. }: Input<'_>,
         _output: &mut dyn Output<'_>,
     ) -> Result<ServerState, Error> {
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         let cert_chain = require_handshake_msg_move!(
             message,
             HandshakeType::Certificate,
@@ -633,7 +644,12 @@ impl ExpectClientKx {
             HandshakeType::ClientKeyExchange,
             HandshakePayload::ClientKeyExchange
         )?;
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         let ems_seed = self
             .hs
             .using_ems
@@ -725,7 +741,12 @@ impl ExpectCertificateVerify {
 
         trace!("client CertificateVerify OK");
 
-        self.hs.transcript.add_message(&message);
+        self.hs.transcript.add(
+            todo!(),
+            message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         Ok(Box::new(ExpectCcs {
             hs: self.hs,
             secrets: self.secrets,
@@ -924,7 +945,7 @@ fn emit_ticket(
         )),
     };
 
-    transcript.add_message(&m);
+    transcript.add(todo!(), m.handshake_message_payload()?.bytes());
     output.send_msg(m, false, false);
     Ok(())
 }
@@ -958,7 +979,12 @@ fn emit_finished(
         ))),
     };
 
-    transcript.add_message(&f);
+    transcript.add(
+        todo!(),
+        f.handshake_message_payload()
+            .unwrap()
+            .bytes(),
+    );
     output.send_msg(f, true, false);
 }
 
@@ -1027,9 +1053,13 @@ impl ExpectFinished {
         }
 
         // Send our CCS and Finished.
-        self.hs
-            .transcript
-            .add_message(&input.message);
+        self.hs.transcript.add(
+            todo!(),
+            input
+                .message
+                .handshake_message_payload()?
+                .bytes(),
+        );
         if let Some(encrypter) = self.pending_encrypter {
             assert!(!self.resuming);
             if self.hs.send_ticket {
