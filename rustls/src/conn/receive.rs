@@ -5,8 +5,10 @@ use core::ops::Range;
 use std::io::{self, Read};
 
 use super::SendOutput;
+use crate::SideData;
 use crate::common_state::{
-    ConnectionOutput, Event, Output, OutputEvent, Side, UnborrowedPayload, maybe_send_fatal_alert,
+    ConnectionOutput, Event, Output, OutputEvent, Protocol, Side, UnborrowedPayload,
+    maybe_send_fatal_alert,
 };
 use crate::conn::private::SideOutput;
 use crate::conn::{ConnectionCore, StateMachine};
@@ -17,10 +19,9 @@ use crate::hash_hs::{HandshakeTranscript, Proposal};
 use crate::log::{trace, warn};
 use crate::msgs::{
     AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, Delocator,
-    EpochAndSequence, HandshakeAlignedProof, Locator, Message, MessagePayload, TlsInputBuffer, U48,
+    EpochAndSequence, HandshakeAlignedProof, Locator, Message, MessagePayload, U48,
 };
 use crate::quic::QuicOutput;
-use crate::{EpochAndSequence, SideData};
 
 pub(crate) struct MessageIter<'a, 'm, Side: SideData> {
     input: &'m mut dyn TlsInputBuffer,

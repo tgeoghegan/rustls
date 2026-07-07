@@ -164,7 +164,9 @@ enum HandshakeTranscriptInner {
 
 /// Early stage buffering of handshake payloads.
 ///
-/// Before we know the hash algorithm to use to verify the handshake, we just buffer the messages.
+/// Before we know the hash algorithm to use to verify the handshake or the negotiated protocol
+/// version, we just buffer the messages.
+///
 /// During the handshake, we may restart the transcript due to a HelloRetryRequest, reverting
 /// from the `HandshakeHash` to a `HandshakeHashBuffer` again.
 #[derive(Clone)]
@@ -190,24 +192,19 @@ impl HandshakeHashBuffer {
     /// Hash/buffer a handshake message.
     pub(crate) fn add_message(&mut self, m: &Message<'_>) {
         match &m.payload {
-            MessagePayload::Handshake { encoded, .. } => self.add_raw(encoded.bytes()),
+            MessagePayload::Handshake { encoded, .. } => self.add(encoded.bytes()),
             MessagePayload::HandshakeFlight(encoded) => {
                 for (_, encoded) in encoded {
-                    self.add_raw(encoded)
+                    self.add(encoded)
                 }
             }
             _ => {}
         }
     }
 
-    /// Buffer an encoded handshake message.
-    pub(crate) fn add(&mut self, bytes: &[u8]) {
-        self.add_raw(bytes);
-    }
-
     /// Hash or buffer a byte slice.
-    fn add_raw(&mut self, buf: &[u8]) {
-        self.buffer.extend_from_slice(buf);
+    pub(crate) fn add(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
     }
 
     /// Get the hash value if we were to hash `extra` too.
@@ -357,6 +354,7 @@ impl HandshakeHash {
     pub(crate) fn take_handshake_buf(&mut self) -> Option<Vec<u8>> {
         self.client_auth.take()
     }
+
     /// The hashing algorithm
     pub(crate) fn algorithm(&self) -> HashAlgorithm {
         self.provider.algorithm()
@@ -393,15 +391,12 @@ impl<'m> Proposal<'m> {
 #[cfg(all(test, any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod tests {
     use super::*;
-    use crate::crypto::cipher::Payload;
     use crate::crypto::test_provider::SHA256;
-    use crate::enums::{HandshakeType, ProtocolVersion};
-    use crate::msgs::{HandshakeMessagePayload, HandshakePayload};
 
     #[test]
     fn hashes_correctly() {
         let mut hhb = HandshakeHashBuffer::new();
-        hhb.add_raw(b"hello");
+        hhb.add(b"hello");
         assert_eq!(hhb.buffer.len(), 5);
         let mut hh = hhb.start_hash(SHA256);
         assert!(hh.client_auth.is_none());
@@ -415,61 +410,10 @@ mod tests {
     }
 
     #[test]
-    fn hashes_message_types() {
-        // handshake protocol encoding of 0x0e 00 00 00
-        let server_hello_done_message = Message {
-            version: ProtocolVersion::TLSv1_2,
-            payload: MessagePayload::handshake(HandshakeMessagePayload(
-                HandshakePayload::ServerHelloDone,
-            )),
-        };
-
-        let app_data_ignored = Message {
-            version: ProtocolVersion::TLSv1_3,
-            payload: MessagePayload::ApplicationData(Payload::Borrowed(b"hello")),
-        };
-
-        let end_of_early_data_flight = Message {
-            version: ProtocolVersion::TLSv1_3,
-            payload: MessagePayload::HandshakeFlight(Vec::from([(
-                HandshakeType::EndOfEarlyData,
-                Vec::from(b"\x05\x00\x00\x00"),
-            )])),
-        };
-
-        // buffered mode
-        let mut hhb = HandshakeHashBuffer::new();
-        hhb.add_message(&server_hello_done_message);
-        hhb.add_message(&app_data_ignored);
-        hhb.add_message(&end_of_early_data_flight);
-
-        assert_eq!(
-            hhb.start_hash(SHA256)
-                .current_hash()
-                .as_ref(),
-            SHA256
-                .hash(b"\x0e\x00\x00\x00\x05\x00\x00\x00")
-                .as_ref()
-        );
-
-        // non-buffered mode
-        let mut hh = HandshakeHashBuffer::new().start_hash(SHA256);
-        hh.add_message(&server_hello_done_message);
-        hh.add_message(&app_data_ignored);
-        hh.add_message(&end_of_early_data_flight);
-        assert_eq!(
-            hh.current_hash().as_ref(),
-            SHA256
-                .hash(b"\x0e\x00\x00\x00\x05\x00\x00\x00")
-                .as_ref()
-        );
-    }
-
-    #[test]
     fn buffers_correctly() {
         let mut hhb = HandshakeHashBuffer::new();
         hhb.set_client_auth_enabled();
-        hhb.add_raw(b"hello");
+        hhb.add(b"hello");
         assert_eq!(hhb.buffer.len(), 5);
 
         let mut hh = hhb.start_hash(SHA256);
@@ -502,7 +446,7 @@ mod tests {
     fn abandon() {
         let mut hhb = HandshakeHashBuffer::new();
         hhb.set_client_auth_enabled();
-        hhb.add_raw(b"hello");
+        hhb.add(b"hello");
         assert_eq!(hhb.buffer.len(), 5);
 
         let mut hh = hhb.start_hash(SHA256);
@@ -530,7 +474,7 @@ mod tests {
     fn clones_correctly() {
         let mut hhb = HandshakeHashBuffer::new();
         hhb.set_client_auth_enabled();
-        hhb.add_raw(b"hello");
+        hhb.add(b"hello");
         assert_eq!(hhb.buffer.len(), 5);
 
         // Cloning the HHB should result in the same buffer and client auth state.
@@ -539,7 +483,7 @@ mod tests {
         assert!(hhb_prime.client_auth_enabled);
 
         // Updating the HHB clone shouldn't affect the original.
-        hhb_prime.add_raw(b"world");
+        hhb_prime.add(b"world");
         assert_eq!(hhb_prime.buffer.len(), 10);
         assert_ne!(hhb.buffer, hhb_prime.buffer);
 

@@ -13,9 +13,7 @@ use crate::crypto::kx::SupportedKxGroup;
 use crate::enums::{ApplicationProtocol, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
 use crate::hash_hs::HandshakeTranscript;
-use crate::msgs::{
-    AlertLevel, Codec, Delocator, HandshakeMessagePayload, Locator, Message, MessagePayload,
-};
+use crate::msgs::{AlertLevel, Codec, Delocator, HandshakeMessagePayload, Locator, Message, MessagePayload};
 use crate::quic::{self, QuicOutput};
 use crate::suites::SupportedCipherSuite;
 
@@ -409,13 +407,6 @@ impl Protocol {
     pub(crate) fn is_dtls(&self) -> bool {
         matches!(self, Self::Udp)
     }
-
-    pub(crate) fn wire_protocol_version(&self) -> ProtocolVersion {
-        match self {
-            Self::Tcp | Self::Quic(_) => ProtocolVersion::TLSv1_2,
-            Self::Udp => ProtocolVersion::DTLSv1_2,
-        }
-    }
 }
 
 pub(crate) struct HandshakeFlight<'a, const TLS13: bool> {
@@ -449,17 +440,21 @@ impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
 
     pub(crate) fn finish(self, output: &mut dyn Output<'_>) {
         let m = Message {
-            version: match (TLS13, self.is_dtls) {
-                (true, true) => ProtocolVersion::DTLSv1_3,
-                (true, false) => ProtocolVersion::TLSv1_3,
-                (false, true) => ProtocolVersion::DTLSv1_2,
-                (false, false) => ProtocolVersion::TLSv1_2,
-            },
+            version: self.version(),
             payload: MessagePayload::HandshakeFlight(self.handshake_messages),
         };
 
         // We've been updating the transcript incrementally so no need to pass it here.
         output.send_msg(None, m, TLS13, false);
+    }
+
+    fn version(&self) -> ProtocolVersion {
+        match (TLS13, self.is_dtls) {
+            (true, true) => ProtocolVersion::DTLSv1_3,
+            (true, false) => ProtocolVersion::TLSv1_3,
+            (false, true) => ProtocolVersion::DTLSv1_2,
+            (false, false) => ProtocolVersion::TLSv1_2,
+        }
     }
 }
 

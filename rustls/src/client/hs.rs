@@ -114,6 +114,7 @@ pub(crate) struct ExpectServerHello {
 impl ExpectServerHello {
     fn with_version<T: Suite + 'static>(
         mut self,
+        version: ProtocolVersion,
         server_hello: &ServerHelloPayload,
         input: &Input<'_>,
         output: &mut dyn Output<'_>,
@@ -136,10 +137,10 @@ impl ExpectServerHello {
             return Err(PeerMisbehaved::UnsolicitedServerHelloExtension.into());
         }
 
-        output.output(OutputEvent::ProtocolVersion(T::VERSION));
+        output.output(OutputEvent::ProtocolVersion(version));
 
         // Extract ALPN protocol
-        if T::VERSION != ProtocolVersion::TLSv1_3 {
+        if version != ProtocolVersion::TLSv1_3 {
             process_alpn_protocol(
                 output,
                 &self.input.hello.alpn_protocols,
@@ -179,7 +180,7 @@ impl ExpectServerHello {
         // handshake_traffic_secret.
         suite
             .client_handler()
-            .handle_server_hello(suite, server_hello, input, self, output, transcript)
+            .handle_server_hello(version, suite, server_hello, input, self, output, transcript)
     }
 }
 
@@ -198,7 +199,6 @@ impl ExpectServerHello {
         trace!("We got ServerHello {server_hello:#?}");
 
         let config = &self.input.config;
-        let tls13_supported = config.supports_version(ProtocolVersion::TLSv1_3);
 
         let server_version = if server_hello.legacy_version == ProtocolVersion::TLSv1_2
             || server_hello.legacy_version == ProtocolVersion::DTLSv1_2
@@ -211,12 +211,27 @@ impl ExpectServerHello {
         };
 
         match server_version {
-            ProtocolVersion::TLSv1_3 if tls13_supported => {
-                self.with_version::<Tls13CipherSuite>(server_hello, &input, output, transcript)
+            ProtocolVersion::TLSv1_3 if config.supports_version(ProtocolVersion::TLSv1_3) => {
+                self.with_version::<Tls13CipherSuite>(
+                    ProtocolVersion::TLSv1_3,
+                    server_hello,
+                    &input,
+                    output,
+                    transcript,
+                )
             }
             ProtocolVersion::DTLSv1_3 if config.supports_version(ProtocolVersion::DTLSv1_3) => {
-                self.with_version::<Tls13CipherSuite>(server_hello, &input, output, transcript)
+                self.with_version::<Tls13CipherSuite>(ProtocolVersion::DTLSv1_3, server_hello, &input, output,
+                    transcript,)
             }
+            ProtocolVersion::DTLSv1_3 if config.supports_version(ProtocolVersion::DTLSv1_3) => self
+                .with_version::<Tls13CipherSuite>(
+                    ProtocolVersion::DTLSv1_3,
+                    server_hello,
+                    &input,
+                    output,
+                    transcript,
+                ),
             ProtocolVersion::TLSv1_2 if config.supports_version(ProtocolVersion::TLSv1_2) => {
                 if let Some((_, true)) = &self.early_data_key_schedule {
                     // The client must fail with a dedicated error code if the server
@@ -227,12 +242,23 @@ impl ExpectServerHello {
                 if server_hello.selected_version.is_some() {
                     return Err(PeerMisbehaved::SelectedTls12UsingTls13VersionExtension.into());
                 }
-
-                self.with_version::<Tls12CipherSuite>(server_hello, &input, output, transcript)
+                self.with_version::<Tls12CipherSuite>(
+                    ProtocolVersion::TLSv1_2,
+                    server_hello,
+                    &input,
+                    output,
+                    transcript,
+                )
             }
             ProtocolVersion::DTLSv1_2 if config.supports_version(ProtocolVersion::DTLSv1_2) => {
                 // TODO(DTLS): do something about 0-RTT
-                self.with_version::<Tls12CipherSuite>(server_hello, &input, output, transcript)
+                self.with_version::<Tls12CipherSuite>(
+                    ProtocolVersion::DTLSv1_2,
+                    server_hello,
+                    &input,
+                    output,
+                    transcript,
+                )
             }
             _ => {
                 let reason = match server_version {
@@ -320,14 +346,13 @@ impl ExpectServerHelloOrHelloRetryRequest {
         }
 
         // Or asks us to talk a protocol we didn't offer, or doesn't support HRR at all.
-        match hrr.supported_versions {
-            Some(ProtocolVersion::TLSv1_3) => {
-                output.output(OutputEvent::ProtocolVersion(ProtocolVersion::TLSv1_3));
-            }
+        let negotiated_version = match hrr.supported_versions {
+            Some(v @ ProtocolVersion::TLSv1_3 | v @ ProtocolVersion::DTLSv1_3) => v,
             _ => {
                 return Err(PeerMisbehaved::IllegalHelloRetryRequestWithUnsupportedVersion.into());
             }
-        }
+        };
+        output.output(OutputEvent::ProtocolVersion(negotiated_version));
 
         // Or asks us to use a ciphersuite we didn't offer.
         let Some(cs) = config.find_cipher_suite(hrr.cipher_suite) else {
@@ -583,8 +608,14 @@ fn emit_client_hello_for_retry(
     let forbids_tls12 = input.protocol.is_quic() || ech_state.is_some();
 
     let supported_versions = SupportedProtocolVersions {
-        tls13: config.supports_version(ProtocolVersion::TLSv1_3),
-        tls12: config.supports_version(ProtocolVersion::TLSv1_2) && !forbids_tls12,
+        tls13: config.supports_version(ProtocolVersion::TLSv1_3) && !input.protocol.is_dtls(),
+        tls12: config.supports_version(ProtocolVersion::TLSv1_2)
+            && !forbids_tls12
+            && !input.protocol.is_dtls(),
+        dtls13: config.supports_version(ProtocolVersion::DTLSv1_3) && input.protocol.is_dtls(),
+        dtls12: config.supports_version(ProtocolVersion::DTLSv1_2)
+            && input.protocol.is_dtls()
+            && ech_state.is_none(),
     };
 
     // should be unreachable thanks to config builder
@@ -662,7 +693,7 @@ fn emit_client_hello_for_retry(
     };
 
     if let Some(GroupAndKeyShare { share, .. }) = &key_share {
-        debug_assert!(supported_versions.tls13);
+        debug_assert!(supported_versions.tls13 || supported_versions.dtls13);
         let mut shares = vec![KeyShareEntry::new(share.group(), share.pub_key())];
 
         if !retryreq
@@ -1115,6 +1146,7 @@ impl Deref for ClientSessionValue {
 pub(crate) trait ClientHandler<T>: fmt::Debug + Sealed + Send + Sync {
     fn handle_server_hello(
         &self,
+        version: ProtocolVersion,
         suite: &'static T,
         server_hello: &ServerHelloPayload,
         input: &Input<'_>,

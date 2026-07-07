@@ -104,6 +104,7 @@ mod client_hello {
     impl ServerHandler<Tls13CipherSuite> for Handler {
         fn handle_client_hello(
             &self,
+            version: ProtocolVersion,
             suite: &'static Tls13CipherSuite,
             kx_group: &'static dyn SupportedKxGroup,
             signer: SelectedCredential,
@@ -175,7 +176,7 @@ mod client_hello {
             let Some(chosen_share_and_kxg) = chosen_share_and_kxg else {
                 // We don't have a suitable key share.  Send a HelloRetryRequest
                 // for the mutually_preferred_group.
-                transcript.add_message(input.message);
+                transcript.commit_parts(input.message, input.proposal);
 
                 if st.done_retry {
                     return Err(PeerMisbehaved::RefusedToFollowHelloRetryRequest.into());
@@ -260,6 +261,7 @@ mod client_hello {
                 transcript,
                 &randoms,
                 suite,
+                version,
                 st.protocol,
                 output,
                 &input.client_hello.session_id,
@@ -373,6 +375,7 @@ mod client_hello {
                 sni: st.sni,
                 resumption_data: st.resumption_data,
                 send_tickets: st.send_tickets,
+                version,
             };
 
             if doing_client_auth {
@@ -530,6 +533,7 @@ mod client_hello {
         transcript: &mut HandshakeTranscript,
         randoms: &ConnectionRandoms,
         suite: &'static Tls13CipherSuite,
+        version: ProtocolVersion,
         protocol: Protocol,
         output: &mut dyn Output<'_>,
         session_id: &SessionId,
@@ -547,20 +551,19 @@ mod client_hello {
         let extensions = Box::new(ServerExtensions {
             key_share: Some(KeyShareEntry::new(ckx.group, ckx.pub_key)),
             preshared_key: resuming.map(|&(idx, _)| idx as u16),
-            selected_version: Some(ProtocolVersion::TLSv1_3),
+            selected_version: Some(version),
             ..Default::default()
         });
 
-        let protocol_version = match protocol {
-            Protocol::Udp => ProtocolVersion::DTLSv1_2,
-            _ => ProtocolVersion::TLSv1_2,
-        };
-
         let sh = Message {
-            version: protocol_version,
+            version,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
                 HandshakePayload::ServerHello(ServerHelloPayload {
-                    legacy_version: protocol_version,
+                    legacy_version: if version.is_datagram_tls() {
+                        ProtocolVersion::DTLSv1_2
+                    } else {
+                        ProtocolVersion::TLSv1_2
+                    },
                     random: Random::from(randoms.server),
                     session_id: *session_id,
                     cipher_suite: suite.common.suite,
@@ -1531,6 +1534,8 @@ struct HandshakeState {
     sni: Option<DnsName<'static>>,
     resumption_data: Vec<u8>,
     send_tickets: usize,
+    /// The protocol version negotiated for this handshake.
+    version: ProtocolVersion,
 }
 
 // --- Process traffic ---

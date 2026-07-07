@@ -15,7 +15,7 @@ mod buffers;
 #[cfg(test)]
 mod dtls_test;
 use buffers::Coalescer;
-pub(crate) use buffers::{Delocator, Locator, SliceInput, TlsInputBuffer, VecInput};
+pub(crate) use buffers::{Delocator, Locator};
 
 pub fn fuzz_deframer(data: &[u8]) {
     let mut buf = data.to_vec();

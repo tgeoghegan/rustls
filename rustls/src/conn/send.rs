@@ -321,11 +321,21 @@ impl SendOutput for SendPath {
     }
 
     /// Send a raw TLS message, fragmenting it if needed.
-    fn send_msg(&mut self,
-        transcript: Option<&mut HandshakeTranscript>, m: Message<'_>, must_encrypt: bool, is_retry_req: bool) {
-        if let Some(transcript) = transcript && m.version != ProtocolVersion::DTLSv1_2 {
-            // Run messages through the transcript *before* they are fragmented for most protocols
-            transcript.add_message(&m);
+    fn send_msg(
+        &mut self,
+        mut transcript: Option<&mut HandshakeTranscript>,
+        m: Message<'_>,
+        must_encrypt: bool,
+        is_retry_req: bool,
+    ) {
+        match transcript {
+            Some(ref mut transcript) => {
+                if m.version != ProtocolVersion::DTLSv1_2 {
+                    // Run messages through the transcript *before* they are fragmented for most protocols
+                    transcript.add_message(&m);
+                }
+            }
+            _ => (),
         }
 
         match (self.protocol, &m.payload) {
@@ -349,11 +359,17 @@ impl SendOutput for SendPath {
                     })
                     .collect();
 
-        if let Some(transcript) = transcript && m.version == ProtocolVersion::DTLSv1_2 {
-            // For DTLS 1.2, hash *fragmented* handshake messages into the transcript
-            for message in messages {
-            transcript.add(&message.payload);}
-        }
+                match transcript {
+                    Some(transcript) => {
+                        if m.version != ProtocolVersion::DTLSv1_2 {
+                            // For DTLS 1.2, hash *fragmented* handshake messages into the transcript
+                            for message in &messages {
+                                transcript.add(&message.payload);
+                            }
+                        }
+                    }
+                    _ => (),
+                }
                 self.send_messages(
                     must_encrypt,
                     is_retry_req,
@@ -383,12 +399,17 @@ impl SendOutput for SendPath {
                         payload: m.payload.get_encoding(),
                     })
                     .collect();
-
-        if let Some(transcript) = transcript && m.version == ProtocolVersion::DTLSv1_2 {
-            // For DTLS 1.2, hash *fragmented* handshake messages into the transcript
-            for message in messages {
-            transcript.add(&message.payload);}
-        }
+                match transcript {
+                    Some(transcript) => {
+                        if m.version != ProtocolVersion::DTLSv1_2 {
+                            // For DTLS 1.2, hash *fragmented* handshake messages into the transcript
+                            for message in &messages {
+                                transcript.add(&message.payload);
+                            }
+                        }
+                    }
+                    _ => (),
+                }
                 self.send_messages(
                     must_encrypt,
                     is_retry_req,
@@ -439,7 +460,7 @@ pub(crate) trait SendOutput {
         transcript: Option<&mut HandshakeTranscript>,
         m: Message<'_>,
         must_encrypt: bool,
-        is_retry_req: bool
+        is_retry_req: bool,
     );
 }
 

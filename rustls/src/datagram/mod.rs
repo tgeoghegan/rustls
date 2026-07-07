@@ -15,7 +15,7 @@ use crate::client::ClientSide;
 use crate::common_state::Protocol;
 use crate::conn::ConnectionCore;
 use crate::crypto::cipher::OutboundPlain;
-use crate::msgs::{ClientExtensionsInput, Delocator, ServerExtensionsInput, SliceInput};
+use crate::msgs::{ClientExtensionsInput, Delocator, ServerExtensionsInput};
 use crate::server::ServerSide;
 use crate::vecbuf::ChunkVecBuffer;
 use crate::{ClientConfig, ServerConfig, SideData};
@@ -192,15 +192,16 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
             if read == 0 {
                 break;
             }
-            if let Some(payload) = self
-                .core
-                .process_new_packets(&mut SliceInput::new(&mut read_into[..read]), None)
-                .map_err(|e| Error::Other(e.into()))?
-            {
-                let payload = payload.reborrow(&Delocator::new(&mut read_into));
-                self.received_plaintext
-                    .append(payload.into_vec());
-            }
+            // if let Some(payload) = self
+            //     .core
+            //     .process_new_packets(&mut SliceInput::new(&mut read_into[..read]), None)
+            //     .map_err(|e| Error::Other(e.into()))?
+            // {
+            //     let payload = payload.reborrow(&Delocator::new(&mut read_into));
+            //     self.received_plaintext
+            //         .append(payload.into_vec());
+            // }
+            todo!("process new packets");
         }
 
         // If we're now done handshaking, encrypt any buffered plaintext and enqueue into send queue

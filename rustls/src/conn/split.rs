@@ -484,9 +484,10 @@ impl SendOutput for SendAdapter<'_> {
         transcript: Option<&mut HandshakeTranscript>,
         m: Message<'_>,
         must_encrypt: bool,
+        is_retry_req: bool,
     ) {
         self.as_locked(true)
-            .send_msg(transcript, m, must_encrypt)
+            .send_msg(transcript, m, must_encrypt, is_retry_req)
     }
 }
 
@@ -513,13 +514,15 @@ mod tests {
         assert!(send_flag_for(|adapter| adapter.send_msg(
             None,
             Message::build_key_update_notify(),
-            false
+            false,
+            false,
         )));
     }
 
     fn send_flag_for(f: impl FnOnce(&mut SendAdapter<'_>)) -> bool {
-        let mut send = SendPath::default();
+        let mut send = SendPath::new(crate::common_state::Protocol::Tcp);
         send.set_encrypter(Box::new(Tls13Cipher), 1234);
+        send.negotiated_version(ProtocolVersion::TLSv1_3);
 
         let send = Mutex::new(send);
 

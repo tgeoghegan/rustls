@@ -534,6 +534,7 @@ fn minimal_client_hello() -> ClientHelloPayload {
             supported_versions: Some(SupportedProtocolVersions {
                 tls12: true,
                 tls13: true,
+                ..Default::default()
             }),
             key_shares: Some(vec![KeyShareEntry {
                 group: NamedGroup::from(0xfe00),

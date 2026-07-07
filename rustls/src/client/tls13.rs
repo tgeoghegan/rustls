@@ -98,6 +98,7 @@ impl ClientHandler<Tls13CipherSuite> for Handler {
     /// "early_data" extension to the server.
     fn handle_server_hello(
         &self,
+        version: ProtocolVersion,
         suite: &'static Tls13CipherSuite,
         server_hello: &ServerHelloPayload,
         input: &Input<'_>,
@@ -271,6 +272,7 @@ impl ClientHandler<Tls13CipherSuite> for Handler {
                 session_key,
                 randoms,
                 key_schedule,
+                version,
             },
             resuming_session,
             suite,
@@ -1469,6 +1471,8 @@ struct HandshakeState {
     session_key: ClientSessionKey<'static>,
     randoms: ConnectionRandoms,
     key_schedule: KeyScheduleHandshake,
+    /// The protocol version negotiated for this handshake.
+    version: ProtocolVersion,
 }
 
 // -- Traffic transit state (TLS1.3) --

@@ -488,8 +488,7 @@ impl EchState {
 
         // Add the server hello confirmation - this is computed by altering the received
         // encoding rather than reencoding it.
-        confirmation_transcript
-            .add_message(&Self::server_hello_conf(server_hello, server_hello_encoded));
+        confirmation_transcript.add(server_hello_encoded.bytes());
 
         // Derive a confirmation secret from the inner hello random and the confirmation transcript.
         let derived = ks.server_ech_confirmation_secret(
@@ -540,7 +539,11 @@ impl EchState {
         let mut confirmation_transcript =
             confirmation_transcript.start_hash(cs.common.hash_provider);
         confirmation_transcript.rollup_for_hrr();
-        confirmation_transcript.add_message(&Self::hello_retry_request_conf(hrr));
+        confirmation_transcript.add(
+            Self::hello_retry_request_conf(hrr)
+                .handshake_message_payload()?
+                .bytes(),
+        );
 
         let derived = server_ech_hrr_confirmation_secret(
             cs.hkdf_provider,
@@ -578,7 +581,11 @@ impl EchState {
             .start_hash(hash);
 
         let mut inner_transcript_buffer = inner_transcript.into_hrr_buffer(proof);
-        inner_transcript_buffer.add_message(m);
+        inner_transcript_buffer.add(
+            m.handshake_message_payload()
+                .unwrap()
+                .bytes(),
+        );
         self.inner_hello_transcript = inner_transcript_buffer;
     }
 
@@ -746,8 +753,12 @@ impl EchState {
         };
 
         // Update the inner transcript buffer with the inner hello message.
-        self.inner_hello_transcript
-            .add_message(&inner_hello_msg);
+        self.inner_hello_transcript.add(
+            inner_hello_msg
+                .handshake_message_payload()
+                .unwrap()
+                .bytes(),
+        );
 
         encoded_hello
     }

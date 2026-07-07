@@ -422,8 +422,8 @@ impl OutboundOpaque {
         content: &[u8],
         encoding_context: EncodingContext,
     ) -> Self {
-        let mut value = Self::with_capcity(header_size, content.len(), encoding_context);
-        value.payload.extend(content)
+        let mut value = Self::with_capacity(header_size, content.len(), encoding_context);
+        value.payload.extend(content);
         value
     }
 
