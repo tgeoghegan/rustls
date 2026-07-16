@@ -11,6 +11,7 @@ use crate::common_state::{
     CommonState, ConnectionOutput, ConnectionOutputs, Event, Output, OutputEvent,
 };
 use crate::error::{ApiMisuse, Error};
+use crate::hash_hs::HandshakeTranscript;
 use crate::kernel::KernelState;
 use crate::msgs::{Delocator, Message, Random, ServerExtensionsInput};
 use crate::quic::QuicOutput;
@@ -698,14 +699,21 @@ pub(crate) struct ConnectionCore<Side: SideData> {
     pub(crate) state: Result<Side::State, Error>,
     pub(crate) side: Side::Data,
     pub(crate) common: CommonState,
+    pub(crate) handshake_transcript: HandshakeTranscript,
 }
 
 impl<Side: SideData> ConnectionCore<Side> {
-    pub(crate) fn new(state: Side::State, side: Side::Data, common: CommonState) -> Self {
+    pub(crate) fn new(
+        state: Side::State,
+        side: Side::Data,
+        common: CommonState,
+        handshake_transcript: HandshakeTranscript,
+    ) -> Self {
         Self {
             state: Ok(state),
             side,
             common,
+            handshake_transcript,
         }
     }
 
@@ -870,7 +878,12 @@ pub(crate) mod private {
 use private::SideOutput;
 
 pub(crate) trait StateMachine: Sized {
-    fn handle<'m>(self, input: Input<'m>, output: &mut dyn Output<'m>) -> Result<Self, Error>;
+    fn handle<'m>(
+        self,
+        input: Input<'m>,
+        output: &mut dyn Output<'m>,
+        transcript: &mut HandshakeTranscript,
+    ) -> Result<Self, Error>;
     fn wants_input(&self) -> bool;
     fn is_traffic(&self) -> bool;
     fn handle_decrypt_error(&mut self);

@@ -22,7 +22,7 @@ use crate::enums::{
     ApplicationProtocol, CertificateType, ContentType, HandshakeType, ProtocolVersion,
 };
 use crate::error::{ApiMisuse, Error, PeerIncompatible, PeerMisbehaved};
-use crate::hash_hs::HandshakeHashBuffer;
+use crate::hash_hs::HandshakeTranscript;
 use crate::kernel::KernelState;
 use crate::log::{debug, trace};
 use crate::msgs::{
@@ -49,12 +49,17 @@ pub(crate) enum ClientState {
 }
 
 impl StateMachine for ClientState {
-    fn handle<'m>(self, input: Input<'m>, output: &mut dyn Output<'m>) -> Result<Self, Error> {
+    fn handle<'m>(
+        self,
+        input: Input<'m>,
+        output: &mut dyn Output<'m>,
+        transcript: &mut HandshakeTranscript,
+    ) -> Result<Self, Error> {
         match self {
-            Self::ServerHello(e) => e.handle(input, output),
-            Self::ServerHelloOrHelloRetryRequest(e) => e.handle(input, output),
-            Self::Tls12(sm) => sm.handle(input, output),
-            Self::Tls13(sm) => sm.handle(input, output),
+            Self::ServerHello(e) => e.handle(input, output, transcript),
+            Self::ServerHelloOrHelloRetryRequest(e) => e.handle(input, output, transcript),
+            Self::Tls12(sm) => sm.handle(input, output, transcript),
+            Self::Tls13(sm) => sm.handle(input, output, transcript),
         }
     }
 
@@ -91,7 +96,6 @@ impl StateMachine for ClientState {
 
 pub(crate) struct ExpectServerHello {
     pub(super) input: ClientHelloInput,
-    pub(super) transcript_buffer: HandshakeHashBuffer,
     // The key schedule for sending early data.
     //
     // If the server accepts the PSK used for early data then
@@ -113,6 +117,7 @@ impl ExpectServerHello {
         server_hello: &ServerHelloPayload,
         input: &Input<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ClientState, Error>
     where
         CryptoProvider: Borrow<[&'static T]>,
@@ -174,7 +179,7 @@ impl ExpectServerHello {
         // handshake_traffic_secret.
         suite
             .client_handler()
-            .handle_server_hello(suite, server_hello, input, self, output)
+            .handle_server_hello(suite, server_hello, input, self, output, transcript)
     }
 }
 
@@ -183,6 +188,7 @@ impl ExpectServerHello {
         self: Box<Self>,
         input: Input<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ClientState, Error> {
         let server_hello = require_handshake_msg!(
             &input.message,
@@ -204,7 +210,7 @@ impl ExpectServerHello {
 
         match server_version {
             ProtocolVersion::TLSv1_3 if tls13_supported => {
-                self.with_version::<Tls13CipherSuite>(server_hello, &input, output)
+                self.with_version::<Tls13CipherSuite>(server_hello, &input, output, transcript)
             }
             ProtocolVersion::TLSv1_2 if config.supports_version(ProtocolVersion::TLSv1_2) => {
                 if let Some((_, true)) = &self.early_data_key_schedule {
@@ -217,7 +223,7 @@ impl ExpectServerHello {
                     return Err(PeerMisbehaved::SelectedTls12UsingTls13VersionExtension.into());
                 }
 
-                self.with_version::<Tls12CipherSuite>(server_hello, &input, output)
+                self.with_version::<Tls12CipherSuite>(server_hello, &input, output, transcript)
             }
             _ => {
                 let reason = match server_version {
@@ -246,6 +252,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
         mut self,
         input: Input<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ClientState, Error> {
         let hrr = require_handshake_msg!(
             input.message,
@@ -344,12 +351,18 @@ impl ExpectServerHelloOrHelloRetryRequest {
         };
 
         // This is the draft19 change where the transcript became a tree
-        let transcript = self
-            .next
-            .transcript_buffer
+        // TODO(DTLS): cloning and swapping here is gross, but we need to do this little dance where
+        // we replace the HHB
+        let transcript_hash = transcript
+            .must_hhb()
+            .clone()
             .start_hash(cs.hash_provider());
-        let mut transcript_buffer = transcript.into_hrr_buffer(&proof);
-        transcript_buffer.add_message(&input.message);
+        let mut new_transcript_buffer = transcript_hash.into_hrr_buffer(&proof);
+        new_transcript_buffer.add_message(&input.message);
+        core::mem::swap(
+            transcript,
+            &mut HandshakeTranscript::with_hhb(new_transcript_buffer),
+        );
 
         // If we offered ECH and the server accepted, we also need to update the separate
         // ECH transcript with the hello retry request message.
@@ -374,7 +387,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
         };
 
         emit_client_hello_for_retry(
-            transcript_buffer,
+            transcript,
             Some(hrr),
             Some(key_share),
             self.extra_exts,
@@ -392,6 +405,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
         self,
         input: Input<'m>,
         output: &mut dyn Output<'m>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ClientState, Error> {
         match input.message.payload {
             MessagePayload::Handshake {
@@ -399,11 +413,11 @@ impl ExpectServerHelloOrHelloRetryRequest {
                 ..
             } => self
                 .into_expect_server_hello()
-                .handle(input, output),
+                .handle(input, output, transcript),
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::HelloRetryRequest(..)),
                 ..
-            } => self.handle_hello_retry_request(input, output),
+            } => self.handle_hello_retry_request(input, output, transcript),
             payload => Err(inappropriate_handshake_message(
                 &payload,
                 &[ContentType::Handshake],
@@ -495,15 +509,15 @@ impl ClientHelloInput {
         self,
         extra_exts: ClientExtensionsInput,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ClientState, Error> {
-        let mut transcript_buffer = HandshakeHashBuffer::new();
         if !self
             .config
             .resolver()
             .supported_certificate_types()
             .is_empty()
         {
-            transcript_buffer.set_client_auth_enabled();
+            transcript.set_client_auth_enabled();
         }
 
         let key_share = if self
@@ -525,7 +539,7 @@ impl ClientHelloInput {
         };
 
         emit_client_hello_for_retry(
-            transcript_buffer,
+            transcript,
             None,
             key_share,
             extra_exts,
@@ -544,7 +558,7 @@ impl ClientHelloInput {
 /// `retryreq` and `suite` are `None` if this is the initial
 /// ClientHello.
 fn emit_client_hello_for_retry(
-    mut transcript_buffer: HandshakeHashBuffer,
+    transcript: &mut HandshakeTranscript,
     retryreq: Option<&HelloRetryRequest>,
     key_share: Option<GroupAndKeyShare>,
     extra_exts: ClientExtensionsInput,
@@ -823,7 +837,7 @@ fn emit_client_hello_for_retry(
                 tls13_session.suite,
                 tls13_session.secret.bytes(),
             );
-            tls13::fill_in_psk_binder(&key_schedule, &transcript_buffer, &mut chp);
+            tls13::fill_in_psk_binder(&key_schedule, transcript, &mut chp);
             Some((tls13_session.suite, key_schedule))
         }
 
@@ -855,7 +869,7 @@ fn emit_client_hello_for_retry(
 
     trace!("Sending ClientHello {ch:#?}");
 
-    transcript_buffer.add_message(&ch);
+    transcript.add_message(&ch);
     output.send_msg(ch, false);
 
     // Calculate the hash of ClientHello and use it to derive EarlyTrafficSecret
@@ -867,14 +881,16 @@ fn emit_client_hello_for_retry(
                 return (schedule, false);
             }
 
-            let (transcript_buffer, random) = match &ech_state {
+            let (transcript, random) = match &ech_state {
                 // When using ECH the early data key schedule is derived based on the inner
                 // hello transcript and random.
-                Some(ech_state) => (
+                Some(ech_state) => todo!(
+                    "(
                     &ech_state.inner_hello_transcript,
                     &ech_state.inner_hello_random.0,
+                )"
                 ),
-                None => (&transcript_buffer, &input.random.0),
+                None => (&*transcript, &input.random.0),
             };
 
             tls13::derive_early_traffic_secret(
@@ -883,7 +899,7 @@ fn emit_client_hello_for_retry(
                 resuming_suite.common.hash_provider,
                 &schedule,
                 &mut input.sent_tls13_fake_ccs,
-                transcript_buffer,
+                transcript,
                 random,
             );
             (schedule, true)
@@ -891,7 +907,6 @@ fn emit_client_hello_for_retry(
 
     let mut next = Box::new(ExpectServerHello {
         input,
-        transcript_buffer,
         early_data_key_schedule,
         offered_key_share: key_share,
         suite,
@@ -1101,5 +1116,6 @@ pub(crate) trait ClientHandler<T>: fmt::Debug + Sealed + Send + Sync {
         input: &Input<'_>,
         st: ExpectServerHello,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ClientState, Error>;
 }

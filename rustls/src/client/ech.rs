@@ -681,7 +681,11 @@ impl EchState {
 
             let key_schedule =
                 KeyScheduleEarlyClient::new(self.protocol, resuming.suite, resuming.secret.bytes());
-            tls13::fill_in_psk_binder(&key_schedule, &self.inner_hello_transcript, &mut chp);
+            tls13::fill_in_psk_binder(
+                &key_schedule,
+                todo!("&self.inner_hello_transcript"),
+                &mut chp,
+            );
             self.early_data_key_schedule = Some(key_schedule);
 
             // fill_in_psk_binder works on an owned HandshakeMessagePayload, so we need to

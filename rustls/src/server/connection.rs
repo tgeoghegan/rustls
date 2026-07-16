@@ -20,6 +20,7 @@ use crate::conn::{
 use crate::crypto;
 use crate::crypto::cipher::Payload;
 use crate::error::Error;
+use crate::hash_hs::HandshakeTranscript;
 use crate::log::trace;
 use crate::msgs::ServerExtensionsInput;
 use crate::server::hs::{ChooseConfig, ExpectClientHello, ReadClientHello, ServerState};
@@ -542,6 +543,7 @@ impl ConnectionCore<ServerSide> {
             .into(),
             ServerConnectionData::default(),
             common,
+            HandshakeTranscript::new(),
         ))
     }
 
@@ -550,6 +552,7 @@ impl ConnectionCore<ServerSide> {
             ReadClientHello::new(protocol).into(),
             ServerConnectionData::default(),
             CommonState::new(Side::Server, FipsStatus::Unvalidated),
+            HandshakeTranscript::new(),
         )
     }
 }

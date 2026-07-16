@@ -2,8 +2,154 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::mem;
 
+use crate::Error;
+use crate::conn::Input;
 use crate::crypto::{HashAlgorithm, hash};
+use crate::error::PeerMisbehaved;
 use crate::msgs::{Codec, HandshakeAlignedProof, HandshakeMessagePayload, Message, MessagePayload};
+
+/// Transcript of a TLS handshake.
+#[derive(Clone)]
+pub(crate) struct HandshakeTranscript {
+    inner: HandshakeTranscriptInner,
+}
+
+impl HandshakeTranscript {
+    /// Create a new transcript hash.
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: HandshakeTranscriptInner::Buffer(HandshakeHashBuffer::new()),
+        }
+    }
+
+    pub(crate) fn with_hhb(hhb: HandshakeHashBuffer) -> Self {
+        Self {
+            inner: HandshakeTranscriptInner::Buffer(hhb),
+        }
+    }
+
+    pub(crate) fn commit(&mut self, input: &Input<'_>) {
+        self.commit_parts(&input.message, &input.proposal);
+    }
+    pub(crate) fn commit_parts(&mut self, message: &Message<'_>, proposal: &Proposal<'_>) {
+        match &mut self.inner {
+            HandshakeTranscriptInner::Buffer(hhb) => match proposal {
+                Proposal::Reassembled => hhb.add_message(&message),
+                Proposal::MessageFragments(fragments) => {
+                    for fragment in *fragments {
+                        hhb.add(fragment);
+                    }
+                }
+            },
+            HandshakeTranscriptInner::Hash(hh) => match proposal {
+                Proposal::Reassembled => {
+                    hh.add_message(&message);
+                }
+                Proposal::MessageFragments(fragments) => {
+                    for fragment in *fragments {
+                        hh.add(fragment);
+                    }
+                }
+            },
+        }
+    }
+
+    pub(crate) fn add_message(&mut self, m: &Message<'_>) {
+        match &mut self.inner {
+            HandshakeTranscriptInner::Buffer(hhb) => hhb.add_message(m),
+            HandshakeTranscriptInner::Hash(hh) => {
+                hh.add_message(m);
+            }
+        }
+    }
+
+    /// Set the hash algorithm for the transcript and start hashing.
+    ///
+    /// Converts a `HandshakeHashBuffer` into a `HandshakeHash`.
+    pub(crate) fn start_hash(&mut self, hash: &'static dyn hash::Hash) -> Result<(), Error> {
+        // TODO(DTLS): this is hideous, see if we can avoid mem::take and ::replace
+        match &mut self.inner {
+            HandshakeTranscriptInner::Buffer(hhb) => {
+                let buffer = mem::take(&mut hhb.buffer);
+                let client_auth = hhb.client_auth_enabled;
+                mem::swap(
+                    &mut self.inner,
+                    &mut &mut HandshakeTranscriptInner::Hash(HandshakeHashBuffer::start_hash_hack(
+                        buffer,
+                        client_auth,
+                        hash,
+                    )),
+                );
+
+                Ok(())
+            }
+            HandshakeTranscriptInner::Hash(hh) if hh.algorithm() == hash.algorithm() => {
+                return Ok(());
+            }
+            _ => return Err(PeerMisbehaved::HandshakeHashVariedAfterRetry.into()),
+        }
+    }
+
+    pub(crate) fn set_client_auth_enabled(&mut self) {
+        match &mut self.inner {
+            HandshakeTranscriptInner::Buffer(hhb) => hhb.set_client_auth_enabled(),
+            _ => panic!("too late to enable client auth on HandshakeHash"),
+        }
+    }
+
+    pub(crate) fn take_handshake_buf(&mut self) -> Option<Vec<u8>> {
+        match &mut self.inner {
+            HandshakeTranscriptInner::Buffer(_) => panic!("unexpected hhb"),
+            HandshakeTranscriptInner::Hash(hh) => hh.take_handshake_buf(),
+        }
+    }
+
+    pub(crate) fn current_hash(&self) -> hash::Output {
+        match &self.inner {
+            HandshakeTranscriptInner::Buffer(_) => panic!("unexpected hhb"),
+            HandshakeTranscriptInner::Hash(hh) => hh.current_hash(),
+        }
+    }
+
+    pub(crate) fn abandon_client_auth(&mut self) {
+        match &mut self.inner {
+            HandshakeTranscriptInner::Buffer(_) => panic!("unexpected hhb"),
+            HandshakeTranscriptInner::Hash(hh) => hh.abandon_client_auth(),
+        }
+    }
+
+    pub(crate) fn must_hhb(&self) -> &HandshakeHashBuffer {
+        match &self.inner {
+            HandshakeTranscriptInner::Buffer(hhb) => hhb,
+            _ => panic!("no hhb"),
+        }
+    }
+
+    pub(crate) fn must_hh(&self) -> &HandshakeHash {
+        match &self.inner {
+            HandshakeTranscriptInner::Hash(hh) => hh,
+            _ => panic!("no hh"),
+        }
+    }
+
+    pub(crate) fn must_hh_mut(&mut self) -> &mut HandshakeHash {
+        match &mut self.inner {
+            HandshakeTranscriptInner::Hash(hh) => hh,
+            _ => panic!("no hh"),
+        }
+    }
+}
+
+/// Internals of a handshake transcript.
+///
+/// In the earliest stages of the TLS handshake, we don't yet know what hashing algorithm we will
+/// end up using and so buffer messages (`Self::Buffer`). Once the handshake has advanced enough to
+/// negotiate algorithms, we start hashing (`Self::Hash`).
+#[derive(Clone)]
+enum HandshakeTranscriptInner {
+    Buffer(HandshakeHashBuffer),
+    Hash(HandshakeHash),
+}
 
 /// Early stage buffering of handshake payloads.
 ///
@@ -36,7 +182,12 @@ impl HandshakeHashBuffer {
             MessagePayload::Handshake { encoded, .. } => self.add_raw(encoded.bytes()),
             MessagePayload::HandshakeFlight(payload) => self.add_raw(payload.bytes()),
             _ => {}
-        };
+        }
+    }
+
+    /// Buffer an encoded handshake message.
+    pub(crate) fn add(&mut self, bytes: &[u8]) {
+        self.add_raw(bytes);
     }
 
     /// Hash or buffer a byte slice.
@@ -59,14 +210,41 @@ impl HandshakeHashBuffer {
     /// We now know what hash function the verify_data will use.
     pub(crate) fn start_hash(self, provider: &'static dyn hash::Hash) -> HandshakeHash {
         let mut ctx = provider.start();
+        let prev_ctx = ctx.fork();
         ctx.update(&self.buffer);
+        let total_hashed = self.buffer.len();
         HandshakeHash {
             provider,
             ctx,
+            prev_ctx,
             client_auth: match self.client_auth_enabled {
                 true => Some(self.buffer),
                 false => None,
             },
+            prev_client_auth: None,
+            total_hashed,
+        }
+    }
+
+    fn start_hash_hack(
+        buffer: Vec<u8>,
+        client_auth: bool,
+        provider: &'static dyn hash::Hash,
+    ) -> HandshakeHash {
+        let mut ctx = provider.start();
+        let prev_ctx = ctx.fork();
+        ctx.update(&buffer);
+        let total_hashed = buffer.len();
+        HandshakeHash {
+            provider,
+            ctx,
+            prev_ctx,
+            client_auth: match client_auth {
+                true => Some(buffer),
+                false => None,
+            },
+            prev_client_auth: None,
+            total_hashed,
         }
     }
 }
@@ -81,9 +259,13 @@ impl HandshakeHashBuffer {
 pub(crate) struct HandshakeHash {
     provider: &'static dyn hash::Hash,
     ctx: Box<dyn hash::Context>,
+    prev_ctx: Box<dyn hash::Context>,
 
     /// buffer for client-auth.
     client_auth: Option<Vec<u8>>,
+    prev_client_auth: Option<Vec<u8>>,
+
+    total_hashed: usize,
 }
 
 impl HandshakeHash {
@@ -102,17 +284,20 @@ impl HandshakeHash {
         }
     }
 
-    /// Hash/buffer an encoded handshake message.
+    /// Hash an encoded handshake message.
     pub(crate) fn add(&mut self, bytes: &[u8]) {
         self.add_raw(bytes);
     }
 
     /// Hash or buffer a byte slice.
     fn add_raw(&mut self, buf: &[u8]) -> &mut Self {
+        self.prev_ctx = self.ctx.fork();
         self.ctx.update(buf);
+        self.total_hashed += buf.len();
 
-        if let Some(buffer) = &mut self.client_auth {
-            buffer.extend_from_slice(buf);
+        if let Some(curr_buffer) = &mut self.client_auth {
+            self.prev_client_auth = Some(curr_buffer.clone());
+            curr_buffer.extend_from_slice(buf);
         }
 
         self
@@ -161,7 +346,6 @@ impl HandshakeHash {
     pub(crate) fn take_handshake_buf(&mut self) -> Option<Vec<u8>> {
         self.client_auth.take()
     }
-
     /// The hashing algorithm
     pub(crate) fn algorithm(&self) -> HashAlgorithm {
         self.provider.algorithm()
@@ -173,7 +357,26 @@ impl Clone for HandshakeHash {
         Self {
             provider: self.provider,
             ctx: self.ctx.fork(),
+            prev_ctx: self.prev_ctx.fork(),
             client_auth: self.client_auth.clone(),
+            prev_client_auth: self.prev_client_auth.clone(),
+            total_hashed: self.total_hashed,
+        }
+    }
+}
+
+pub(crate) enum Proposal<'m> {
+    /// A single, reassembled message. This will be `Input::message`.
+    Reassembled,
+    /// Fragments of the message, pre-reassembly.
+    MessageFragments(&'m [&'m [u8]]),
+}
+
+impl<'m> Proposal<'m> {
+    pub(crate) fn into_owned(self) -> Proposal<'static> {
+        match self {
+            Self::Reassembled => Proposal::Reassembled,
+            _ => todo!("convert to vec<u8>"),
         }
     }
 }

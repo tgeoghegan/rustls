@@ -14,6 +14,7 @@ use crate::conn::{ConnectionCore, StateMachine};
 use crate::crypto::cipher::{Decrypted, DecryptionState, EncodedMessage, Payload};
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error, PeerMisbehaved};
+use crate::hash_hs::{HandshakeTranscript, Proposal};
 use crate::log::{trace, warn};
 use crate::msgs::{
     AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, Delocator,
@@ -26,6 +27,7 @@ pub(crate) struct MessageIter<'a, 'm, Side: SideData> {
     recv: &'a mut ReceivePath,
     state: &'a mut Result<Side::State, Error>,
     output: JoinOutput<'a>,
+    transcript: &'a mut HandshakeTranscript,
 }
 
 impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side> {
@@ -44,6 +46,7 @@ impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side> {
                 send: &mut conn.common.send,
                 side: &mut conn.side,
             },
+            transcript: &mut conn.handshake_transcript,
         }
     }
 
@@ -52,12 +55,14 @@ impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side> {
         state: &'a mut Result<Side::State, Error>,
         recv: &'a mut ReceivePath,
         output: JoinOutput<'a>,
+        transcript: &'a mut HandshakeTranscript,
     ) -> Self {
         Self {
             recv,
             input,
             state,
             output,
+            transcript,
         }
     }
 
@@ -126,7 +131,7 @@ impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side> {
                 .recv
                 .receive_message(msg, hs_aligned, output.other.send)
             {
-                Ok(Some(input)) => st.handle(input, &mut output),
+                Ok(Some(input)) => st.handle(input, &mut output, self.transcript),
                 Ok(None) => Ok(st),
                 Err(e) => Err(e),
             };
@@ -385,8 +390,12 @@ impl ReceivePath {
             return Ok(None);
         }
 
+        // TODO(DTLS): accumulate handshake fragments into Proposal::MessageFragments
+        let proposal = Proposal::Reassembled;
+
         Ok(Some(Input {
             message,
+            proposal,
             aligned_handshake,
         }))
     }
@@ -667,6 +676,7 @@ impl Default for TrafficTemperCounters {
 
 pub(crate) struct Input<'a> {
     pub(crate) message: Message<'a>,
+    pub(crate) proposal: Proposal<'a>,
     pub(crate) aligned_handshake: Option<HandshakeAlignedProof>,
 }
 

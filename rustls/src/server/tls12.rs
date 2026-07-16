@@ -21,7 +21,7 @@ use crate::enums::{
     ApplicationProtocol, CertificateType, ContentType, HandshakeType, ProtocolVersion,
 };
 use crate::error::{ApiMisuse, Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
-use crate::hash_hs::HandshakeHash;
+use crate::hash_hs::HandshakeTranscript;
 use crate::log::{debug, trace};
 use crate::msgs::{
     CertificateChain, ChangeCipherSpecPayload, ClientKeyExchangeParams, Codec,
@@ -50,13 +50,14 @@ impl Tls12State {
         self,
         input: Input<'m>,
         output: &mut dyn Output<'m>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         match self {
-            Self::Certificate(e) => e.handle(input, output),
-            Self::ClientKx(e) => e.handle(input, output),
-            Self::CertificateVerify(e) => e.handle(input, output),
+            Self::Certificate(e) => e.handle(input, output, transcript),
+            Self::ClientKx(e) => e.handle(input, output, transcript),
+            Self::CertificateVerify(e) => e.handle(input, output, transcript),
             Self::ChangeCipherSpec(e) => e.handle(input, output),
-            Self::Finished(e) => e.handle(input, output),
+            Self::Finished(e) => e.handle(input, output, transcript),
             Self::Traffic(e) => e.handle(input, output),
         }
     }
@@ -67,6 +68,7 @@ mod client_hello {
     use crate::common_state::OutputEvent;
     use crate::crypto::kx::SupportedKxGroup;
     use crate::crypto::{SelectedCredential, Signer};
+    use crate::hash_hs::HandshakeTranscript;
     use crate::msgs::{
         CertificateRequestPayload, CertificateStatus, ClientCertificateType, ClientHelloPayload,
         ClientSessionTicket, Compression, Random, ServerExtensionsInput, ServerHelloPayload,
@@ -90,14 +92,13 @@ mod client_hello {
             input: ClientHelloInput<'_>,
             mut st: ExpectClientHello,
             output: &mut dyn Output<'_>,
+            transcript: &mut HandshakeTranscript,
         ) -> Result<ServerState, Error> {
             let mut randoms = st.randoms(&input)?;
-            let mut transcript = st
-                .transcript
-                .start(suite.common.hash_provider)?;
+            transcript.start_hash(suite.common.hash_provider)?;
 
             // -- TLS1.2 only from hereon in --
-            transcript.add_message(input.message);
+            transcript.commit_parts(input.message, input.proposal);
 
             if input
                 .client_hello
@@ -171,7 +172,7 @@ mod client_hello {
 
             output.output(OutputEvent::HandshakeKind(HandshakeKind::Full));
 
-            let mut flight = HandshakeFlightTls12::new(&mut transcript);
+            let mut flight = HandshakeFlightTls12::new(transcript.must_hh_mut());
 
             let Tls12Extensions {
                 alpn_protocol,
@@ -201,7 +202,6 @@ mod client_hello {
             flight.finish(output);
             let hs = HandshakeState {
                 config: st.config,
-                transcript,
                 session_id: st.session_id,
                 alpn_protocol,
                 sni: st.sni,
@@ -301,7 +301,7 @@ mod client_hello {
         input: ClientHelloInput<'_>,
         sni: Option<DnsName<'static>>,
         resumption_data: Vec<u8>,
-        mut transcript: HandshakeHash,
+        transcript: &mut HandshakeTranscript,
         randoms: ConnectionRandoms,
         extra_exts: ServerExtensionsInput,
         config: Arc<ServerConfig>,
@@ -315,7 +315,8 @@ mod client_hello {
         }
 
         let session_id = input.client_hello.session_id;
-        let mut flight = HandshakeFlightTls12::new(&mut transcript);
+
+        let mut flight = HandshakeFlightTls12::new(transcript.must_hh_mut());
         let Tls12Extensions {
             alpn_protocol,
             send_ticket,
@@ -334,9 +335,8 @@ mod client_hello {
         )?;
         flight.finish(output);
 
-        let mut hs = HandshakeState {
+        let hs = HandshakeState {
             config,
-            transcript,
             session_id,
             alpn_protocol,
             sni,
@@ -368,7 +368,7 @@ mod client_hello {
             if let Some(ticketer) = hs.config.ticketer.as_deref() {
                 emit_ticket(
                     &secrets,
-                    &mut hs.transcript,
+                    transcript,
                     using_ems,
                     resumedata.common.peer_identity.as_ref(),
                     hs.alpn_protocol.as_ref(),
@@ -390,7 +390,7 @@ mod client_hello {
                 .common
                 .confidentiality_limit,
         );
-        emit_finished(&secrets, &mut hs.transcript, output, &proof);
+        emit_finished(&secrets, transcript, output, &proof);
 
         Ok(Box::new(ExpectCcs {
             hs,
@@ -529,13 +529,14 @@ struct ExpectCertificate {
 
 impl ExpectCertificate {
     fn handle(
-        mut self: Box<Self>,
-        Input { message, .. }: Input<'_>,
+        self: Box<Self>,
+        input: Input<'_>,
         _output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
-        self.hs.transcript.add_message(&message);
+        transcript.commit(&input);
         let cert_chain = require_handshake_msg_move!(
-            message,
+            input.message,
             HandshakeType::Certificate,
             HandshakePayload::Certificate
         )?;
@@ -555,7 +556,7 @@ impl ExpectCertificate {
             }
             None => {
                 debug!("client auth requested but no certificate supplied");
-                self.hs.transcript.abandon_client_auth();
+                transcript.abandon_client_auth();
                 None
             }
             Some(identity) => {
@@ -598,20 +599,21 @@ struct ExpectClientKx {
 
 impl ExpectClientKx {
     fn handle(
-        mut self: Box<Self>,
-        Input { message, .. }: Input<'_>,
+        self: Box<Self>,
+        input: Input<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         let client_kx = require_handshake_msg!(
-            message,
+            input.message,
             HandshakeType::ClientKeyExchange,
             HandshakePayload::ClientKeyExchange
         )?;
-        self.hs.transcript.add_message(&message);
+        transcript.commit(&input);
         let ems_seed = self
             .hs
             .using_ems
-            .then(|| self.hs.transcript.current_hash());
+            .then(|| transcript.current_hash());
 
         // Complete key agreement, and set up encryption with the
         // resulting premaster secret.
@@ -666,17 +668,18 @@ struct ExpectCertificateVerify {
 
 impl ExpectCertificateVerify {
     fn handle(
-        mut self: Box<Self>,
-        Input { message, .. }: Input<'_>,
+        self: Box<Self>,
+        input: Input<'_>,
         _output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         let signature = require_handshake_msg!(
-            message,
+            input.message,
             HandshakeType::CertificateVerify,
             HandshakePayload::CertificateVerify
         )?;
 
-        match self.hs.transcript.take_handshake_buf() {
+        match transcript.take_handshake_buf() {
             Some(msgs) => {
                 self.hs
                     .config
@@ -699,7 +702,7 @@ impl ExpectCertificateVerify {
 
         trace!("client CertificateVerify OK");
 
-        self.hs.transcript.add_message(&message);
+        transcript.commit(&input);
         Ok(Box::new(ExpectCcs {
             hs: self.hs,
             secrets: self.secrets,
@@ -856,7 +859,7 @@ impl<const N: usize> Drop for ZeroizingCow<'_, N> {
 
 fn emit_ticket(
     secrets: &ConnectionSecrets,
-    transcript: &mut HandshakeHash,
+    transcript: &mut HandshakeTranscript,
     using_ems: bool,
     peer_identity: Option<&Identity<'static>>,
     alpn_protocol: Option<&ApplicationProtocol<'_>>,
@@ -914,7 +917,7 @@ fn emit_ccs(output: &mut dyn Output<'_>) {
 
 fn emit_finished(
     secrets: &ConnectionSecrets,
-    transcript: &mut HandshakeHash,
+    transcript: &mut HandshakeTranscript,
     output: &mut dyn Output<'_>,
     proof: &HandshakeAlignedProof,
 ) {
@@ -943,9 +946,10 @@ pub(super) struct ExpectFinished {
 
 impl ExpectFinished {
     fn handle(
-        mut self: Box<Self>,
+        self: Box<Self>,
         input: Input<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         let finished = require_handshake_msg!(
             input.message,
@@ -955,7 +959,7 @@ impl ExpectFinished {
 
         let proof = input.check_aligned_handshake()?;
 
-        let vh = self.hs.transcript.current_hash();
+        let vh = transcript.current_hash();
         let expect_verify_data = self
             .secrets
             .client_verify_data(&vh, &proof);
@@ -963,9 +967,7 @@ impl ExpectFinished {
         let fin_verified =
             match ConstantTimeEq::ct_eq(&expect_verify_data[..], finished.bytes()).into() {
                 true => verify::FinishedMessageVerified::assertion(),
-                false => {
-                    return Err(PeerMisbehaved::IncorrectFinished.into());
-                }
+                false => return Err(PeerMisbehaved::IncorrectFinished.into()),
             };
 
         // Save connection, perhaps
@@ -995,9 +997,7 @@ impl ExpectFinished {
         }
 
         // Send our CCS and Finished.
-        self.hs
-            .transcript
-            .add_message(&input.message);
+        transcript.commit(&input);
         if let Some(encrypter) = self.pending_encrypter {
             assert!(!self.resuming);
             if self.hs.send_ticket {
@@ -1005,7 +1005,7 @@ impl ExpectFinished {
                 if let Some(ticketer) = self.hs.config.ticketer.as_deref() {
                     emit_ticket(
                         &self.secrets,
-                        &mut self.hs.transcript,
+                        transcript,
                         self.hs.using_ems,
                         self.peer_identity.as_ref(),
                         self.hs.alpn_protocol.as_ref(),
@@ -1025,7 +1025,7 @@ impl ExpectFinished {
                     .common
                     .confidentiality_limit,
             );
-            emit_finished(&self.secrets, &mut self.hs.transcript, output, &proof);
+            emit_finished(&self.secrets, transcript, output, &proof);
         }
 
         if let Some(identity) = self.peer_identity {
@@ -1061,7 +1061,6 @@ impl From<Box<ExpectFinished>> for ServerState {
 
 struct HandshakeState {
     config: Arc<ServerConfig>,
-    transcript: HandshakeHash,
     session_id: SessionId,
     alpn_protocol: Option<ApplicationProtocol<'static>>,
     sni: Option<DnsName<'static>>,

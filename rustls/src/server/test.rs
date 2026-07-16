@@ -119,6 +119,7 @@ fn test_process_client_hello(hello: ClientHelloPayload) -> Result<(), Error> {
 
     ClientHelloInput::from_input(&Input {
         message: m,
+        proposal: crate::hash_hs::Proposal::Reassembled,
         aligned_handshake: None,
     })
     .map(|_| ())

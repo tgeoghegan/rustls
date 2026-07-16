@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use super::config::ServerConfig;
-use super::hs::{HandshakeHashOrBuffer, ServerState};
+use super::hs::ServerState;
 use super::{CommonServerSessionValue, ServerSessionKey, ServerSessionValue};
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::common_state::{Event, HandshakeFlightTls13, HandshakeKind, Output, OutputEvent, Side};
@@ -22,7 +22,7 @@ use crate::enums::{
     ApplicationProtocol, CertificateType, ContentType, HandshakeType, ProtocolVersion,
 };
 use crate::error::{ApiMisuse, Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
-use crate::hash_hs::HandshakeHash;
+use crate::hash_hs::HandshakeTranscript;
 use crate::log::{debug, trace, warn};
 use crate::msgs::{
     CERTIFICATE_MAX_SIZE_LIMIT, CertificatePayloadTls13, Codec, HandshakeMessagePayload,
@@ -59,14 +59,15 @@ impl Tls13State {
         self,
         input: Input<'m>,
         output: &mut dyn Output<'m>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         match self {
-            Self::SkipRejectedEarlyData(e) => e.handle(input, output),
-            Self::CertificateOrCompressedCertificate(e) => e.handle(input, output),
-            Self::Certificate(e) => e.handle(input, output),
-            Self::CertificateVerify(e) => e.handle(input, output),
-            Self::EarlyData(e) => e.handle(input, output),
-            Self::Finished(e) => e.handle(input, output),
+            Self::SkipRejectedEarlyData(e) => e.handle(input, output, transcript),
+            Self::CertificateOrCompressedCertificate(e) => e.handle(input, output, transcript),
+            Self::Certificate(e) => e.handle(input, output, transcript),
+            Self::CertificateVerify(e) => e.handle(input, output, transcript),
+            Self::EarlyData(e) => e.handle(input, output, transcript),
+            Self::Finished(e) => e.handle(input, output, transcript),
             Self::Traffic(e) => e.handle(input, output),
             Self::QuicTraffic(e) => e.handle(input, output),
         }
@@ -109,11 +110,10 @@ mod client_hello {
             input: ClientHelloInput<'_>,
             mut st: ExpectClientHello,
             output: &mut dyn Output<'_>,
+            transcript: &mut HandshakeTranscript,
         ) -> Result<ServerState, Error> {
             let randoms = st.randoms(&input)?;
-            let mut transcript = st
-                .transcript
-                .start(suite.common.hash_provider)?;
+            transcript.start_hash(suite.common.hash_provider)?;
 
             if input
                 .client_hello
@@ -182,7 +182,7 @@ mod client_hello {
                 }
 
                 emit_hello_retry_request(
-                    &mut transcript,
+                    transcript,
                     suite,
                     input.client_hello.session_id,
                     output,
@@ -195,7 +195,6 @@ mod client_hello {
                 let skip_early_data = max_early_data_size(st.config.max_early_data_size);
 
                 let next = Box::new(ExpectClientHello {
-                    transcript: HandshakeHashOrBuffer::Hash(transcript),
                     session_id: SessionId::empty(),
                     using_ems: false,
                     done_retry: true,
@@ -252,9 +251,9 @@ mod client_hello {
             }
 
             let full_handshake = resuming.is_none();
-            transcript.add_message(input.message);
+            transcript.commit_parts(input.message, input.proposal);
             let key_schedule = emit_server_hello(
-                &mut transcript,
+                transcript,
                 &randoms,
                 suite,
                 st.protocol,
@@ -279,7 +278,7 @@ mod client_hello {
             ));
 
             let mut ocsp_response = signer.ocsp.as_deref();
-            let mut flight = HandshakeFlightTls13::new(&mut transcript);
+            let mut flight = HandshakeFlightTls13::new(transcript.must_hh_mut());
             let (
                 Tls13Extensions {
                     certificate_types,
@@ -365,7 +364,6 @@ mod client_hello {
 
             let hs = HandshakeState {
                 config: st.config,
-                transcript,
                 suite,
                 alpn_protocol,
                 sni: st.sni,
@@ -442,7 +440,7 @@ mod client_hello {
 
     fn handle_psk_offer(
         input: &ClientHelloInput<'_>,
-        transcript: &HandshakeHash,
+        transcript: &HandshakeTranscript,
         sni: Option<&DnsName<'_>>,
         suite: &'static Tls13CipherSuite,
         protocol: Protocol,
@@ -502,7 +500,7 @@ mod client_hello {
     }
 
     fn check_binder(
-        transcript: &HandshakeHash,
+        transcript: &HandshakeTranscript,
         key_schedule: &KeyScheduleEarlyServer,
         client_hello: &Message<'_>,
         binder: &[u8],
@@ -514,7 +512,9 @@ mod client_hello {
             _ => unreachable!(),
         };
 
-        let handshake_hash = transcript.hash_given(binder_plaintext);
+        let handshake_hash = transcript
+            .must_hh()
+            .hash_given(binder_plaintext);
 
         let real_binder =
             key_schedule.resumption_psk_binder_key_and_sign_verify_data(&handshake_hash);
@@ -523,7 +523,7 @@ mod client_hello {
     }
 
     fn emit_server_hello(
-        transcript: &mut HandshakeHash,
+        transcript: &mut HandshakeTranscript,
         randoms: &ConnectionRandoms,
         suite: &'static Tls13CipherSuite,
         protocol: Protocol,
@@ -561,7 +561,7 @@ mod client_hello {
             )),
         };
 
-        let client_hello_hash = transcript.hash_given(&[]);
+        let client_hello_hash = transcript.must_hh().hash_given(&[]);
 
         trace!("sending server hello {sh:?}");
         transcript.add_message(&sh);
@@ -617,7 +617,7 @@ mod client_hello {
     }
 
     fn emit_hello_retry_request(
-        transcript: &mut HandshakeHash,
+        transcript: &mut HandshakeTranscript,
         suite: &'static Tls13CipherSuite,
         session_id: SessionId,
         output: &mut dyn Output<'_>,
@@ -642,7 +642,9 @@ mod client_hello {
         };
 
         trace!("Requesting retry {m:?}");
-        transcript.rollup_for_hrr();
+        transcript
+            .must_hh_mut()
+            .rollup_for_hrr();
         transcript.add_message(&m);
         output.send_msg(m, false);
     }
@@ -884,6 +886,7 @@ impl ExpectAndSkipRejectedEarlyData {
         mut self: Box<Self>,
         input: Input<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         /* "The server then ignores early data by skipping all records with an external
          *  content type of "application_data" (indicating that they are encrypted),
@@ -896,7 +899,8 @@ impl ExpectAndSkipRejectedEarlyData {
             }
         }
 
-        self.next.handle(input, output)
+        self.next
+            .handle(input, output, transcript)
     }
 }
 
@@ -917,6 +921,7 @@ impl ExpectCertificateOrCompressedCertificate {
         self: Box<Self>,
         input: Input<'_>,
         _output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         match input.message.payload {
             MessagePayload::Handshake {
@@ -927,7 +932,7 @@ impl ExpectCertificateOrCompressedCertificate {
                 key_schedule: self.key_schedule,
                 expected_certificate_type: self.expected_certificate_type,
             }
-            .handle_input(input),
+            .handle_input(input, transcript),
 
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::CompressedCertificate(..)),
@@ -937,7 +942,7 @@ impl ExpectCertificateOrCompressedCertificate {
                 key_schedule: self.key_schedule,
                 expected_certificate_type: self.expected_certificate_type,
             }
-            .handle_input(input),
+            .handle_input(input, transcript),
 
             payload => Err(inappropriate_handshake_message(
                 &payload,
@@ -964,10 +969,14 @@ struct ExpectCompressedCertificate {
 }
 
 impl ExpectCompressedCertificate {
-    fn handle_input(mut self, Input { message, .. }: Input<'_>) -> Result<ServerState, Error> {
-        self.hs.transcript.add_message(&message);
+    fn handle_input(
+        self,
+        input: Input<'_>,
+        transcript: &mut HandshakeTranscript,
+    ) -> Result<ServerState, Error> {
+        transcript.commit(&input);
         let compressed_cert = require_handshake_msg_move!(
-            message,
+            input.message,
             HandshakeType::CompressedCertificate,
             HandshakePayload::CompressedCertificate
         )?;
@@ -1007,7 +1016,7 @@ impl ExpectCompressedCertificate {
             key_schedule: self.key_schedule,
             expected_certificate_type: self.expected_certificate_type,
         }
-        .handle_certificate(cert_payload)
+        .handle_certificate(cert_payload, transcript)
     }
 }
 
@@ -1018,18 +1027,26 @@ struct ExpectCertificate {
 }
 
 impl ExpectCertificate {
-    fn handle_input(mut self, Input { message, .. }: Input<'_>) -> Result<ServerState, Error> {
-        self.hs.transcript.add_message(&message);
-        self.handle_certificate(require_handshake_msg_move!(
-            message,
-            HandshakeType::Certificate,
-            HandshakePayload::CertificateTls13
-        )?)
+    fn handle_input(
+        self,
+        input: Input<'_>,
+        transcript: &mut HandshakeTranscript,
+    ) -> Result<ServerState, Error> {
+        transcript.commit(&input);
+        self.handle_certificate(
+            require_handshake_msg_move!(
+                input.message,
+                HandshakeType::Certificate,
+                HandshakePayload::CertificateTls13
+            )?,
+            transcript,
+        )
     }
 
     fn handle_certificate(
-        mut self,
+        self,
         certp: CertificatePayloadTls13<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         // We don't send any CertificateRequest extensions, so any extensions
         // here are illegal.
@@ -1054,7 +1071,7 @@ impl ExpectCertificate {
         let Some(peer_identity) = peer_identity else {
             if !mandatory {
                 debug!("client auth requested but no certificate supplied");
-                self.hs.transcript.abandon_client_auth();
+                transcript.abandon_client_auth();
                 return Ok(Box::new(ExpectFinished {
                     hs: self.hs,
                     key_schedule: self.key_schedule,
@@ -1088,8 +1105,9 @@ impl ExpectCertificate {
         self: Box<Self>,
         input: Input<'_>,
         _output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
-        self.handle_input(input)
+        self.handle_input(input, transcript)
     }
 }
 
@@ -1107,17 +1125,18 @@ struct ExpectCertificateVerify {
 
 impl ExpectCertificateVerify {
     fn handle(
-        mut self: Box<Self>,
-        Input { message, .. }: Input<'_>,
+        self: Box<Self>,
+        input: Input<'_>,
         _output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         let signature = require_handshake_msg!(
-            message,
+            input.message,
             HandshakeType::CertificateVerify,
             HandshakePayload::CertificateVerify
         )?;
-        let handshake_hash = self.hs.transcript.current_hash();
-        self.hs.transcript.abandon_client_auth();
+        let handshake_hash = transcript.current_hash();
+        transcript.abandon_client_auth();
 
         self.hs
             .config
@@ -1130,7 +1149,7 @@ impl ExpectCertificateVerify {
 
         trace!("client CertificateVerify OK");
 
-        self.hs.transcript.add_message(&message);
+        transcript.commit(&input);
         Ok(Box::new(ExpectFinished {
             hs: self.hs,
             key_schedule: self.key_schedule,
@@ -1161,6 +1180,7 @@ impl ExpectEarlyData {
         mut self: Box<Self>,
         input: Input<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         match input.message.payload {
             MessagePayload::ApplicationData(payload) => {
@@ -1182,9 +1202,7 @@ impl ExpectEarlyData {
                 let proof = input.check_aligned_handshake()?;
                 self.key_schedule
                     .update_decrypter(output.receive(), &proof);
-                self.hs
-                    .transcript
-                    .add_message(&input.message);
+                transcript.commit(&input);
                 Ok(Box::new(ExpectFinished {
                     hs: self.hs,
                     key_schedule: self.key_schedule,
@@ -1410,9 +1428,10 @@ impl ExpectFinished {
 
 impl ExpectFinished {
     fn handle(
-        mut self: Box<Self>,
+        self: Box<Self>,
         input: Input<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         let finished = require_handshake_msg!(
             input.message,
@@ -1420,7 +1439,7 @@ impl ExpectFinished {
             HandshakePayload::Finished
         )?;
 
-        let handshake_hash = self.hs.transcript.current_hash();
+        let handshake_hash = transcript.current_hash();
         let proof = input.check_aligned_handshake()?;
         let (key_schedule_before_finished, expect_verify_data) = self
             .key_schedule
@@ -1434,14 +1453,12 @@ impl ExpectFinished {
 
         // Note: future derivations include Client Finished, but not the
         // main application data keying.
-        self.hs
-            .transcript
-            .add_message(&input.message);
+        transcript.commit(&input);
 
         let (key_schedule_traffic, exporter, resumption) =
-            key_schedule_before_finished.into_traffic(self.hs.transcript.current_hash());
+            key_schedule_before_finished.into_traffic(transcript.current_hash());
 
-        let mut flight = HandshakeFlightTls13::new(&mut self.hs.transcript);
+        let mut flight = HandshakeFlightTls13::new(transcript.must_hh_mut());
         for _ in 0..self.hs.send_tickets {
             Self::emit_ticket(
                 &mut flight,
@@ -1489,7 +1506,6 @@ impl From<Box<ExpectFinished>> for ServerState {
 
 struct HandshakeState {
     config: Arc<ServerConfig>,
-    transcript: HandshakeHash,
     suite: &'static Tls13CipherSuite,
     alpn_protocol: Option<ApplicationProtocol<'static>>,
     sni: Option<DnsName<'static>>,

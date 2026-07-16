@@ -11,12 +11,11 @@ use super::{ClientHello, CommonServerSessionValue, ServerConfig, tls12, tls13};
 use crate::SupportedCipherSuite;
 use crate::common_state::{Event, Output, OutputEvent, Protocol};
 use crate::conn::{ConnectionRandoms, Input};
-use crate::crypto::hash::Hash;
 use crate::crypto::kx::{KeyExchangeAlgorithm, NamedGroup, SupportedKxGroup};
 use crate::crypto::{CipherSuite, CryptoProvider, SelectedCredential, SignatureScheme};
 use crate::enums::{ApplicationProtocol, CertificateType, HandshakeType, ProtocolVersion};
 use crate::error::{ApiMisuse, Error, PeerIncompatible, PeerMisbehaved};
-use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
+use crate::hash_hs::{HandshakeTranscript, Proposal};
 use crate::kernel::KernelState;
 use crate::log::{debug, trace};
 use crate::msgs::{
@@ -59,15 +58,20 @@ impl ServerState {
 }
 
 impl crate::conn::StateMachine for ServerState {
-    fn handle<'m>(self, input: Input<'m>, output: &mut dyn Output<'m>) -> Result<Self, Error> {
+    fn handle<'m>(
+        self,
+        input: Input<'m>,
+        output: &mut dyn Output<'m>,
+        transcript: &mut HandshakeTranscript,
+    ) -> Result<Self, Error> {
         match self {
             Self::ReadClientHello(r) => r.handle(input, output),
             Self::ChooseConfig(_) => {
                 Err(Error::Unreachable("ChooseConfig cannot process a message"))
             }
-            Self::ClientHello(e) => e.handle(input, output),
-            Self::Tls12(sm) => sm.handle(input, output),
-            Self::Tls13(sm) => sm.handle(input, output),
+            Self::ClientHello(e) => e.handle(input, output, transcript),
+            Self::Tls12(sm) => sm.handle(input, output, transcript),
+            Self::Tls13(sm) => sm.handle(input, output, transcript),
         }
     }
 
@@ -377,6 +381,7 @@ impl ReadClientHello {
         Ok(Box::new(ChooseConfig {
             client_hello: Input {
                 message: input.message.into_owned(),
+                proposal: input.proposal.into_owned(),
                 aligned_handshake: input.aligned_handshake,
             },
             resumption_data: self.resumption_data,
@@ -410,8 +415,11 @@ impl ChooseConfig {
         extra_exts: ServerExtensionsInput,
         output: &mut dyn Output<'_>,
     ) -> Result<ServerState, Error> {
-        ExpectClientHello::new(config, extra_exts, self.resumption_data, self.protocol)
-            .with_input(ClientHelloInput::from_input(&self.client_hello)?, output)
+        ExpectClientHello::new(config, extra_exts, self.resumption_data, self.protocol).with_input(
+            ClientHelloInput::from_input(&self.client_hello)?,
+            output,
+            todo!("wire this up for QUIC or acceptor I guess"),
+        )
     }
 
     pub(crate) fn client_hello(&self) -> ClientHello<'_> {
@@ -448,7 +456,6 @@ pub(crate) struct ExpectClientHello {
     pub(super) config: Arc<ServerConfig>,
     pub(super) protocol: Protocol,
     pub(super) extra_exts: ServerExtensionsInput,
-    pub(super) transcript: HandshakeHashOrBuffer,
     pub(super) session_id: SessionId,
     pub(super) sni: Option<DnsName<'static>>,
     pub(super) resumption_data: Vec<u8>,
@@ -464,17 +471,10 @@ impl ExpectClientHello {
         resumption_data: Vec<u8>,
         protocol: Protocol,
     ) -> Self {
-        let mut transcript_buffer = HandshakeHashBuffer::new();
-
-        if config.verifier.offer_client_auth() {
-            transcript_buffer.set_client_auth_enabled();
-        }
-
         Self {
             config,
             protocol,
             extra_exts,
-            transcript: HandshakeHashOrBuffer::Buffer(transcript_buffer),
             session_id: SessionId::empty(),
             sni: None,
             resumption_data,
@@ -489,7 +489,11 @@ impl ExpectClientHello {
         self,
         input: ClientHelloInput<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
+        if self.config.verifier.offer_client_auth() {
+            transcript.set_client_auth_enabled();
+        }
         let tls13_enabled = self
             .config
             .supports_version(ProtocolVersion::TLSv1_3);
@@ -500,13 +504,13 @@ impl ExpectClientHello {
         // Are we doing TLS1.3?
         if let Some(versions) = &input.client_hello.supported_versions {
             if versions.tls13 && tls13_enabled {
-                self.with_version::<Tls13CipherSuite>(input, output)
+                self.with_version::<Tls13CipherSuite>(input, output, transcript)
             } else if !versions.tls12 || !tls12_enabled {
                 Err(PeerIncompatible::Tls12NotOfferedOrEnabled.into())
             } else if self.protocol.is_quic() {
                 Err(PeerIncompatible::Tls13RequiredForQuic.into())
             } else {
-                self.with_version::<Tls12CipherSuite>(input, output)
+                self.with_version::<Tls12CipherSuite>(input, output, transcript)
             }
         } else if u16::from(input.client_hello.client_version) < u16::from(ProtocolVersion::TLSv1_2)
         {
@@ -516,7 +520,7 @@ impl ExpectClientHello {
         } else if self.protocol.is_quic() {
             Err(PeerIncompatible::Tls13RequiredForQuic.into())
         } else {
-            self.with_version::<Tls12CipherSuite>(input, output)
+            self.with_version::<Tls12CipherSuite>(input, output, transcript)
         }
     }
 
@@ -524,6 +528,7 @@ impl ExpectClientHello {
         mut self,
         input: ClientHelloInput<'_>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error>
     where
         CryptoProvider: Borrow<[&'static T]>,
@@ -604,7 +609,7 @@ impl ExpectClientHello {
 
         suite
             .server_handler()
-            .handle_client_hello(suite, skxg, credentials, input, self, output)
+            .handle_client_hello(suite, skxg, credentials, input, self, output, transcript)
     }
 
     fn choose_suite_and_kx_group<T: Suite + 'static>(
@@ -736,9 +741,10 @@ impl ExpectClientHello {
         self,
         input: Input<'m>,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error> {
         let input = ClientHelloInput::from_input(&input)?;
-        self.with_input(input, output)
+        self.with_input(input, output, transcript)
     }
 
     fn set_resumption_data(&mut self, resumption_data: &[u8]) -> Result<(), Error> {
@@ -762,11 +768,13 @@ pub(crate) trait ServerHandler<T>: fmt::Debug + Sealed + Send + Sync {
         input: ClientHelloInput<'_>,
         st: ExpectClientHello,
         output: &mut dyn Output<'_>,
+        transcript: &mut HandshakeTranscript,
     ) -> Result<ServerState, Error>;
 }
 
 pub(crate) struct ClientHelloInput<'a> {
     pub(super) message: &'a Message<'a>,
+    pub(super) proposal: &'a Proposal<'a>,
     pub(super) client_hello: &'a ClientHelloPayload,
     pub(super) sig_schemes: &'a [SignatureScheme],
     pub(super) proof: HandshakeAlignedProof,
@@ -805,24 +813,10 @@ impl<'a> ClientHelloInput<'a> {
 
         Ok(ClientHelloInput {
             message: &input.message,
+            proposal: &input.proposal,
             client_hello,
             sig_schemes,
             proof,
         })
-    }
-}
-
-pub(crate) enum HandshakeHashOrBuffer {
-    Buffer(HandshakeHashBuffer),
-    Hash(HandshakeHash),
-}
-
-impl HandshakeHashOrBuffer {
-    pub(super) fn start(self, hash: &'static dyn Hash) -> Result<HandshakeHash, Error> {
-        match self {
-            Self::Buffer(inner) => Ok(inner.start_hash(hash)),
-            Self::Hash(inner) if inner.algorithm() == hash.algorithm() => Ok(inner),
-            _ => Err(PeerMisbehaved::HandshakeHashVariedAfterRetry.into()),
-        }
     }
 }

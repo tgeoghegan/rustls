@@ -11,6 +11,7 @@ use crate::conn::{ConnectionCore, MessageIter, ReceivePath, SendOutput, SendPath
 use crate::crypto::cipher::{MessageEncrypter, OutboundPlain};
 use crate::enums::ProtocolVersion;
 use crate::error::{AlertDescription, ErrorWithAlert};
+use crate::hash_hs::HandshakeTranscript;
 use crate::lock::Mutex;
 use crate::msgs::{AlertLevel, Delocator, Message};
 use crate::sync::Arc;
@@ -46,6 +47,7 @@ impl<Side: SideData> TryFrom<ConnectionCore<Side>> for SplitConnection<Side> {
                 recv: conn.common.recv,
                 send,
                 pending_flush_sender: false,
+                transcript: conn.handshake_transcript,
             },
             outputs: conn.common.outputs,
         })
@@ -147,6 +149,7 @@ pub struct ReceiveTraffic<Side: SideData> {
     pub(crate) recv: ReceivePath,
     pub(crate) send: Arc<Mutex<SendPath>>,
     pub(crate) pending_flush_sender: bool,
+    pub(crate) transcript: HandshakeTranscript,
 }
 
 impl<Side: SideData> ReceiveTraffic<Side> {
@@ -171,6 +174,7 @@ impl<Side: SideData> ReceiveTraffic<Side> {
             mut recv,
             send,
             mut pending_flush_sender,
+            mut transcript,
         } = self;
 
         let mut send_adapter = SendAdapter::Unlocked(&send);
@@ -182,7 +186,8 @@ impl<Side: SideData> ReceiveTraffic<Side> {
             side: &mut Discard,
         };
 
-        let mut iter = MessageIter::<Side>::receive(input, &mut state, &mut recv, output);
+        let mut iter =
+            MessageIter::<Side>::receive(input, &mut state, &mut recv, output, &mut transcript);
         let received_plain = match iter.next() {
             Some(Ok(payload)) => Some(payload),
             Some(Err(error)) => {
@@ -217,6 +222,7 @@ impl<Side: SideData> ReceiveTraffic<Side> {
                     recv,
                     send,
                     pending_flush_sender,
+                    transcript,
                 },
             }));
         }
@@ -236,6 +242,7 @@ impl<Side: SideData> ReceiveTraffic<Side> {
             recv,
             send,
             pending_flush_sender,
+            transcript,
         };
 
         if core::mem::take(&mut rt.pending_flush_sender) {

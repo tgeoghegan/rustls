@@ -20,6 +20,7 @@ use crate::conn::{
 use crate::crypto;
 use crate::enums::ApplicationProtocol;
 use crate::error::Error;
+use crate::hash_hs::HandshakeTranscript;
 use crate::log::trace;
 use crate::msgs::ClientExtensionsInput;
 use crate::quic::QuicOutput;
@@ -303,6 +304,7 @@ impl ConnectionCore<ClientSide> {
             .send
             .set_max_fragment_size(config.max_fragment_size)?;
         let mut data = ClientConnectionData::new();
+        let mut handshake_transcript = HandshakeTranscript::new();
 
         let mut output = SideCommonOutput {
             side: &mut data,
@@ -311,9 +313,9 @@ impl ConnectionCore<ClientSide> {
         };
 
         let input = ClientHelloInput::new(name, &extra_exts, protocol, &mut output, config)?;
-        let state = input.start_handshake(extra_exts, &mut output)?;
+        let state = input.start_handshake(extra_exts, &mut output, &mut handshake_transcript)?;
 
-        Ok(Self::new(state, data, common_state))
+        Ok(Self::new(state, data, common_state, handshake_transcript))
     }
 
     pub(crate) fn is_early_data_accepted(&self) -> bool {
