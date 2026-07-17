@@ -869,8 +869,7 @@ fn emit_client_hello_for_retry(
 
     trace!("Sending ClientHello {ch:#?}");
 
-    transcript.add_message(&ch);
-    output.send_msg(ch, false);
+    output.send_msg(Some(transcript), ch, false);
 
     // Calculate the hash of ClientHello and use it to derive EarlyTrafficSecret
     let early_data_key_schedule =
@@ -886,11 +885,11 @@ fn emit_client_hello_for_retry(
                 // hello transcript and random.
                 Some(ech_state) => todo!(
                     "(
-                    &ech_state.inner_hello_transcript,
+                    &mut ech_state.inner_hello_transcript,
                     &ech_state.inner_hello_random.0,
                 )"
                 ),
-                None => (&*transcript, &input.random.0),
+                None => (transcript, &input.random.0),
             };
 
             tls13::derive_early_traffic_secret(

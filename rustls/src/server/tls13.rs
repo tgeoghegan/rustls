@@ -278,7 +278,7 @@ mod client_hello {
             ));
 
             let mut ocsp_response = signer.ocsp.as_deref();
-            let mut flight = HandshakeFlightTls13::new(transcript.must_hh_mut());
+            let mut flight = HandshakeFlightTls13::new(transcript);
             let (
                 Tls13Extensions {
                     certificate_types,
@@ -564,8 +564,7 @@ mod client_hello {
         let client_hello_hash = transcript.must_hh().hash_given(&[]);
 
         trace!("sending server hello {sh:?}");
-        transcript.add_message(&sh);
-        output.send_msg(sh, false);
+        output.send_msg(Some(transcript), sh, false);
 
         // Start key schedule
         let key_schedule_pre_handshake = if let Some((_, psk)) = resuming {
@@ -613,7 +612,7 @@ mod client_hello {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
         };
-        output.send_msg(m, false);
+        output.send_msg(None, m, false);
     }
 
     fn emit_hello_retry_request(
@@ -645,8 +644,7 @@ mod client_hello {
         transcript
             .must_hh_mut()
             .rollup_for_hrr();
-        transcript.add_message(&m);
-        output.send_msg(m, false);
+        output.send_msg(Some(transcript), m, false);
     }
 
     fn decide_if_early_data_allowed(
@@ -1458,7 +1456,7 @@ impl ExpectFinished {
         let (key_schedule_traffic, exporter, resumption) =
             key_schedule_before_finished.into_traffic(transcript.current_hash());
 
-        let mut flight = HandshakeFlightTls13::new(transcript.must_hh_mut());
+        let mut flight = HandshakeFlightTls13::new(transcript);
         for _ in 0..self.hs.send_tickets {
             Self::emit_ticket(
                 &mut flight,

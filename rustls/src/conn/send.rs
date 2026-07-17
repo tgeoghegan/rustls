@@ -6,6 +6,7 @@ use crate::crypto::cipher::{
 };
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
+use crate::hash_hs::HandshakeTranscript;
 use crate::log::{debug, error};
 use crate::msgs::{AlertLevel, Message, MessageFragmenter};
 use crate::tls13::key_schedule::KeyScheduleTrafficSend;
@@ -60,6 +61,7 @@ impl SendPath {
             _ => {}
         };
         self.send_msg(
+            None,
             Message::build_alert(level, desc),
             self.encrypt_state.is_encrypting(),
         );
@@ -249,7 +251,16 @@ impl SendOutput for SendPath {
     }
 
     /// Send a raw TLS message, fragmenting it if needed.
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+    fn send_msg(
+        &mut self,
+        transcript: Option<&mut HandshakeTranscript>,
+        m: Message<'_>,
+        must_encrypt: bool,
+    ) {
+        if let Some(transcript) = transcript {
+            // Run messages through the transcript *before* they are fragmented
+            transcript.add_message(&m);
+        }
         let encoded = EncodedMessage::from(m);
         if must_encrypt {
             self.send_messages(
@@ -301,7 +312,12 @@ pub(crate) trait SendOutput {
 
     fn start_traffic(&mut self);
 
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool);
+    fn send_msg(
+        &mut self,
+        transcript: Option<&mut HandshakeTranscript>,
+        m: Message<'_>,
+        must_encrypt: bool,
+    );
 }
 
 pub(super) const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;

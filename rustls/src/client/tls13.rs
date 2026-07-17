@@ -441,7 +441,7 @@ pub(super) fn derive_early_traffic_secret(
     hash_alg: &'static dyn Hash,
     early_key_schedule: &KeyScheduleEarlyClient,
     sent_tls13_fake_ccs: &mut bool,
-    transcript_buffer: &HandshakeTranscript,
+    transcript: &mut HandshakeTranscript,
     client_random: &[u8; 32],
 ) {
     if !early_key_schedule.protocol().is_quic() {
@@ -449,7 +449,7 @@ pub(super) fn derive_early_traffic_secret(
         emit_fake_ccs(sent_tls13_fake_ccs, output);
     }
 
-    let client_hello_hash = transcript_buffer
+    let client_hello_hash = transcript
         .must_hhb()
         .hash_given(hash_alg, &[]);
     early_key_schedule.client_early_traffic_secret(
@@ -474,6 +474,7 @@ pub(super) fn emit_fake_ccs(sent_tls13_fake_ccs: &mut bool, output: &mut dyn Out
     }
 
     output.send_msg(
+        None,
         Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
@@ -1288,8 +1289,7 @@ fn emit_end_of_early_data_tls13(transcript: &mut HandshakeTranscript, output: &m
         )),
     };
 
-    transcript.add_message(&m);
-    output.send_msg(m, true);
+    output.send_msg(Some(transcript), m, true);
 }
 
 struct ExpectFinished {
@@ -1344,7 +1344,7 @@ impl ExpectFinished {
                 .set_handshake_encrypter(output.send());
         }
 
-        let mut flight = HandshakeFlightTls13::new(transcript.must_hh_mut());
+        let mut flight = HandshakeFlightTls13::new(transcript);
 
         /* Send our authentication/finished messages.  These are still encrypted
          * with our handshake keys. */

@@ -172,7 +172,7 @@ mod client_hello {
 
             output.output(OutputEvent::HandshakeKind(HandshakeKind::Full));
 
-            let mut flight = HandshakeFlightTls12::new(transcript.must_hh_mut());
+            let mut flight = HandshakeFlightTls12::new(transcript);
 
             let Tls12Extensions {
                 alpn_protocol,
@@ -316,7 +316,7 @@ mod client_hello {
 
         let session_id = input.client_hello.session_id;
 
-        let mut flight = HandshakeFlightTls12::new(transcript.must_hh_mut());
+        let mut flight = HandshakeFlightTls12::new(transcript);
         let Tls12Extensions {
             alpn_protocol,
             send_ticket,
@@ -900,13 +900,13 @@ fn emit_ticket(
         )),
     };
 
-    transcript.add_message(&m);
-    output.send_msg(m, false);
+    output.send_msg(Some(transcript), m, false);
     Ok(())
 }
 
 fn emit_ccs(output: &mut dyn Output<'_>) {
     output.send_msg(
+        None,
         Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
@@ -932,8 +932,7 @@ fn emit_finished(
         ))),
     };
 
-    transcript.add_message(&f);
-    output.send_msg(f, true);
+    output.send_msg(Some(transcript), f, true);
 }
 
 pub(super) struct ExpectFinished {

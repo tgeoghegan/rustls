@@ -12,7 +12,7 @@ use crate::crypto::cipher::Payload;
 use crate::crypto::kx::SupportedKxGroup;
 use crate::enums::{ApplicationProtocol, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
-use crate::hash_hs::HandshakeHash;
+use crate::hash_hs::HandshakeTranscript;
 use crate::msgs::{
     AlertLevel, Codec, Delocator, HandshakeMessagePayload, Locator, Message, MessagePayload,
 };
@@ -283,7 +283,12 @@ pub(crate) trait Output<'m> {
 
     fn output(&mut self, ev: OutputEvent<'_>);
 
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool);
+    fn send_msg(
+        &mut self,
+        transcript: Option<&mut HandshakeTranscript>,
+        m: Message<'_>,
+        must_encrypt: bool,
+    );
 
     fn quic(&mut self) -> Option<&mut dyn QuicOutput> {
         None
@@ -400,12 +405,12 @@ impl Protocol {
 }
 
 pub(crate) struct HandshakeFlight<'a, const TLS13: bool> {
-    pub(crate) transcript: &'a mut HandshakeHash,
+    pub(crate) transcript: &'a mut HandshakeTranscript,
     body: Vec<u8>,
 }
 
 impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
-    pub(crate) fn new(transcript: &'a mut HandshakeHash) -> Self {
+    pub(crate) fn new(transcript: &'a mut HandshakeTranscript) -> Self {
         Self {
             transcript,
             body: Vec::new(),
@@ -413,6 +418,11 @@ impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
     }
 
     pub(crate) fn add(&mut self, hs: HandshakeMessagePayload<'_>) {
+        // Accumulate flight messages into the transcript. We can't wait until we transmit the whole
+        // flight because some messages (e.g. Finished or CertificateVerify) need the entire hash so
+        // far.
+        // We'll want to be feeding these into the send layer's fragmenter, so that in DTLS 1.2 we
+        // can be hashing handshake *fragments*.
         let start_len = self.body.len();
         hs.encode(&mut self.body);
         self.transcript
@@ -428,7 +438,8 @@ impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
             payload: MessagePayload::HandshakeFlight(Payload::new(self.body)),
         };
 
-        output.send_msg(m, TLS13);
+        // We've been updating the transcript incrementally so no need to pass it here.
+        output.send_msg(None, m, TLS13);
     }
 }
 

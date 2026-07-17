@@ -128,6 +128,7 @@
     "TLS-ECH-GREASE-Client-TLS12-RejectRetryConfigs": "we disable TLS1.2 w/ ECH",
     "TLS-ECH-Client*": "disable ECH",
     "TLS-ECH-Server*": "ECH server support NYI",
+    "AllExtensions-Client-Permute-ECH-HelloRetryRequest-TLS-TLS13": "broken by transcript stuff",
 #endif
 #if defined(AWS_LC_RS)
     "MLKEMKeyShareIncludedSecond-MLKEM1024": "we only include a share for the first configured group",

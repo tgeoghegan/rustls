@@ -32,6 +32,10 @@ impl HandshakeTranscript {
         self.commit_parts(&input.message, &input.proposal);
     }
     pub(crate) fn commit_parts(&mut self, message: &Message<'_>, proposal: &Proposal<'_>) {
+        if message.handshake_type().is_none() {
+            return;
+        }
+
         match &mut self.inner {
             HandshakeTranscriptInner::Buffer(hhb) => match proposal {
                 Proposal::Reassembled => hhb.add_message(&message),
@@ -60,6 +64,13 @@ impl HandshakeTranscript {
             HandshakeTranscriptInner::Hash(hh) => {
                 hh.add_message(m);
             }
+        }
+    }
+
+    pub(crate) fn add(&mut self, bytes: &[u8]) {
+        match &mut self.inner {
+            HandshakeTranscriptInner::Buffer(hhb) => hhb.add(bytes),
+            HandshakeTranscriptInner::Hash(hh) => hh.add(bytes),
         }
     }
 
@@ -210,18 +221,15 @@ impl HandshakeHashBuffer {
     /// We now know what hash function the verify_data will use.
     pub(crate) fn start_hash(self, provider: &'static dyn hash::Hash) -> HandshakeHash {
         let mut ctx = provider.start();
-        let prev_ctx = ctx.fork();
         ctx.update(&self.buffer);
         let total_hashed = self.buffer.len();
         HandshakeHash {
             provider,
             ctx,
-            prev_ctx,
             client_auth: match self.client_auth_enabled {
                 true => Some(self.buffer),
                 false => None,
             },
-            prev_client_auth: None,
             total_hashed,
         }
     }
@@ -232,18 +240,15 @@ impl HandshakeHashBuffer {
         provider: &'static dyn hash::Hash,
     ) -> HandshakeHash {
         let mut ctx = provider.start();
-        let prev_ctx = ctx.fork();
         ctx.update(&buffer);
         let total_hashed = buffer.len();
         HandshakeHash {
             provider,
             ctx,
-            prev_ctx,
             client_auth: match client_auth {
                 true => Some(buffer),
                 false => None,
             },
-            prev_client_auth: None,
             total_hashed,
         }
     }
@@ -259,11 +264,9 @@ impl HandshakeHashBuffer {
 pub(crate) struct HandshakeHash {
     provider: &'static dyn hash::Hash,
     ctx: Box<dyn hash::Context>,
-    prev_ctx: Box<dyn hash::Context>,
 
     /// buffer for client-auth.
     client_auth: Option<Vec<u8>>,
-    prev_client_auth: Option<Vec<u8>>,
 
     total_hashed: usize,
 }
@@ -291,12 +294,10 @@ impl HandshakeHash {
 
     /// Hash or buffer a byte slice.
     fn add_raw(&mut self, buf: &[u8]) -> &mut Self {
-        self.prev_ctx = self.ctx.fork();
         self.ctx.update(buf);
         self.total_hashed += buf.len();
 
         if let Some(curr_buffer) = &mut self.client_auth {
-            self.prev_client_auth = Some(curr_buffer.clone());
             curr_buffer.extend_from_slice(buf);
         }
 
@@ -357,9 +358,7 @@ impl Clone for HandshakeHash {
         Self {
             provider: self.provider,
             ctx: self.ctx.fork(),
-            prev_ctx: self.prev_ctx.fork(),
             client_auth: self.client_auth.clone(),
-            prev_client_auth: self.prev_client_auth.clone(),
             total_hashed: self.total_hashed,
         }
     }

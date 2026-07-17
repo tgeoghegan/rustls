@@ -479,9 +479,14 @@ impl SendOutput for SendAdapter<'_> {
         self.as_locked(false).start_traffic();
     }
 
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+    fn send_msg(
+        &mut self,
+        transcript: Option<&mut HandshakeTranscript>,
+        m: Message<'_>,
+        must_encrypt: bool,
+    ) {
         self.as_locked(true)
-            .send_msg(m, must_encrypt)
+            .send_msg(transcript, m, must_encrypt)
     }
 }
 
@@ -505,9 +510,11 @@ mod tests {
             AlertDescription::CertificateUnknown
         )));
         assert!(!send_flag_for(|adapter| adapter.start_traffic()));
-        assert!(send_flag_for(
-            |adapter| adapter.send_msg(Message::build_key_update_notify(), false)
-        ));
+        assert!(send_flag_for(|adapter| adapter.send_msg(
+            None,
+            Message::build_key_update_notify(),
+            false
+        )));
     }
 
     fn send_flag_for(f: impl FnOnce(&mut SendAdapter<'_>)) -> bool {

@@ -821,13 +821,18 @@ impl<'q> Output<'_> for SideCommonOutput<'_, 'q> {
         self.common.outputs.handle(ev);
     }
 
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+    fn send_msg(
+        &mut self,
+        transcript: Option<&mut HandshakeTranscript>,
+        m: Message<'_>,
+        must_encrypt: bool,
+    ) {
         match self.quic() {
             Some(quic) => quic.send_msg(m, must_encrypt),
             None => self
                 .common
                 .send
-                .send_msg(m, must_encrypt),
+                .send_msg(transcript, m, must_encrypt),
         }
     }
 
