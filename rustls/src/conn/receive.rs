@@ -531,8 +531,6 @@ impl ReceivePath {
             if matches!(self.negotiated_version, Some(ProtocolVersion::TLSv1_3))
                 && alert.description != AlertDescription::UserCanceled
             {
-                std::println!("illegal warning alert?");
-
                 return Err(PeerMisbehaved::IllegalWarningAlert(alert.description).into());
             }
 

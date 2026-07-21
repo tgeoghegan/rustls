@@ -217,7 +217,6 @@ impl ExpectServerHello {
         } else {
             server_hello.legacy_version
         };
-        std::println!("handling server hello, matching server version");
 
         match server_version {
             ProtocolVersion::TLSv1_3 if config.supports_version(ProtocolVersion::TLSv1_3) => {
