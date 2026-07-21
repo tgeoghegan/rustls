@@ -96,9 +96,13 @@ impl SendPath {
     pub(crate) fn send_appdata_encrypt(&mut self, payload: OutboundPlain<'_>) -> usize {
         let len = payload.len();
         let typ = ContentType::ApplicationData;
-        let version = self
-            .negotiated_version
-            .expect("protocol must be negotiated by the time we send application data");
+        let version = if let Some(nv) = self.negotiated_version {
+            nv
+        } else {
+            // if we haven't explicitly negotiated a protocol version, then behave as if using TLS
+            // 1.2
+            ProtocolVersion::TLSv1_2
+        };
 
         if self.protocol.is_dtls() {
             // For DTLS, we don't fragment application data, instead expecting clients to chunk up
@@ -294,8 +298,6 @@ impl SendPath {
 impl SendOutput for SendPath {
     fn negotiated_version(&mut self, version: ProtocolVersion) {
         self.negotiated_version = Some(version);
-        self.encrypt_state
-            .set_protocol_version(version);
     }
 
     fn ensure_key_update_queued(&mut self) {

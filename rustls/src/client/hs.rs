@@ -217,6 +217,7 @@ impl ExpectServerHello {
         } else {
             server_hello.legacy_version
         };
+        std::println!("handling server hello, matching server version");
 
         match server_version {
             ProtocolVersion::TLSv1_3 if config.supports_version(ProtocolVersion::TLSv1_3) => {
@@ -245,6 +246,7 @@ impl ExpectServerHello {
                     transcript,
                 ),
             ProtocolVersion::TLSv1_2 if config.supports_version(ProtocolVersion::TLSv1_2) => {
+                std::println!("handling server hello, checking if RTT");
                 if let Some((_, true)) = &self.early_data_key_schedule {
                     // The client must fail with a dedicated error code if the server
                     // responds with TLS 1.2 when offering 0-RTT.

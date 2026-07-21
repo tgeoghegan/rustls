@@ -6,7 +6,6 @@ use crate::crypto::cipher::{
     EncodedMessage, EncodingContext, InboundOpaque, MessageDecrypter, MessageEncrypter,
     OutboundOpaque, OutboundPlain,
 };
-use crate::enums::ProtocolVersion;
 use crate::error::Error;
 use crate::log::trace;
 use crate::msgs::HandshakeAlignedProof;
@@ -16,7 +15,6 @@ pub(crate) struct EncryptionState {
     message_encrypter: Option<Box<dyn MessageEncrypter>>,
     write_seq_max: u64,
     write_seq: u64,
-    version: Option<ProtocolVersion>,
 }
 
 impl EncryptionState {
@@ -26,12 +24,7 @@ impl EncryptionState {
             message_encrypter: None,
             write_seq_max: 0,
             write_seq: 0,
-            version: None,
         }
-    }
-
-    pub(crate) fn set_protocol_version(&mut self, version: ProtocolVersion) {
-        self.version = Some(version);
     }
 
     /// Encrypt a TLS message.
@@ -42,7 +35,6 @@ impl EncryptionState {
         &mut self,
         plain: EncodedMessage<OutboundPlain<'_>>,
     ) -> EncodedMessage<OutboundOpaque> {
-        assert!(self.version.is_some());
         assert!(self.pre_encrypt_action(0) != Some(PreEncryptAction::Refuse));
         let seq = self.write_seq;
         self.write_seq += 1;
@@ -76,7 +68,6 @@ impl EncryptionState {
             message_encrypter: Some(cipher),
             write_seq_max: min(SEQ_SOFT_LIMIT, max_messages),
             write_seq: 0,
-            version: self.version,
         };
     }
 
