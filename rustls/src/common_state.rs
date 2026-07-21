@@ -13,7 +13,9 @@ use crate::crypto::kx::SupportedKxGroup;
 use crate::enums::{ApplicationProtocol, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
 use crate::hash_hs::HandshakeTranscript;
-use crate::msgs::{AlertLevel, Codec, Delocator, HandshakeMessagePayload, Locator, Message, MessagePayload};
+use crate::msgs::{
+    AlertLevel, Codec, Delocator, HandshakeMessagePayload, Locator, Message, MessagePayload,
+};
 use crate::quic::{self, QuicOutput};
 use crate::suites::SupportedCipherSuite;
 
@@ -286,7 +288,7 @@ pub(crate) trait Output<'m> {
         transcript: Option<&mut HandshakeTranscript>,
         m: Message<'_>,
         must_encrypt: bool,
-        is_retry_req: bool,
+        is_initial_handshake: bool,
     );
 
     fn quic(&mut self) -> Option<&mut dyn QuicOutput> {

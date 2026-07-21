@@ -596,14 +596,14 @@ impl<'m> Output<'m> for CaptureAppData<'_, '_, 'm> {
         transcript: Option<&mut HandshakeTranscript>,
         m: Message<'_>,
         must_encrypt: bool,
-        is_retry_req: bool,
+        is_initial_handshake: bool,
     ) {
         match self.other.quic.as_deref_mut() {
             Some(quic) => quic.send_msg(m, must_encrypt),
             None => self
                 .other
                 .send
-                .send_msg(transcript, m, must_encrypt, is_retry_req),
+                .send_msg(transcript, m, must_encrypt, is_initial_handshake),
         }
     }
 

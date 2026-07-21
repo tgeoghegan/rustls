@@ -484,10 +484,10 @@ impl SendOutput for SendAdapter<'_> {
         transcript: Option<&mut HandshakeTranscript>,
         m: Message<'_>,
         must_encrypt: bool,
-        is_retry_req: bool,
+        is_initial_handshake: bool,
     ) {
         self.as_locked(true)
-            .send_msg(transcript, m, must_encrypt, is_retry_req)
+            .send_msg(transcript, m, must_encrypt, is_initial_handshake)
     }
 }
 

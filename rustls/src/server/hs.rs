@@ -510,6 +510,7 @@ impl ExpectClientHello {
         // Determine protocol version to use based on what we are configured with and what the
         // client indicates support for.
         if let Some(versions) = &input.client_hello.supported_versions {
+            // Client indicated supported versions in the supported versions extension
             match self.protocol {
                 Protocol::Tcp => {
                     if versions.tls13 && tls13_enabled {
@@ -567,6 +568,10 @@ impl ExpectClientHello {
                     }
                 }
             }
+        } else if u16::from(input.client_hello.client_version) < u16::from(ProtocolVersion::TLSv1_2)
+        {
+            // Client indicated a version in the legacy version field, but it's not TLS 1.2
+            Err(PeerIncompatible::Tls12NotOffered.into())
         } else {
             // No supported versions indicated by the client. Fall back to (D)TLS 1.2 if enabled.
             match self.protocol {

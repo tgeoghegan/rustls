@@ -135,7 +135,7 @@ impl SendPath {
     fn send_messages<'a>(
         &mut self,
         must_encrypt: bool,
-        is_retry_req: bool,
+        is_initial_handshake: bool,
         iter: impl ExactSizeIterator<Item = EncodedMessage<OutboundPlain<'a>>>,
     ) {
         for m in iter {
@@ -148,7 +148,7 @@ impl SendPath {
                 self.encrypt_state.encrypt_outgoing(m)
             } else {
                 m.to_unencrypted_opaque(EncodingContext {
-                    is_initial_handshake: is_retry_req,
+                    is_initial_handshake,
                     payload_is_encrypted: false,
                     ..Default::default()
                 })
@@ -326,7 +326,7 @@ impl SendOutput for SendPath {
         mut transcript: Option<&mut HandshakeTranscript>,
         m: Message<'_>,
         must_encrypt: bool,
-        is_retry_req: bool,
+        is_initial_handshake: bool,
     ) {
         match transcript {
             Some(ref mut transcript) => {
@@ -372,7 +372,7 @@ impl SendOutput for SendPath {
                 }
                 self.send_messages(
                     must_encrypt,
-                    is_retry_req,
+                    is_initial_handshake,
                     messages.iter().map(|m| EncodedMessage {
                         typ: m.typ,
                         version: m.version,
@@ -412,7 +412,7 @@ impl SendOutput for SendPath {
                 }
                 self.send_messages(
                     must_encrypt,
-                    is_retry_req,
+                    is_initial_handshake,
                     messages.iter().map(|m| EncodedMessage {
                         typ: m.typ,
                         version: m.version,
@@ -426,14 +426,14 @@ impl SendOutput for SendPath {
             // be chunked by the application before being handled off to rustls.
             (Protocol::Udp, _) => self.send_messages(
                 must_encrypt,
-                is_retry_req,
+                is_initial_handshake,
                 [EncodedMessage::from(m).borrow_outbound()].into_iter(),
             ),
             // TLS messages can be fragmented into multiple TCP or QUIC packets
             _ => {
                 self.send_messages(
                     must_encrypt,
-                    is_retry_req,
+                    is_initial_handshake,
                     self.message_fragmenter
                         .fragment_message(&EncodedMessage::from(m)),
                 );

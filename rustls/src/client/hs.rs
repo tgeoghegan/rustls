@@ -180,7 +180,15 @@ impl ExpectServerHello {
         // handshake_traffic_secret.
         suite
             .client_handler()
-            .handle_server_hello(version, suite, server_hello, input, self, output, transcript)
+            .handle_server_hello(
+                version,
+                suite,
+                server_hello,
+                input,
+                self,
+                output,
+                transcript,
+            )
     }
 }
 
@@ -220,10 +228,14 @@ impl ExpectServerHello {
                     transcript,
                 )
             }
-            ProtocolVersion::DTLSv1_3 if config.supports_version(ProtocolVersion::DTLSv1_3) => {
-                self.with_version::<Tls13CipherSuite>(ProtocolVersion::DTLSv1_3, server_hello, &input, output,
-                    transcript,)
-            }
+            ProtocolVersion::DTLSv1_3 if config.supports_version(ProtocolVersion::DTLSv1_3) => self
+                .with_version::<Tls13CipherSuite>(
+                    ProtocolVersion::DTLSv1_3,
+                    server_hello,
+                    &input,
+                    output,
+                    transcript,
+                ),
             ProtocolVersion::DTLSv1_3 if config.supports_version(ProtocolVersion::DTLSv1_3) => self
                 .with_version::<Tls13CipherSuite>(
                     ProtocolVersion::DTLSv1_3,
@@ -905,7 +917,8 @@ fn emit_client_hello_for_retry(
 
     trace!("Sending ClientHello {ch:#?}");
 
-    output.send_msg(Some(transcript), ch, false, retryreq.is_some());
+    // no retryreq -> initial handshake req
+    output.send_msg(Some(transcript), ch, false, retryreq.is_none());
 
     // Calculate the hash of ClientHello and use it to derive EarlyTrafficSecret
     let early_data_key_schedule =

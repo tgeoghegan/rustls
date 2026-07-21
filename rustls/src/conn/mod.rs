@@ -826,14 +826,14 @@ impl<'q> Output<'_> for SideCommonOutput<'_, 'q> {
         transcript: Option<&mut HandshakeTranscript>,
         m: Message<'_>,
         must_encrypt: bool,
-        is_retry_req: bool,
+        is_initial_handshake: bool,
     ) {
         match self.quic() {
             Some(quic) => quic.send_msg(m, must_encrypt),
             None => self
                 .common
                 .send
-                .send_msg(transcript, m, must_encrypt, is_retry_req),
+                .send_msg(transcript, m, must_encrypt, is_initial_handshake),
         }
     }
 
