@@ -47,6 +47,18 @@ pub(crate) enum ServerState {
 }
 
 impl ServerState {
+    fn variant(&self) -> std::string::String {
+        match self {
+            ServerState::ReadClientHello(_) => "ReadClientHello".into(),
+            ServerState::ChooseConfig(_) => "ChooseConfig".into(),
+            ServerState::ClientHello(_) => "ClientHello".into(),
+            ServerState::Tls12(_) => "Tls12".into(),
+            ServerState::Tls13(tls13_state) => std::format!("Tls13::{}", tls13_state.variant()),
+        }
+    }
+}
+
+impl ServerState {
     pub(crate) fn set_resumption_data(&mut self, resumption_data: &[u8]) -> Result<(), Error> {
         match self {
             Self::ReadClientHello(e) => e.set_resumption_data(resumption_data),
@@ -64,7 +76,8 @@ impl crate::conn::StateMachine for ServerState {
         output: &mut dyn Output<'m>,
         transcript: &mut HandshakeTranscript,
     ) -> Result<Self, Error> {
-        match self {
+        let before = self.variant();
+        let after = match self {
             Self::ReadClientHello(r) => r.handle(input, output),
             Self::ChooseConfig(_) => {
                 Err(Error::Unreachable("ChooseConfig cannot process a message"))
@@ -72,7 +85,13 @@ impl crate::conn::StateMachine for ServerState {
             Self::ClientHello(e) => e.handle(input, output, transcript),
             Self::Tls12(sm) => sm.handle(input, output, transcript),
             Self::Tls13(sm) => sm.handle(input, output, transcript),
+        };
+
+        if let Ok(after) = &after {
+            std::println!("server transition {before} -> {}", after.variant());
         }
+
+        after
     }
 
     fn wants_input(&self) -> bool {

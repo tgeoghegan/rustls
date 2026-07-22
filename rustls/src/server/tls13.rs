@@ -72,6 +72,21 @@ impl Tls13State {
             Self::QuicTraffic(e) => e.handle(input, output),
         }
     }
+
+    pub(crate) fn variant(&self) -> &'static str {
+        match self {
+            Tls13State::SkipRejectedEarlyData(_) => "SkipRejectedEarlyData",
+            Tls13State::CertificateOrCompressedCertificate(_) => {
+                "CertificateOrCompressedCertificate"
+            }
+            Tls13State::Certificate(_) => "Certificate",
+            Tls13State::CertificateVerify(_) => "CertificateVerify",
+            Tls13State::EarlyData(_) => "EarlyData",
+            Tls13State::Finished(_) => "Finished",
+            Tls13State::Traffic(_) => "Traffic",
+            Tls13State::QuicTraffic(_) => "QuicTraffic",
+        }
+    }
 }
 
 mod client_hello {

@@ -48,6 +48,19 @@ pub(crate) enum ClientState {
     Tls13(tls13::Tls13State),
 }
 
+impl ClientState {
+    fn variant(&self) -> std::string::String {
+        match self {
+            ClientState::ServerHello(_) => "ServerHello".into(),
+            ClientState::ServerHelloOrHelloRetryRequest(_) => {
+                "ServerHelloOrHelloRetryRequest".into()
+            }
+            ClientState::Tls12(_) => "Tls12".into(),
+            ClientState::Tls13(tls13_state) => std::format!("Tls13::{}", tls13_state.variant()),
+        }
+    }
+}
+
 impl StateMachine for ClientState {
     fn handle<'m>(
         self,
@@ -55,12 +68,18 @@ impl StateMachine for ClientState {
         output: &mut dyn Output<'m>,
         transcript: &mut HandshakeTranscript,
     ) -> Result<Self, Error> {
-        match self {
+        let before = self.variant();
+        let after = match self {
             Self::ServerHello(e) => e.handle(input, output, transcript),
             Self::ServerHelloOrHelloRetryRequest(e) => e.handle(input, output, transcript),
             Self::Tls12(sm) => sm.handle(input, output, transcript),
             Self::Tls13(sm) => sm.handle(input, output, transcript),
+        };
+
+        if let Ok(after) = &after {
+            std::println!("client transition {before} -> {}", after.variant());
         }
+        after
     }
 
     fn wants_input(&self) -> bool {

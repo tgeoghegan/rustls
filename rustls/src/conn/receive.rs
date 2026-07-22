@@ -171,7 +171,7 @@ impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side> {
         None
     }
 
-    pub(super) fn input(&mut self) -> &mut dyn TlsInputBuffer {
+    pub(crate) fn input(&mut self) -> &mut dyn TlsInputBuffer {
         self.input
     }
 

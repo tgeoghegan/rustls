@@ -154,6 +154,7 @@ impl SendPath {
                 m.to_unencrypted_opaque(EncodingContext {
                     is_initial_handshake,
                     payload_is_encrypted: false,
+                    epoch_and_sequence: self.dtls_epoch_and_sequence(),
                     ..Default::default()
                 })
             }
@@ -363,7 +364,7 @@ impl SendOutput for SendPath {
 
                 match transcript {
                     Some(transcript) => {
-                        if m.version != ProtocolVersion::DTLSv1_2 {
+                        if m.version == ProtocolVersion::DTLSv1_2 {
                             // For DTLS 1.2, hash *fragmented* handshake messages into the transcript
                             for message in &messages {
                                 transcript.add(&message.payload);
@@ -403,7 +404,7 @@ impl SendOutput for SendPath {
                     .collect();
                 match transcript {
                     Some(transcript) => {
-                        if m.version != ProtocolVersion::DTLSv1_2 {
+                        if m.version == ProtocolVersion::DTLSv1_2 {
                             // For DTLS 1.2, hash *fragmented* handshake messages into the transcript
                             for message in &messages {
                                 transcript.add(&message.payload);

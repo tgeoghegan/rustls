@@ -13,12 +13,12 @@ use pki_types::ServerName;
 
 use crate::client::ClientSide;
 use crate::common_state::Protocol;
-use crate::conn::ConnectionCore;
+use crate::conn::{ConnectionCore, MessageIter};
 use crate::crypto::cipher::OutboundPlain;
 use crate::msgs::{ClientExtensionsInput, Delocator, ServerExtensionsInput};
 use crate::server::ServerSide;
 use crate::vecbuf::ChunkVecBuffer;
-use crate::{ClientConfig, ServerConfig, SideData};
+use crate::{ClientConfig, ServerConfig, SideData, SliceInput, TlsInputBuffer, VecInput};
 
 /// Errors encountered while sending or receiving data on a `DtlsSocket`.
 #[derive(Debug)]
@@ -130,6 +130,8 @@ pub(crate) struct DtlsSocket<SocketLike, Side: SideData> {
     buffered_plaintext: ChunkVecBuffer,
     /// Plaintext received and decrypted but not yet read.
     received_plaintext: ChunkVecBuffer,
+    /// Buffer for received bytes
+    input: VecInput,
 }
 
 impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
@@ -139,6 +141,7 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
             core,
             buffered_plaintext: ChunkVecBuffer::new(None),
             received_plaintext: ChunkVecBuffer::new(None),
+            input: VecInput::default(),
         }
     }
 
@@ -180,7 +183,7 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
             .map_err(|e| Error::Other(e.into()))?)
     }
 
-    /// Much like `rustls-util::complete_io`, but doesn't require implemntations of `std::io::{Read,
+    /// Much like `rustls-util::complete_io`, but doesn't require implmentations of `std::io::{Read,
     /// Write}`.
     fn pending_io(&mut self, mut read_into: &mut [u8]) -> Result<(), Error> {
         // Check if we have any messages to read, possibly to finish handshaking.
@@ -192,16 +195,27 @@ impl<SocketLike: UdpSocketLike, Side: SideData> DtlsSocket<SocketLike, Side> {
             if read == 0 {
                 break;
             }
-            // if let Some(payload) = self
-            //     .core
-            //     .process_new_packets(&mut SliceInput::new(&mut read_into[..read]), None)
-            //     .map_err(|e| Error::Other(e.into()))?
-            // {
-            //     let payload = payload.reborrow(&Delocator::new(&mut read_into));
-            //     self.received_plaintext
-            //         .append(payload.into_vec());
-            // }
-            todo!("process new packets");
+
+            self.input
+                .read(&mut &read_into[..read])
+                .map_err(|e| Error::Other(e.into()))?;
+
+            let mut iter = MessageIter::new(&mut self.input, None, &mut self.core);
+            while let Some(result) = iter.next() {
+                let payload = result
+                    .map_err(|e| Error::Other(e.into()))?
+                    .reborrow(&Delocator::new(iter.input().slice_mut()));
+                self.received_plaintext
+                    .append(payload.into_vec());
+            }
+
+            self.input.discard(
+                self.core
+                    .common
+                    .recv
+                    .deframer
+                    .take_discard(),
+            );
         }
 
         // If we're now done handshaking, encrypt any buffered plaintext and enqueue into send queue

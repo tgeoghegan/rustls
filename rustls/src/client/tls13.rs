@@ -86,6 +86,24 @@ impl Tls13State {
             Self::QuicTraffic(e) => e.handle(input, output),
         }
     }
+
+    pub(crate) fn variant(&self) -> &'static str {
+        match self {
+            Tls13State::EncryptedExtensions(_) => "EncryptedExtensions",
+            Tls13State::CertificateOrCompressedCertificateOrCertReq(_) => {
+                "CertificateOrCompressedCertificateOrCertReq"
+            }
+            Tls13State::CertificateOrCompressedCertificate(_) => {
+                "CertificateOrCompressedCertificate"
+            }
+            Tls13State::CertificateOrCertReq(_) => "CertificateOrCertReq",
+            Tls13State::Certificate(_) => "Certificate",
+            Tls13State::CertificateVerify(_) => "CertificateVerify",
+            Tls13State::Finished(_) => "Finished",
+            Tls13State::Traffic(_) => "Traffic",
+            Tls13State::QuicTraffic(_) => "QuicTraffic",
+        }
+    }
 }
 
 pub(crate) static TLS13_HANDLER: &dyn ClientHandler<Tls13CipherSuite> = &Handler;
