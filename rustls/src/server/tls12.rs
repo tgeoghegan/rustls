@@ -96,7 +96,7 @@ mod client_hello {
             transcript: &mut HandshakeTranscript,
         ) -> Result<ServerState, Error> {
             let mut randoms = st.randoms(&input)?;
-            transcript.start_hash(suite.common.hash_provider)?;
+            transcript.start_hash(suite.common.hash_provider, version)?;
 
             // -- (D)TLS1.2 only from hereon in --
             transcript.commit_parts(input.message, input.proposal);

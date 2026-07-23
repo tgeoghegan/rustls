@@ -340,9 +340,26 @@ impl<'a> MessagePayload<'a> {
             ContentType::ApplicationData => Ok(Self::ApplicationData(Payload::Borrowed(payload))),
             ContentType::Alert => AlertMessagePayload::read(&mut r).map(MessagePayload::Alert),
             ContentType::Handshake => {
+                // Strip out handshake fragment fields from DTLS messages, because we don't want
+                // them anymore!
+                let payload = if vers.is_datagram_tls() {
+                    let mut payload_without_handshake_fragments =
+                        Vec::with_capacity(payload.len() - 8); // - handshake overhead
+
+                    // msg_type (1 byte) + length (3 bytes)
+                    payload_without_handshake_fragments.extend(&payload[..1 + 3]);
+
+                    // Skip msg_typ (1 byte) + length (3 bytes) + message_seq (2 bytes) +
+                    // fragment_offset (3 bytes) + fragment_length (3 bytes)
+                    payload_without_handshake_fragments.extend(&payload[1 + 3 + 2 + 3 + 3..]);
+
+                    Payload::Owned(payload_without_handshake_fragments)
+                } else {
+                    Payload::Borrowed(payload)
+                };
                 HandshakeMessagePayload::read_version(&mut r, vers).map(|parsed| Self::Handshake {
                     parsed,
-                    encoded: Payload::Borrowed(payload),
+                    encoded: payload,
                 })
             }
             ContentType::ChangeCipherSpec => {

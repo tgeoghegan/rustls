@@ -129,7 +129,7 @@ mod client_hello {
             transcript: &mut HandshakeTranscript,
         ) -> Result<ServerState, Error> {
             let randoms = st.randoms(&input)?;
-            transcript.start_hash(suite.common.hash_provider)?;
+            transcript.start_hash(suite.common.hash_provider, version)?;
 
             if input
                 .client_hello

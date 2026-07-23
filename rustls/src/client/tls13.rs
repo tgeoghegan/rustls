@@ -125,7 +125,7 @@ impl ClientHandler<Tls13CipherSuite> for Handler {
         transcript: &mut HandshakeTranscript,
     ) -> Result<ClientState, Error> {
         // Start our handshake hash, and input the server-hello.
-        transcript.start_hash(suite.common.hash_provider)?;
+        transcript.start_hash(suite.common.hash_provider, version)?;
         transcript.commit(&input);
 
         let mut randoms = ConnectionRandoms::new(st.input.random, server_hello.random);

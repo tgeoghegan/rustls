@@ -422,7 +422,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
         let transcript_hash = transcript
             .must_hhb()
             .clone()
-            .start_hash(cs.hash_provider());
+            .start_hash(cs.hash_provider(), negotiated_version);
         let mut new_transcript_buffer = transcript_hash.into_hrr_buffer(&proof);
         new_transcript_buffer.add_message(&input.message);
         core::mem::swap(
