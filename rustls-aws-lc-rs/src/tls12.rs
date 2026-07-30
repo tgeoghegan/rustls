@@ -328,6 +328,7 @@ impl RecordEncrypter for GcmRecordEncrypter {
         &mut self,
         msg: Record<OutboundPlain<'_>>,
         seq: u64,
+        _header: &[u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
@@ -382,6 +383,10 @@ impl RecordEncrypter for GcmRecordEncrypter {
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + GCM_EXPLICIT_NONCE_LEN + self.enc_key.algorithm().tag_len()
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
     }
 }
 
@@ -446,6 +451,7 @@ impl RecordEncrypter for ChaCha20Poly1305RecordEncrypter {
         &mut self,
         msg: Record<OutboundPlain<'_>>,
         seq: u64,
+        _header: &[u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
@@ -497,6 +503,10 @@ impl RecordEncrypter for ChaCha20Poly1305RecordEncrypter {
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + self.enc_key.algorithm().tag_len()
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
     }
 }
 
@@ -620,7 +630,7 @@ mod tests {
                 let record = Record::new(
                     ContentType::ApplicationData,
                     EncodableVersion::Legacy(ProtocolVersion::TLSv1_2),
-                    InboundOpaque(&mut sealed),
+                    InboundOpaque(&[], &mut sealed),
                 );
                 let shape = suite.aead_alg.key_block_shape();
                 let mut decrypter = suite
@@ -648,7 +658,7 @@ mod tests {
         );
         let mut out = vec![fill; encrypter.encrypted_payload_len(record.payload.len())];
         encrypter
-            .encrypt(record, TEST_SEQ, &mut out)
+            .encrypt(record, TEST_SEQ, &[], &mut out)
             .unwrap()
             .payload
             .to_vec()

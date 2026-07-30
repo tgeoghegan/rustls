@@ -9,7 +9,7 @@ use rustls::crypto::cipher::{
     RecordEncrypter, Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
 };
 use rustls::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
-use rustls::enums::ContentType;
+use rustls::enums::{ContentType, ProtocolVersion};
 use rustls::error::Error;
 use rustls::version::TLS13_VERSION;
 use rustls::{CipherSuiteCommon, ConnectionTrafficSecrets, Tls13CipherSuite, crypto};
@@ -212,6 +212,7 @@ impl RecordEncrypter for Tls13RecordEncrypter {
         &mut self,
         record: Record<OutboundPlain<'_>>,
         seq: u64,
+        header: &'a [u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
         let total_len = self.encrypted_payload_len(record.payload.len());
@@ -219,7 +220,14 @@ impl RecordEncrypter for Tls13RecordEncrypter {
 
         let typ = ContentType::ApplicationData;
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(typ, record.version.encode(), total_len));
+        let tls13_aad = make_tls13_aad(typ, record.version.encode(), total_len);
+        let aad = if record.version.is_datagram_tls() {
+            // For DTLS 1.3, the AAD is the record's unified header, verbatim
+            aead::Aad::from(header)
+        } else {
+            aead::Aad::from(tls13_aad.as_slice())
+        };
+
         payload.extend_from_chunks(&record.payload);
         payload.extend_from_slice(&record.typ.to_array());
 
@@ -241,6 +249,10 @@ impl RecordEncrypter for Tls13RecordEncrypter {
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + 1 + self.enc_key.algorithm().tag_len()
     }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_3
+    }
 }
 
 impl RecordDecrypter for Tls13RecordDecrypter {
@@ -249,17 +261,20 @@ impl RecordDecrypter for Tls13RecordDecrypter {
         mut record: Record<InboundOpaque<'a>>,
         seq: u64,
     ) -> Result<Record<&'a [u8]>, Error> {
+        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
+        let tls13_aad = make_tls13_aad(record.typ, record.version.version(), record.payload.len());
+        let aad = if record.version.is_datagram_tls() {
+            // For DTLS 1.3, the AAD is the record's unified header, verbatim
+            aead::Aad::from(record.payload.0)
+        } else {
+            aead::Aad::from(tls13_aad.as_slice())
+        };
+
         let payload = &mut record.payload;
         if payload.len() < self.dec_key.algorithm().tag_len() {
             return Err(Error::DecryptError);
         }
 
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(
-            record.typ,
-            record.version.version(),
-            payload.len(),
-        ));
         let plain_len = self
             .dec_key
             .open_in_place(nonce, aad, payload)

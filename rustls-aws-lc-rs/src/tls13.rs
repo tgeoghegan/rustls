@@ -9,7 +9,7 @@ use rustls::crypto::cipher::{
 };
 use rustls::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use rustls::crypto::{self, CipherSuite};
-use rustls::enums::ContentType;
+use rustls::enums::{ContentType, ProtocolVersion};
 use rustls::error::Error;
 use rustls::version::TLS13_VERSION;
 use rustls::{CipherSuiteCommon, ConnectionTrafficSecrets, Tls13CipherSuite};
@@ -241,40 +241,47 @@ struct AeadRecordDecrypter {
 impl RecordEncrypter for AeadRecordEncrypter {
     fn encrypt<'a>(
         &mut self,
-        msg: Record<OutboundPlain<'_>>,
+        record: Record<OutboundPlain<'_>>,
         seq: u64,
+        header: &'a [u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
+        let total_len = self.encrypted_payload_len(record.payload.len());
 
         let typ = ContentType::ApplicationData;
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(typ, msg.version.encode(), total_len));
+        let tls13_aad = make_tls13_aad(typ, record.version.encode(), total_len);
+        let aad = if record.version.is_datagram_tls() {
+            // For DTLS 1.3, the AAD is the record's unified header, verbatim
+            aead::Aad::from(header)
+        } else {
+            aead::Aad::from(tls13_aad.as_slice())
+        };
 
-        let payload = match msg.payload.single_chunk() {
+        let payload = match record.payload.single_chunk() {
             // Contiguous plaintext is sealed out-of-place, straight from the borrowed
             // input and the inner content type byte is specified as `extra_in`.
             Some(plain) => {
-                let record = record_region(out, total_len)?;
-                let (ciphertext, typ_and_tag) = record.split_at_mut(plain.len());
+                let record_region = record_region(out, total_len)?;
+                let (ciphertext, typ_and_tag) = record_region.split_at_mut(plain.len());
                 self.enc_key
                     .seal_out_of_place_scatter(
                         nonce,
                         aad,
                         plain,
                         ciphertext,
-                        &msg.typ.to_array(),
+                        &record.typ.to_array(),
                         typ_and_tag,
                     )
                     .map_err(|_| Error::EncryptError)?;
-                &*record
+                &*record_region
             }
             // Fragmented plaintext is gathered into `out` and then sealed in place.
             // We can't use the out-of-place seal as it requires contiguous input.
             None => {
                 let mut payload = EncryptBuffer::new(out, total_len)?;
-                payload.extend_from_chunks(&msg.payload);
-                payload.extend_from_slice(&msg.typ.to_array());
+                payload.extend_from_chunks(&record.payload);
+                payload.extend_from_slice(&record.typ.to_array());
 
                 match self
                     .enc_key
@@ -290,13 +297,17 @@ impl RecordEncrypter for AeadRecordEncrypter {
 
         Ok(Record {
             typ,
-            version: msg.version,
+            version: record.version,
             payload,
         })
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + 1 + self.enc_key.algorithm().tag_len()
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_3
     }
 }
 
@@ -306,17 +317,19 @@ impl RecordDecrypter for AeadRecordDecrypter {
         mut record: Record<InboundOpaque<'a>>,
         seq: u64,
     ) -> Result<Record<&'a [u8]>, Error> {
+        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
+        let tls13_aad = make_tls13_aad(record.typ, record.version.version(), record.payload.len());
+        let aad = if record.version.is_datagram_tls() {
+            // For DTLS 1.3, the AAD is the record's unified header, verbatim
+            aead::Aad::from(record.payload.0)
+        } else {
+            aead::Aad::from(tls13_aad.as_slice())
+        };
+
         let payload = &mut record.payload;
         if payload.len() < self.dec_key.algorithm().tag_len() {
             return Err(Error::DecryptError);
         }
-
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(
-            record.typ,
-            record.version.version(),
-            payload.len(),
-        ));
         let plain_len = self
             .dec_key
             .open_in_place(nonce, aad, payload)
@@ -336,40 +349,47 @@ struct GcmRecordEncrypter {
 impl RecordEncrypter for GcmRecordEncrypter {
     fn encrypt<'a>(
         &mut self,
-        msg: Record<OutboundPlain<'_>>,
+        record: Record<OutboundPlain<'_>>,
         seq: u64,
+        header: &'a [u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
+        let total_len = self.encrypted_payload_len(record.payload.len());
 
         let typ = ContentType::ApplicationData;
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(typ, msg.version.encode(), total_len));
+        let tls13_aad = make_tls13_aad(typ, record.version.encode(), total_len);
+        let aad = if record.version.is_datagram_tls() {
+            // For DTLS 1.3, the AAD is the record's unified header, verbatim
+            aead::Aad::from(header)
+        } else {
+            aead::Aad::from(tls13_aad.as_slice())
+        };
 
-        let payload = match msg.payload.single_chunk() {
+        let payload = match record.payload.single_chunk() {
             // Contiguous plaintext is sealed out-of-place, straight from the borrowed
             // input and the inner content type byte is specified as `extra_in`.
             Some(plain) => {
-                let record = record_region(out, total_len)?;
-                let (ciphertext, typ_and_tag) = record.split_at_mut(plain.len());
+                let record_region = record_region(out, total_len)?;
+                let (ciphertext, typ_and_tag) = record_region.split_at_mut(plain.len());
                 self.enc_key
                     .seal_out_of_place_scatter(
                         nonce,
                         aad,
                         plain,
                         ciphertext,
-                        &msg.typ.to_array(),
+                        &record.typ.to_array(),
                         typ_and_tag,
                     )
                     .map_err(|_| Error::EncryptError)?;
-                &*record
+                &*record_region
             }
             // Fragmented plaintext is gathered into `out` and then sealed in place.
             // We can't use the out-of-place seal as it requires contiguous input.
             None => {
                 let mut payload = EncryptBuffer::new(out, total_len)?;
-                payload.extend_from_chunks(&msg.payload);
-                payload.extend_from_slice(&msg.typ.to_array());
+                payload.extend_from_chunks(&record.payload);
+                payload.extend_from_slice(&record.typ.to_array());
 
                 match self
                     .enc_key
@@ -385,13 +405,17 @@ impl RecordEncrypter for GcmRecordEncrypter {
 
         Ok(Record {
             typ,
-            version: msg.version,
+            version: record.version,
             payload,
         })
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + 1 + self.enc_key.algorithm().tag_len()
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_3
     }
 }
 
@@ -406,17 +430,24 @@ impl RecordDecrypter for GcmRecordDecrypter {
         mut record: Record<InboundOpaque<'a>>,
         seq: u64,
     ) -> Result<Record<&'a [u8]>, Error> {
+        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
+        let tls13_aad = make_tls13_aad(record.typ, record.version.version(), record.payload.len());
+        let aad = if record
+            .version
+            .version()
+            .is_datagram_tls()
+        {
+            // For DTLS 1.3, the AAD is the record's unified header, verbatim
+            aead::Aad::from(record.payload.0)
+        } else {
+            aead::Aad::from(tls13_aad.as_slice())
+        };
+
         let payload = &mut record.payload;
         if payload.len() < self.dec_key.algorithm().tag_len() {
             return Err(Error::DecryptError);
         }
 
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(
-            record.typ,
-            record.version.version(),
-            payload.len(),
-        ));
         let plain_len = self
             .dec_key
             .open_in_place(nonce, aad, payload)
@@ -540,7 +571,7 @@ mod tests {
                 let record = Record::new(
                     ContentType::ApplicationData,
                     EncodableVersion::Legacy(ProtocolVersion::TLSv1_2),
-                    InboundOpaque(&mut sealed),
+                    InboundOpaque(&[], &mut sealed),
                 );
                 let mut decrypter = suite
                     .aead_alg
@@ -565,7 +596,7 @@ mod tests {
         );
         let mut out = vec![fill; encrypter.encrypted_payload_len(record.payload.len())];
         encrypter
-            .encrypt(record, TEST_SEQ, &mut out)
+            .encrypt(record, TEST_SEQ, &[], &mut out)
             .unwrap()
             .payload
             .to_vec()

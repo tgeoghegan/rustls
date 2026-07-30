@@ -10,6 +10,7 @@ use subtle::ConstantTimeEq;
 use super::config::{ClientConfig, ClientSessionKey};
 use super::hs::ClientState;
 use super::{ClientAuthDetails, ServerCertDetails, Tls12Session};
+use crate::ConnectionTrafficSecrets;
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::common_state::{HandshakeKind, Output, OutputEvent, Side};
 use crate::conn::kernel::KernelState;
@@ -22,9 +23,9 @@ use crate::error::{ApiMisuse, Error, InvalidMessage, PeerIncompatible, PeerMisbe
 use crate::hash_hs::HandshakeHash;
 use crate::msgs::{
     CertificateChain, ChangeCipherSpecPayload, ClientDhParams, ClientEcdhParams,
-    ClientKeyExchangeParams, HandshakeAlignedProof, HandshakeMessagePayload, HandshakePayload,
-    Message, MessagePayload, NewSessionTicketPayload, NewSessionTicketPayloadTls13,
-    ServerKeyExchangeParams, SessionId, SizedPayload,
+    ClientKeyExchangeParams, EncrypterDecrypterPurpose, HandshakeAlignedProof,
+    HandshakeMessagePayload, HandshakePayload, Message, MessagePayload, NewSessionTicketPayload,
+    NewSessionTicketPayloadTls13, ServerKeyExchangeParams, SessionId, SizedPayload,
 };
 use crate::suites::{PartiallyExtractedSecrets, Suite};
 use crate::sync::Arc;
@@ -35,7 +36,6 @@ use crate::verify::{
     DigitallySignedStruct, FinishedMessageVerified, HandshakeSignatureValid, PeerVerified,
     ServerIdentity, SignatureVerificationInput, VerifiedIdentity,
 };
-use crate::{ConnectionTrafficSecrets, Protocol};
 
 #[expect(private_interfaces)]
 pub(crate) enum Tls12State {
@@ -479,11 +479,13 @@ fn emit_certificate(
     cert_chain: CertificateChain<'_>,
     output: &mut dyn Output<'_>,
 ) {
+    let payload = MessagePayload::handshake(
+        HandshakeMessagePayload(HandshakePayload::Certificate(cert_chain)),
+        output.outbound_handshake_seq(),
+    );
     let cert = Message {
         version: EncodableVersion::Legacy(version),
-        payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Certificate(
-            cert_chain,
-        ))),
+        payload,
     };
 
     transcript.add_message(&cert);
@@ -511,9 +513,10 @@ fn emit_client_kx(
 
     let ckx = Message {
         version: EncodableVersion::Legacy(version),
-        payload: MessagePayload::handshake(HandshakeMessagePayload(
-            HandshakePayload::ClientKeyExchange(pubkey),
-        )),
+        payload: MessagePayload::handshake(
+            HandshakeMessagePayload(HandshakePayload::ClientKeyExchange(pubkey)),
+            output.outbound_handshake_seq(),
+        ),
     };
 
     transcript.add_message(&ckx);
@@ -536,9 +539,10 @@ fn emit_certverify(
 
     let m = Message {
         version: EncodableVersion::Legacy(version),
-        payload: MessagePayload::handshake(HandshakeMessagePayload(
-            HandshakePayload::CertificateVerify(body),
-        )),
+        payload: MessagePayload::handshake(
+            HandshakeMessagePayload(HandshakePayload::CertificateVerify(body)),
+            output.outbound_handshake_seq(),
+        ),
     };
 
     transcript.add_message(&m);
@@ -569,9 +573,10 @@ fn emit_finished(
 
     let f = Message {
         version: EncodableVersion::Legacy(version),
-        payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Finished(
-            verify_data_payload,
-        ))),
+        payload: MessagePayload::handshake(
+            HandshakeMessagePayload(HandshakePayload::Finished(verify_data_payload)),
+            output.outbound_handshake_seq(),
+        ),
     };
 
     transcript.add_message(&f);
@@ -895,6 +900,7 @@ impl ExpectServerDone {
                 .suite()
                 .common
                 .confidentiality_limit,
+            EncrypterDecrypterPurpose::ApplicationData,
         );
 
         // 5.
@@ -1023,7 +1029,12 @@ impl ExpectCcs {
         output
             .receive()
             .decrypt_state
-            .set_record_decrypter(self.pending_decrypter, &proof);
+            .set_record_decrypter(
+                self.pending_decrypter,
+                &proof,
+                EncrypterDecrypterPurpose::ApplicationData,
+                protocol_version(&input.message),
+            );
 
         Ok(Box::new(ExpectFinished {
             hs: self.hs,
@@ -1147,6 +1158,7 @@ impl ExpectFinished {
                     .suite()
                     .common
                     .confidentiality_limit,
+                EncrypterDecrypterPurpose::ApplicationData,
             );
             emit_finished(
                 output_version,

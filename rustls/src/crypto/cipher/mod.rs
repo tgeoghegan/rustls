@@ -10,10 +10,14 @@ use crate::error::{ApiMisuse, Error};
 use crate::msgs::{put_u16, put_u64};
 use crate::suites::ConnectionTrafficSecrets;
 
+mod antireplay;
+pub use antireplay::AntiReplay;
+
 mod messages;
 pub(crate) use messages::encode_record_header;
 pub use messages::{
-    EncodableVersion, EncryptBuffer, InboundOpaque, OutboundPlain, Payload, Record, RecordError,
+    EncodableVersion, EncodingContext, EncryptBuffer, InboundOpaque, OutboundPlain, Payload,
+    Record, RecordError,
 };
 
 mod record_layer;
@@ -175,6 +179,7 @@ pub trait RecordEncrypter: Send + Sync {
         &mut self,
         record: Record<OutboundPlain<'_>>,
         seq: u64,
+        header: &'a [u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error>;
 
@@ -186,6 +191,13 @@ pub trait RecordEncrypter: Send + Sync {
     /// payload to [`Self::encrypt()`] in chunks of length `F - A`.  Each `encrypt()`
     /// is then free to pad or otherwise transform the length at its option.
     fn encrypted_payload_len(&self, payload_len: usize) -> usize;
+
+    /// The protocol version that this message encrypter implements.
+    ///
+    /// This is a hack to make rustls-test, which does not use the record_layer module, work, since
+    /// it does odd things like send a TLS 1.3 ServerHello after a TLS 1.2 handshake has been
+    /// performed. This should go away before appearing in any PR.
+    fn protocol_version(&self) -> ProtocolVersion;
 }
 
 /// A write or read IV.

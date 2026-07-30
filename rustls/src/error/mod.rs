@@ -14,7 +14,7 @@ use webpki::ExtendedKeyUsage;
 use crate::common_state::maybe_send_fatal_alert;
 use crate::conn::SendPath;
 use crate::crypto::kx::KeyExchangeAlgorithm;
-use crate::crypto::{CipherSuite, GetRandomFailed, InconsistentKeys};
+use crate::crypto::{AntiReplay, CipherSuite, GetRandomFailed, InconsistentKeys};
 use crate::enums::{ContentType, HandshakeType};
 use crate::msgs::{Codec, EchConfigPayload};
 
@@ -127,6 +127,12 @@ pub enum Error {
     ///
     /// See [`RejectedEch::can_retry()`] and [`crate::client::EchConfig::for_retry()`].
     RejectedEch(RejectedEch),
+
+    /// The endpoint received a replayed DTLS record ([1], [2]).
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
+    /// [2]: https://datatracker.ietf.org/doc/html/rfc9147#section-4.5.1
+    DtlsRecordAntiReplay(AntiReplay),
 
     /// Errors of this variant should never be produced by the library.
     ///
@@ -245,6 +251,7 @@ impl fmt::Display for Error {
                 f,
                 "unreachable condition: {err} (please file a bug in rustls)"
             ),
+            Self::DtlsRecordAntiReplay(err) => write!(f, "DTLS record replayed: {err:?}"),
             Self::ApiMisuse(why) => write!(f, "API misuse: {why:?}"),
             Self::Other(err) => write!(f, "other error: {err}"),
         }
@@ -1134,6 +1141,10 @@ pub enum InvalidMessage {
     UnknownCertificateExtension,
     /// A peer sent an empty TLS1.3 `certificate_authorities` extension
     IllegalEmptyCertificateAuthoritiesExtension,
+    /// Invalid unified header in a DTLS 1.3 record
+    InvalidDtls13UnifiedHeader,
+    /// Message is from wrong epoch in DTLS
+    WrongEpoch,
 }
 
 impl From<InvalidMessage> for AlertDescription {
@@ -1310,9 +1321,11 @@ pub enum PeerIncompatible {
     ServerTlsVersionIsDisabledByOurConfig,
     SignatureAlgorithmsExtensionRequired,
     SupportedVersionsExtensionRequired,
+    TcpOrQuicRequiredForTls,
     Tls12NotOffered,
     Tls12NotOfferedOrEnabled,
     Tls13RequiredForQuic,
+    UdpRequiredForDtls,
     UncompressedEcPointsRequired,
     UnknownCertificateType(u8),
     UnsolicitedCertificateTypeExtension,

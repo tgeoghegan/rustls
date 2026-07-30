@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use super::config::ServerConfig;
-use super::hs::{HandshakeHashOrBuffer, ServerState};
+use super::hs::ServerState;
 use super::{CommonServerSessionValue, ServerSessionKey, ServerSessionValue};
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::common_state::{Event, HandshakeFlightTls13, HandshakeKind, Output, OutputEvent, Side};
@@ -25,8 +25,9 @@ use crate::error::{ApiMisuse, Error, InvalidMessage, PeerIncompatible, PeerMisbe
 use crate::hash_hs::HandshakeHash;
 use crate::msgs::{
     CERTIFICATE_MAX_SIZE_LIMIT, CertificatePayloadTls13, Codec, HandshakeMessagePayload,
-    HandshakePayload, KeyUpdateRequest, Message, MessagePayload, NewSessionTicketPayloadTls13,
-    PresharedKeyIdentity, Reader, ServerTicketRequestHint, SizedPayload,
+    HandshakePayload, HandshakeSequenceNumber, KeyUpdateRequest, Message, MessagePayload,
+    NewSessionTicketPayloadTls13, PresharedKeyIdentity, Reader, ServerTicketRequestHint,
+    SizedPayload,
 };
 use crate::server::hs::{ExpectClientHello, VerifyClientIdentity, VerifyClientIdentityInternal};
 use crate::suites::PartiallyExtractedSecrets;
@@ -86,13 +87,16 @@ mod client_hello {
     use crate::msgs::{
         CertificatePayloadTls13, CertificateRequestExtensions, CertificateRequestPayloadTls13,
         ChangeCipherSpecPayload, ClientHelloPayload, Compression, HandshakeAlignedProof,
-        HelloRetryRequest, HelloRetryRequestExtensions, KeyShareEntry, Random, ServerExtensions,
-        ServerExtensionsInput, ServerHelloPayload, SessionId, SizedPayload,
+        HandshakeSequenceNumber, HelloRetryRequest, HelloRetryRequestExtensions, KeyShareEntry,
+        Random, ServerExtensions, ServerExtensionsInput, ServerHelloPayload, SessionId,
+        SizedPayload,
     };
     use crate::quic;
     use crate::sealed::Sealed;
     use crate::server::Tls13ServerSessionValue;
-    use crate::server::hs::{ClientHelloInput, ExpectClientHello, ServerHandler, Tls13Extensions};
+    use crate::server::hs::{
+        ClientHelloInput, ExpectClientHello, HandshakeHashOrBuffer, ServerHandler, Tls13Extensions,
+    };
     use crate::tls13::Tls13ProtocolSuite;
     use crate::tls13::key_schedule::{
         KeyScheduleEarlyServer, KeyScheduleHandshake, KeySchedulePreHandshake,
@@ -192,13 +196,13 @@ mod client_hello {
 
                 emit_hello_retry_request(
                     &mut transcript,
-                    ProtocolVersion::TLSv1_3,
+                    version,
                     suite,
                     input.client_hello.session_id,
                     output,
                     kx_group.name(),
                 );
-                if !st.protocol.is_quic() {
+                if !st.protocol.is_quic() && !st.protocol.is_dtls() {
                     emit_fake_ccs(output);
                 }
 
@@ -224,6 +228,7 @@ mod client_hello {
 
             let suite = match st.protocol {
                 Protocol::Tcp => Tls13ProtocolSuite::Tcp(suite),
+                Protocol::Udp => Tls13ProtocolSuite::Udp(suite),
                 Protocol::Quic(_) => Tls13ProtocolSuite::Quic(quic::Suite {
                     inner: suite,
                     quic: suite
@@ -279,7 +284,7 @@ mod client_hello {
                 &input.proof,
                 &st.config,
             )?;
-            if !st.done_retry && !st.protocol.is_quic() {
+            if !st.done_retry && !st.protocol.is_quic() && !st.protocol.is_dtls() {
                 emit_fake_ccs(output);
             }
 
@@ -293,7 +298,7 @@ mod client_hello {
             ));
 
             let mut ocsp_response = signer.ocsp.as_deref();
-            let mut flight = HandshakeFlightTls13::new(&mut transcript);
+            let mut flight = HandshakeFlightTls13::new(&mut transcript, st.protocol.is_dtls());
             let (
                 Tls13Extensions {
                     certificate_types,
@@ -315,7 +320,11 @@ mod client_hello {
             )?;
 
             let doing_client_auth = if full_handshake {
-                let client_auth = emit_certificate_req_tls13(&mut flight, &st.config)?;
+                let client_auth = emit_certificate_req_tls13(
+                    &mut flight,
+                    &st.config,
+                    output.outbound_handshake_seq(),
+                )?;
 
                 if let Some(compressor) = cert_compressor {
                     emit_compressed_certificate_tls13(
@@ -324,6 +333,7 @@ mod client_hello {
                         &signer,
                         ocsp_response,
                         compressor,
+                        output.outbound_handshake_seq(),
                     );
                 } else {
                     emit_certificate_tls13(
@@ -332,9 +342,14 @@ mod client_hello {
                             signer.identity.as_certificates(),
                             ocsp_response,
                         ),
+                        output.outbound_handshake_seq(),
                     );
                 }
-                emit_certificate_verify_tls13(&mut flight, signer.signer)?;
+                emit_certificate_verify_tls13(
+                    &mut flight,
+                    signer.signer,
+                    output.outbound_handshake_seq(),
+                )?;
                 client_auth
             } else {
                 false
@@ -521,7 +536,9 @@ mod client_hello {
         binder: &[u8],
     ) -> bool {
         let binder_plaintext = match &client_hello.payload {
-            MessagePayload::Handshake { parsed, encoded } => &encoded.bytes()[..encoded
+            MessagePayload::Handshake {
+                parsed, encoded, ..
+            } => &encoded.bytes()[..encoded
                 .bytes()
                 .len()
                 .saturating_sub(parsed.total_binder_length())],
@@ -564,16 +581,17 @@ mod client_hello {
         let version = EncodableVersion::Legacy(version);
         let sh = Message {
             version,
-            payload: MessagePayload::handshake(HandshakeMessagePayload(
-                HandshakePayload::ServerHello(ServerHelloPayload {
+            payload: MessagePayload::handshake(
+                HandshakeMessagePayload(HandshakePayload::ServerHello(ServerHelloPayload {
                     legacy_version: version.encode(),
                     random: Random::from(randoms.server),
                     session_id: *session_id,
                     cipher_suite: suite.suite().common.suite,
                     compression_method: Compression::Null,
                     extensions,
-                }),
-            )),
+                })),
+                output.outbound_handshake_seq(),
+            ),
         };
 
         let client_hello_hash = transcript.hash_given(&[]);
@@ -638,22 +656,24 @@ mod client_hello {
         output: &mut dyn Output<'_>,
         group: NamedGroup,
     ) {
+        let version = EncodableVersion::Legacy(version);
         let req = HelloRetryRequest {
-            legacy_version: ProtocolVersion::TLSv1_2,
+            legacy_version: version.encode(),
             session_id,
             cipher_suite: suite.common.suite,
             extensions: HelloRetryRequestExtensions {
                 key_share: Some(group),
-                supported_versions: Some(version),
+                supported_versions: Some(version.version()),
                 ..Default::default()
             },
         };
 
         let m = Message {
-            version: EncodableVersion::Legacy(version),
-            payload: MessagePayload::handshake(HandshakeMessagePayload(
-                HandshakePayload::HelloRetryRequest(req),
-            )),
+            version,
+            payload: MessagePayload::handshake(
+                HandshakeMessagePayload(HandshakePayload::HelloRetryRequest(req)),
+                output.outbound_handshake_seq(),
+            ),
         };
 
         trace!("Requesting retry {m:?}");
@@ -762,13 +782,14 @@ mod client_hello {
         let ee = HandshakeMessagePayload(HandshakePayload::EncryptedExtensions(extensions));
 
         trace!("sending encrypted extensions {ee:?}");
-        flight.add(ee);
+        flight.add(ee, output.outbound_handshake_seq());
         Ok((out, early_data))
     }
 
     fn emit_certificate_req_tls13(
         flight: &mut HandshakeFlightTls13<'_>,
         config: &ServerConfig,
+        seq: HandshakeSequenceNumber,
     ) -> Result<bool, Error> {
         if !config.verifier.offer_client_auth() {
             return Ok(false);
@@ -805,17 +826,18 @@ mod client_hello {
         let creq = HandshakeMessagePayload(HandshakePayload::CertificateRequestTls13(cr));
 
         trace!("Sending CertificateRequest {creq:?}");
-        flight.add(creq);
+        flight.add(creq, seq);
         Ok(true)
     }
 
     fn emit_certificate_tls13(
         flight: &mut HandshakeFlightTls13<'_>,
         payload: CertificatePayloadTls13<'_>,
+        seq: HandshakeSequenceNumber,
     ) {
         let cert = HandshakeMessagePayload(HandshakePayload::CertificateTls13(payload));
         trace!("sending certificate {cert:?}");
-        flight.add(cert);
+        flight.add(cert, seq);
     }
 
     fn emit_compressed_certificate_tls13(
@@ -824,6 +846,7 @@ mod client_hello {
         signer: &SelectedCredential,
         ocsp_response: Option<&[u8]>,
         cert_compressor: &'static dyn CertCompressor,
+        seq: HandshakeSequenceNumber,
     ) {
         let payload =
             CertificatePayloadTls13::new(signer.identity.as_certificates(), ocsp_response);
@@ -831,7 +854,7 @@ mod client_hello {
             .cert_compression_cache
             .compression_for(cert_compressor, &payload)
         else {
-            return emit_certificate_tls13(flight, payload);
+            return emit_certificate_tls13(flight, payload, seq);
         };
 
         let c = HandshakeMessagePayload(HandshakePayload::CompressedCertificate(
@@ -839,12 +862,13 @@ mod client_hello {
         ));
 
         trace!("sending compressed certificate {c:?}");
-        flight.add(c);
+        flight.add(c, seq);
     }
 
     fn emit_certificate_verify_tls13(
         flight: &mut HandshakeFlightTls13<'_>,
         signer: Box<dyn Signer>,
+        seq: HandshakeSequenceNumber,
     ) -> Result<(), Error> {
         let message = construct_server_verify_message(&flight.transcript.current_hash());
         let scheme = signer.scheme();
@@ -855,7 +879,7 @@ mod client_hello {
         let cv = HandshakeMessagePayload(HandshakePayload::CertificateVerify(cv));
 
         trace!("sending certificate-verify {cv:?}");
-        flight.add(cv);
+        flight.add(cv, seq);
         Ok(())
     }
 
@@ -874,7 +898,7 @@ mod client_hello {
         let fin = HandshakeMessagePayload(HandshakePayload::Finished(verify_data_payload));
 
         trace!("sending finished {fin:?}");
-        flight.add(fin);
+        flight.add(fin, output.outbound_handshake_seq());
         let hash_at_server_fin = flight.transcript.current_hash();
         flight.finish(output);
 
@@ -1398,6 +1422,7 @@ impl ExpectFinished {
         resumption_data: &[u8],
         resumption: &KeyScheduleResumption,
         config: &ServerConfig,
+        seq: HandshakeSequenceNumber,
     ) -> Result<(), Error> {
         let secure_random = config.provider.secure_random;
         let nonce = rand::random_array(secure_random)?;
@@ -1455,7 +1480,7 @@ impl ExpectFinished {
             "sending new ticket {t:?} (stateless: {})",
             ticketer.is_some()
         );
-        flight.add(t);
+        flight.add(t, seq);
 
         Ok(())
     }
@@ -1494,7 +1519,14 @@ impl ExpectFinished {
         let (key_schedule_traffic, exporter, resumption) =
             key_schedule_before_finished.into_traffic(self.hs.transcript.current_hash());
 
-        let mut flight = HandshakeFlightTls13::new(&mut self.hs.transcript);
+        let mut flight = HandshakeFlightTls13::new(
+            &mut self.hs.transcript,
+            input
+                .message
+                .version
+                .version()
+                .is_datagram_tls(),
+        );
         for _ in 0..self.hs.send_tickets {
             Self::emit_ticket(
                 &mut flight,
@@ -1505,6 +1537,7 @@ impl ExpectFinished {
                 &self.hs.resumption_data,
                 &resumption,
                 &self.hs.config,
+                output.outbound_handshake_seq(),
             )?;
         }
         flight.finish(output);

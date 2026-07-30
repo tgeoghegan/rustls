@@ -40,11 +40,16 @@ impl ServerConnection {
     /// Make a new ServerConnection.  `config` controls how
     /// we behave in the TLS protocol.
     pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
+        Self::new_with_protocol(config, Protocol::Tcp)
+    }
+
+    /// Make a new ServerConnection over the specified transport protocol.
+    pub fn new_with_protocol(config: Arc<ServerConfig>, protocol: Protocol) -> Result<Self, Error> {
         Ok(Self {
             inner: ConnectionCommon::for_server(
                 config,
                 ServerExtensionsInput::default(),
-                Protocol::Tcp,
+                protocol,
             )?,
         })
     }
@@ -583,7 +588,7 @@ impl ConnectionCommon<ServerSide> {
         extra_exts: ServerExtensionsInput,
         protocol: Protocol,
     ) -> Result<Self, Error> {
-        let mut common = CommonState::new(Side::Server, config.fips());
+        let mut common = CommonState::new(Side::Server, config.fips(), protocol);
         common
             .send
             .set_max_fragment_size(config.max_fragment_size)?;
@@ -604,7 +609,7 @@ impl ConnectionCommon<ServerSide> {
         Self::new(
             ReadClientHello::new(protocol).into(),
             ServerConnectionData::default(),
-            CommonState::new(Side::Server, FipsStatus::Unvalidated),
+            CommonState::new(Side::Server, FipsStatus::Unvalidated, protocol),
         )
     }
 }

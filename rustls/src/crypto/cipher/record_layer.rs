@@ -2,27 +2,38 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cmp::min;
 
+use crate::common_state::Side;
+use crate::crypto::cipher::antireplay::ReplayWindow;
 use crate::crypto::cipher::{
-    InboundOpaque, OutboundPlain, Record, RecordDecrypter, RecordEncrypter, encode_record_header,
+    EncodingContext, InboundOpaque, OutboundPlain, Record, RecordDecrypter, RecordEncrypter,
+    encode_record_header,
 };
+use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::Error;
-use crate::msgs::{HEADER_SIZE, HandshakeAlignedProof};
+use crate::msgs::{EncrypterDecrypterPurpose, Epoch, HandshakeAlignedProof};
 use crate::tracing::trace;
 
 /// Record layer that tracks encryption keys.
 pub(crate) struct EncryptionState {
     record_encrypter: Option<Box<dyn RecordEncrypter>>,
     write_seq_max: u64,
+    /// Encryption epoch.
+    ///
+    /// This value is tracked for all protocol versions, but only used for DTLS.
+    epoch: Epoch,
     write_seq: u64,
+    side: Side,
 }
 
 impl EncryptionState {
     /// Create new record layer with no keys.
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(side: Side) -> Self {
         Self {
             record_encrypter: None,
             write_seq_max: 0,
+            epoch: Epoch::Unencrypted,
             write_seq: 0,
+            side,
         }
     }
 
@@ -40,7 +51,11 @@ impl EncryptionState {
         // Contents are fully overwritten below, so zeroing is pure cost.
         // A fresh buffer gets pre-zeroed memory straight from the allocator
         // while a reused one zeroes only what `resize` grows.
-        let needed = HEADER_SIZE + self.encrypted_len(plain.payload.len());
+        let needed = plain
+            .version
+            .version()
+            .encrypted_header_len()
+            + self.encrypted_len(plain.payload.len());
         let start = output.len();
         output.resize(start + needed, 0);
         let written = self.encrypt_outgoing_into(plain, &mut output[start..]);
@@ -66,15 +81,41 @@ impl EncryptionState {
         out: &mut [u8],
     ) -> usize {
         assert!(self.pre_encrypt_action(0) != Some(PreEncryptAction::Refuse));
+        let header_size = plain
+            .version
+            .version()
+            .encrypted_header_len();
         let encrypter = self.record_encrypter.as_mut().unwrap();
 
-        let seq = self.write_seq;
+        let seq = self
+            .epoch
+            .per_record_additional_data(self.write_seq, plain.version.version());
         self.write_seq += 1;
 
+        let (header, payload) = out.split_at_mut(header_size);
+
+        encode_record_header(
+            match plain.version.version() {
+                ProtocolVersion::TLSv1_2 | ProtocolVersion::DTLSv1_2 => plain.typ,
+                ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3 => {
+                    ContentType::ApplicationData
+                }
+                v => panic!("unsupported protocol version {v:?}"),
+            },
+            plain.version,
+            payload.len() as u16,
+            EncodingContext {
+                payload_is_encrypted: true,
+                epoch: self.epoch,
+                record_seq: seq,
+            },
+            header,
+        );
+
         #[cfg(debug_assertions)]
-        let (out_ptr, out_len) = (out.as_ptr(), out.len());
+        let (out_ptr, out_len) = (payload.as_ptr(), payload.len());
         let encrypted = encrypter
-            .encrypt(plain, seq, &mut out[HEADER_SIZE..])
+            .encrypt(plain, seq, header, payload)
             .unwrap();
 
         #[cfg(debug_assertions)]
@@ -83,17 +124,13 @@ impl EncryptionState {
             // the written prefix of the passed-in buffer. Try to catch misbehaving
             // implementations in debug mode. In release builds a violation would corrupt
             // the sent stream.
-            debug_assert_eq!(
-                encrypted.payload.as_ptr(),
-                out_ptr.wrapping_add(HEADER_SIZE)
-            );
-            debug_assert!(encrypted.payload.len() <= out_len - HEADER_SIZE);
+            debug_assert_eq!(encrypted.payload.as_ptr(), out_ptr);
+            debug_assert!(encrypted.payload.len() <= out_len);
         }
 
-        let (typ, version, len) = (encrypted.typ, encrypted.version, encrypted.payload.len());
-        debug_assert!(len <= usize::from(u16::MAX));
-        out[..HEADER_SIZE].copy_from_slice(&encode_record_header(typ, version, len as u16));
-        HEADER_SIZE + len
+        debug_assert!(encrypted.payload.len() <= usize::from(u16::MAX));
+
+        header_size + encrypted.payload.len()
     }
 
     /// Set and start using the given `RecordEncrypter` for future outgoing
@@ -102,11 +139,15 @@ impl EncryptionState {
         &mut self,
         cipher: Box<dyn RecordEncrypter>,
         max_records: u64,
+        purpose: EncrypterDecrypterPurpose,
+        version: ProtocolVersion,
     ) {
         *self = Self {
             record_encrypter: Some(cipher),
             write_seq_max: min(SEQ_SOFT_LIMIT, max_records),
+            epoch: self.epoch.increment(purpose, version),
             write_seq: 0,
+            side: self.side,
         };
     }
 
@@ -141,11 +182,20 @@ impl EncryptionState {
     pub(crate) fn write_seq(&self) -> u64 {
         self.write_seq
     }
+
+    /// Current epoch.
+    pub(crate) fn epoch(&self) -> Epoch {
+        self.epoch
+    }
 }
 
 /// Record layer that tracks decryption keys.
 pub(crate) struct DecryptionState {
     record_decrypter: Option<Box<dyn RecordDecrypter>>,
+    /// Encryption epoch.
+    ///
+    /// This value is tracked for all protocol versions, but only used for Datagram TLS.
+    epoch: Epoch,
     read_seq: u64,
     has_decrypted: bool,
 
@@ -153,16 +203,26 @@ pub(crate) struct DecryptionState {
     // should be swallowed by the caller.  This struct tracks the amount
     // of record size this is allowed for.
     trial_decryption_len: Option<usize>,
+
+    side: Side,
+
+    /// Sliding window to detect anti-replay.
+    ///
+    /// Only used for Datagram TLS.
+    anti_replay: ReplayWindow,
 }
 
 impl DecryptionState {
     /// Create new record layer with no keys.
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(side: Side) -> Self {
         Self {
             record_decrypter: None,
+            epoch: Epoch::Unencrypted,
             read_seq: 0,
             has_decrypted: false,
             trial_decryption_len: None,
+            side,
+            anti_replay: ReplayWindow::default(),
         }
     }
 
@@ -174,6 +234,7 @@ impl DecryptionState {
     pub(crate) fn decrypt_incoming<'a>(
         &mut self,
         encr: Record<InboundOpaque<'a>>,
+        record_seq: u64,
     ) -> Result<Option<Decrypted<'a>>, Error> {
         let Some(decrypter) = &mut self.record_decrypter else {
             return Ok(Some(Decrypted {
@@ -193,7 +254,10 @@ impl DecryptionState {
         let want_close_before_decrypt = self.read_seq == SEQ_SOFT_LIMIT;
 
         let encrypted_len = encr.payload.len();
-        match decrypter.decrypt(encr, self.read_seq) {
+        let seq = self
+            .epoch
+            .per_record_additional_data(record_seq, encr.version.version());
+        match decrypter.decrypt(encr, seq) {
             Ok(plaintext) => {
                 self.read_seq += 1;
                 if !self.has_decrypted {
@@ -218,10 +282,14 @@ impl DecryptionState {
         &mut self,
         cipher: Box<dyn RecordDecrypter>,
         _proof: &HandshakeAlignedProof,
+        purpose: EncrypterDecrypterPurpose,
+        version: ProtocolVersion,
     ) {
         self.record_decrypter = Some(cipher);
         self.read_seq = 0;
+        self.epoch = self.epoch.increment(purpose, version);
         self.trial_decryption_len = None;
+        self.anti_replay = ReplayWindow::default();
     }
 
     /// Set and start using the given `RecordDecrypter` for future incoming
@@ -232,10 +300,14 @@ impl DecryptionState {
         cipher: Box<dyn RecordDecrypter>,
         max_length: usize,
         _proof: &HandshakeAlignedProof,
+        purpose: EncrypterDecrypterPurpose,
+        version: ProtocolVersion,
     ) {
         self.record_decrypter = Some(cipher);
         self.read_seq = 0;
+        self.epoch = self.epoch.increment(purpose, version);
         self.trial_decryption_len = Some(max_length);
+        self.anti_replay = ReplayWindow::default();
     }
 
     pub(crate) fn finish_trial_decryption(&mut self) {
@@ -248,8 +320,17 @@ impl DecryptionState {
         self.has_decrypted
     }
 
+    pub(crate) fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
     pub(crate) fn read_seq(&self) -> u64 {
         self.read_seq
+    }
+
+    /// Anti-replay state.
+    pub(crate) fn anti_replay(&mut self) -> &mut ReplayWindow {
+        &mut self.anti_replay
     }
 
     fn doing_trial_decryption(&mut self, requested: usize) -> bool {
@@ -318,7 +399,7 @@ mod tests {
         }
 
         // A record layer starts out invalid, having never decrypted.
-        let mut record_layer = DecryptionState::new();
+        let mut record_layer = DecryptionState::new(Side::Server);
         assert!(record_layer.record_decrypter.is_none());
         assert_eq!(record_layer.read_seq, 0);
         assert!(!record_layer.has_decrypted());
@@ -326,8 +407,12 @@ mod tests {
         // Initializing the record layer should update the decrypt state, but shouldn't affect whether it
         // has decrypted.
         let deframer = Deframer::default();
-        record_layer
-            .set_record_decrypter(Box::new(PassThroughDecrypter), &deframer.aligned().unwrap());
+        record_layer.set_record_decrypter(
+            Box::new(PassThroughDecrypter),
+            &deframer.aligned().unwrap(),
+            EncrypterDecrypterPurpose::HandshakeMessages,
+            ProtocolVersion::TLSv1_3,
+        );
         assert!(record_layer.record_decrypter.is_some());
         assert_eq!(record_layer.read_seq, 0);
         assert!(!record_layer.has_decrypted());
@@ -335,19 +420,26 @@ mod tests {
         // Decrypting a record should update the read_seq and track that we have now performed
         // a decryption.
         record_layer
-            .decrypt_incoming(Record::new(
-                ContentType::Handshake,
-                EncodableVersion::Legacy(ProtocolVersion::TLSv1_2),
-                InboundOpaque(&mut [0xC0, 0xFF, 0xEE]),
-            ))
+            .decrypt_incoming(
+                Record::new(
+                    ContentType::Handshake,
+                    EncodableVersion::Legacy(ProtocolVersion::TLSv1_3),
+                    InboundOpaque(&[], &mut [0xC0, 0xFF, 0xEE]),
+                ),
+                record_layer.read_seq,
+            )
             .unwrap();
         assert_eq!(record_layer.read_seq, 1);
         assert!(record_layer.has_decrypted());
 
         // Resetting the record layer decrypter (as if a key update occurred) should reset
         // the read_seq number, but not our knowledge of whether we have decrypted previously.
-        record_layer
-            .set_record_decrypter(Box::new(PassThroughDecrypter), &deframer.aligned().unwrap());
+        record_layer.set_record_decrypter(
+            Box::new(PassThroughDecrypter),
+            &deframer.aligned().unwrap(),
+            EncrypterDecrypterPurpose::ApplicationData,
+            ProtocolVersion::TLSv1_3,
+        );
         assert_eq!(record_layer.read_seq, 0);
         assert!(record_layer.has_decrypted());
     }
