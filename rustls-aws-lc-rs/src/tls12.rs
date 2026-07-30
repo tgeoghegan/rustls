@@ -340,6 +340,7 @@ impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for GcmRecordDecr
 impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for GcmRecordEncrypter {
     fn encrypt(
         &mut self,
+<<<<<<< HEAD
         nonce: Nonce,
         aad: [u8; AAD_SIZE],
         payload: &mut EncryptBuffer<'_>,
@@ -353,6 +354,20 @@ impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for GcmRecordEncr
             )
             .map_err(|_| Error::EncryptError)?;
         payload.extend_from_slice(tag.as_ref());
+||||||| parent of fe87d8cf (WIP DTLS implementation)
+        msg: EncodedMessage<OutboundPlain<'_>>,
+        seq: u64,
+        out: &'a mut [u8],
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+=======
+        msg: EncodedMessage<OutboundPlain<'_>>,
+        seq: u64,
+        _header: &[u8],
+        out: &'a mut [u8],
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+>>>>>>> fe87d8cf (WIP DTLS implementation)
 
         Ok(())
     }
@@ -386,6 +401,10 @@ impl<const AAD_SIZE: usize> ContiguousRecordEncryptionProvider<AAD_SIZE> for Gcm
             .map_err(|_| Error::EncryptError)?;
 
         Ok(&*record)
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
     }
 }
 
@@ -432,6 +451,7 @@ impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for ChaCha20Poly1
 impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for ChaCha20Poly1305RecordEncrypter {
     fn encrypt(
         &mut self,
+<<<<<<< HEAD
         nonce: Nonce,
         aad: [u8; AAD_SIZE],
         payload: &mut EncryptBuffer<'_>,
@@ -444,6 +464,20 @@ impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for ChaCha20Poly1
                 payload.as_mut(),
             )
             .map_err(|_| Error::EncryptError)?;
+||||||| parent of fe87d8cf (WIP DTLS implementation)
+        msg: EncodedMessage<OutboundPlain<'_>>,
+        seq: u64,
+        out: &'a mut [u8],
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+=======
+        msg: EncodedMessage<OutboundPlain<'_>>,
+        seq: u64,
+        _header: &[u8],
+        out: &'a mut [u8],
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+>>>>>>> fe87d8cf (WIP DTLS implementation)
 
         payload.extend_from_slice(tag.as_ref());
 
@@ -481,6 +515,10 @@ impl<const AAD_SIZE: usize> ContiguousRecordEncryptionProvider<AAD_SIZE>
             .map_err(|_| Error::EncryptError)?;
 
         Ok(&*record)
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
     }
 }
 
@@ -604,7 +642,7 @@ mod tests {
                 let record = Record::new(
                     ContentType::ApplicationData,
                     EncodableVersion::Legacy(ProtocolVersion::TLSv1_2),
-                    InboundOpaque(&mut sealed),
+                    InboundOpaque(&mut [], &mut sealed),
                 );
                 let shape = suite.aead_alg.key_block_shape();
                 let mut decrypter = suite
@@ -632,7 +670,13 @@ mod tests {
         );
         let mut out = vec![fill; encrypter.encrypted_payload_len(record.payload.len())];
         encrypter
+<<<<<<< HEAD
             .encrypt(record, TEST_SEQ, &mut out)
+||||||| parent of fe87d8cf (WIP DTLS implementation)
+            .encrypt(msg, TEST_SEQ, &mut out)
+=======
+            .encrypt(msg, TEST_SEQ, &[], &mut out)
+>>>>>>> fe87d8cf (WIP DTLS implementation)
             .unwrap()
             .payload
             .to_vec()

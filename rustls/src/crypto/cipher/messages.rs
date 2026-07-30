@@ -6,7 +6,10 @@ use crate::Protocol;
 use crate::crypto::cipher::EncryptionState;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{ApiMisuse, Error, InvalidMessage, PeerMisbehaved};
-use crate::msgs::{Codec, HEADER_SIZE, MAX_FRAGMENT_LEN, Reader, hex, read_record_header};
+use crate::msgs::{
+    Codec, Epoch, FullRecordSequenceNumber, HEADER_SIZE, MAX_FRAGMENT_LEN, Reader, RecordHeader,
+    UnifiedHeader, hex, read_record_header,
+};
 
 /// A TLS record with encoded (but not necessarily encrypted) payload.
 #[expect(clippy::exhaustive_structs)]
@@ -37,7 +40,9 @@ impl<'a> Record<Payload<'a>> {
     /// `RecordError` allows callers to distinguish between valid prefixes (might
     /// become valid if we read more data) and invalid data.
     pub(crate) fn read(r: &mut Reader<'a>) -> Result<Self, RecordError> {
-        let (typ, version, len) = read_record_header(r)?;
+        let RecordHeader {
+            typ, version, len, ..
+        } = read_record_header(r)?;
 
         let content = r
             .take(len as usize)
@@ -55,7 +60,7 @@ impl<'a> Record<Payload<'a>> {
         Record {
             typ: self.typ,
             version: self.version,
-            payload: self.payload.bytes().into(),
+            payload: OutboundPlain::Single(self.payload.bytes()),
         }
     }
 
@@ -105,7 +110,15 @@ impl<'a> Record<InboundOpaque<'a>> {
             return Err(Error::PeerSentOversizedRecord);
         }
 
-        self.version = EncodableVersion::Legacy(ProtocolVersion::TLSv1_3);
+        // Rewrite the version in the message to reflect (D)TLS 1.3 so that we can later decide how
+        // to parse messages inside the record. e.g., whether a NewSessionTicket handshake message
+        // is in the TLS 1.2 or 1.3 format.
+        let v = match self.version {
+            EncodableVersion::InitialClientHello(Protocol::Udp) => ProtocolVersion::DTLSv1_3,
+            EncodableVersion::Legacy(v) if v.is_datagram_tls() => ProtocolVersion::DTLSv1_3,
+            _ => ProtocolVersion::TLSv1_3,
+        };
+        self.version = EncodableVersion::Legacy(v);
         Ok(self.into_plain_record())
     }
 
@@ -140,20 +153,32 @@ impl<'a> Record<InboundOpaque<'a>> {
 }
 
 impl Record<OutboundPlain<'_>> {
-    /// Encode this record into its unencrypted wire representation, including
-    /// its record header.
-    pub(crate) fn to_unencrypted_bytes(&self) -> Vec<u8> {
+    /// The message's unencrypted wire representation, including the record header.
+    pub(crate) fn to_unencrypted_bytes(&self, cx: EncodingContext) -> Vec<u8> {
         let len = self.payload.len();
         debug_assert!(len <= usize::from(u16::MAX));
-        let mut buf = Vec::with_capacity(HEADER_SIZE + len);
-        self.encode_unencrypted(&mut buf);
+        let mut buf = Vec::with_capacity(cx.header_len(self.version) + len);
+        self.encode_unencrypted(&mut buf, cx);
         buf
     }
 
-    pub(crate) fn encode_unencrypted(&self, buf: &mut Vec<u8>) {
+    /// Append the message's unencrypted wire representation to `buf`.
+    ///
+    /// The encoded message includes the record header. `buf` must have sufficient capacity for the
+    /// encoded message or this method panics.
+    pub(crate) fn encode_unencrypted(&self, buf: &mut Vec<u8>, cx: EncodingContext) {
         let len = self.payload.len();
         debug_assert!(len <= usize::from(u16::MAX));
-        buf.extend_from_slice(&encode_record_header(self.typ, self.version, len as u16));
+        let header_len = cx.header_len(self.version);
+        let record_start = buf.len();
+        buf.resize(buf.len() + header_len, 0);
+        encode_record_header(
+            self.typ,
+            self.version,
+            len as u16,
+            cx,
+            &mut buf[record_start..],
+        );
         self.payload.copy_to_vec(buf);
     }
 
@@ -163,17 +188,34 @@ impl Record<OutboundPlain<'_>> {
     }
 }
 
-/// Encode a TLS record header.
+/// Encode a TLS record header. Returns the encoded payload length.
 ///
 /// `typ`, `version` and `len` describe the record's payload.
 pub(crate) fn encode_record_header(
     typ: ContentType,
     version: EncodableVersion,
     len: u16,
-) -> [u8; HEADER_SIZE] {
-    let [version_hi, version_lo] = version.encode().to_array();
-    let [len_hi, len_lo] = len.to_be_bytes();
-    [typ.into(), version_hi, version_lo, len_hi, len_lo]
+    cx: EncodingContext,
+    into: &mut [u8],
+) {
+    if version.version() == ProtocolVersion::DTLSv1_3 && cx.payload_is_encrypted {
+        UnifiedHeader::new(len, cx).encode(into);
+        return;
+    }
+
+    into[0..1].copy_from_slice(&typ.to_array());
+    into[1..3].copy_from_slice(&version.encode().to_array());
+
+    let encoded_len = len.to_be_bytes();
+    if version.version().is_datagram_tls() {
+        // Encode only the low 16 bits of epoch number into plaintext record header.
+        let epoch_16 = (cx.epoch.number() & 0xffff) as u16;
+        into[3..5].copy_from_slice(&epoch_16.to_be_bytes());
+        cx.record_seq.encode(&mut into[5..11]);
+        into[11..13].copy_from_slice(&len.to_be_bytes());
+    } else {
+        into[3..5].copy_from_slice(&encoded_len);
+    }
 }
 
 /// A collection of borrowed plaintext slices.
@@ -405,13 +447,11 @@ impl<'a> EncryptBuffer<'a> {
         let provided = out.len();
         match out.get_mut(..len) {
             Some(buf) => Ok(Self { buf, used: 0 }),
-            None => {
-                Err(ApiMisuse::EncryptBufferTooSmall {
-                    required: len,
-                    provided,
-                }
-                .into())
+            None => Err(ApiMisuse::EncryptBufferTooSmall {
+                required: len,
+                provided,
             }
+            .into()),
         }
     }
 
@@ -517,33 +557,37 @@ impl fmt::Debug for Payload<'_> {
     }
 }
 
-/// A borrowed payload buffer.
+/// A borrowed buffer containing an opaque inbound TLS record.
+///
+/// This buffer contains the record header and the encrypted payload. The length of the header
+/// depends on the protocol version in use.
+#[derive(Debug)]
 #[expect(clippy::exhaustive_structs)]
-pub struct InboundOpaque<'a>(pub &'a mut [u8]);
+pub struct InboundOpaque<'a>(pub &'a mut [u8], pub &'a mut [u8]);
 
 impl<'a> InboundOpaque<'a> {
     /// Truncate the payload to `len` bytes.
     pub fn truncate(&mut self, len: usize) {
-        if len >= self.len() {
+        if len >= self.1.len() {
             return;
         }
 
-        self.0 = core::mem::take(&mut self.0)
+        self.1 = core::mem::take(&mut self.1)
             .split_at_mut(len)
             .0;
     }
 
     pub(crate) fn into_inner(self) -> &'a mut [u8] {
-        self.0
+        self.1
     }
 
     pub(crate) fn pop(&mut self) -> Option<u8> {
-        if self.is_empty() {
+        if self.1.is_empty() {
             return None;
         }
 
-        let len = self.len();
-        let last = self[len - 1];
+        let len = self.1.len();
+        let last = self.1[len - 1];
         self.truncate(len - 1);
         Some(last)
     }
@@ -553,13 +597,13 @@ impl Deref for InboundOpaque<'_> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        self.0
+        self.1
     }
 }
 
 impl DerefMut for InboundOpaque<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0
+        self.1
     }
 }
 
@@ -587,8 +631,17 @@ impl EncodableVersion {
     /// Encode the protocol version.
     pub fn encode(&self) -> ProtocolVersion {
         match self {
-            Self::Legacy(_) => ProtocolVersion::TLSv1_2,
+            // "... other than an initial ClientHello (i.e., one not
+            // generated after a HelloRetryRequest), where it MAY also be
+            // 0x0301 for compatibility purposes"
+            Self::InitialClientHello(Protocol::Udp) => ProtocolVersion::DTLSv1_0,
             Self::InitialClientHello(Protocol::Tcp | Protocol::Quic(_)) => ProtocolVersion::TLSv1_0,
+
+            // <https://datatracker.ietf.org/doc/html/rfc9846#section-5.1>:
+            // "This value MUST be set to 0x0303 for all records generated
+            //  by a TLS 1.3 implementation ..."
+            Self::Legacy(v) if v.is_datagram_tls() => ProtocolVersion::DTLSv1_2,
+            Self::Legacy(_) => ProtocolVersion::TLSv1_2,
         }
     }
 
@@ -596,7 +649,67 @@ impl EncodableVersion {
     pub fn version(&self) -> ProtocolVersion {
         match self {
             Self::Legacy(v) => *v,
+            Self::InitialClientHello(Protocol::Udp) => ProtocolVersion::DTLSv1_2,
             Self::InitialClientHello(Protocol::Tcp | Protocol::Quic(_)) => ProtocolVersion::TLSv1_2,
+        }
+    }
+
+    /// Whether the protocol in use is Datagram TLS.
+    pub fn is_datagram_tls(&self) -> bool {
+        self.version().is_datagram_tls()
+    }
+}
+
+/// Context used to encode a record.
+pub struct EncodingContext {
+    /// Whether the payload is encrypted
+    pub(crate) payload_is_encrypted: bool,
+    /// Encryption epoch.
+    ///
+    /// Ignored unless message protocol version is DTLS.
+    pub(crate) epoch: Epoch,
+    /// Record layer sequence number.
+    ///
+    /// Ignored unless message protocol version is DTLS.
+    pub(crate) record_seq: FullRecordSequenceNumber,
+}
+
+impl EncodingContext {
+    /// Create an `EncodingContext`.
+    pub fn new() -> Self {
+        Self {
+            payload_is_encrypted: false,
+            epoch: Epoch::Unencrypted,
+            record_seq: 0.into(),
+        }
+    }
+
+    /// Set epoch.
+    pub fn with_epoch(mut self, epoch: Epoch) -> Self {
+        self.epoch = epoch;
+        self
+    }
+
+    /// Set record sequence number.
+    pub fn with_record_seq(mut self, seq: FullRecordSequenceNumber) -> Self {
+        self.record_seq = seq;
+        self
+    }
+
+    /// Set payload encryption.
+    pub fn with_payload_encryption(mut self, encrypt: bool) -> Self {
+        self.payload_is_encrypted = encrypt;
+        self
+    }
+
+    /// Length of the encoded header in bytes
+    fn header_len(&self, version: EncodableVersion) -> usize {
+        if self.payload_is_encrypted {
+            version.version().encrypted_header_len()
+        } else {
+            version
+                .version()
+                .unencrypted_header_len()
         }
     }
 }
@@ -805,6 +918,26 @@ mod tests {
                 ProtocolVersion::TLSv1_0,
             ),
             (
+                EncodableVersion::InitialClientHello(Protocol::Udp),
+                ProtocolVersion::DTLSv1_0,
+            ),
+            (
+                EncodableVersion::Legacy(ProtocolVersion::TLSv1_3),
+                ProtocolVersion::TLSv1_2,
+            ),
+            (
+                EncodableVersion::Legacy(ProtocolVersion::DTLSv1_3),
+                ProtocolVersion::DTLSv1_2,
+            ),
+            (
+                EncodableVersion::Legacy(ProtocolVersion::TLSv1_2),
+                ProtocolVersion::TLSv1_2,
+            ),
+            (
+                EncodableVersion::Legacy(ProtocolVersion::DTLSv1_2),
+                ProtocolVersion::DTLSv1_2,
+            ),
+            (
                 EncodableVersion::InitialClientHello(Protocol::Quic(quic::Version::V2)),
                 ProtocolVersion::TLSv1_0,
             ),
@@ -822,7 +955,15 @@ mod tests {
                 version,
                 payload: OutboundPlain::Single(&[0, 1, 2, 3, 4]),
             };
-            let encoded = record.to_unencrypted_bytes();
+
+            let mut cx = EncodingContext::new().with_payload_encryption(false);
+            if version.is_datagram_tls() {
+                cx = cx
+                    .with_epoch(Epoch::ApplicationData(17))
+                    .with_record_seq(156.into());
+            }
+
+            let encoded = record.clone().to_unencrypted_bytes(cx);
             let decoded = Record::<Payload<'_>>::read(&mut Reader::new(&encoded)).unwrap();
             assert_eq!(decoded.version.version(), expect);
         }

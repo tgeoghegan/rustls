@@ -8,16 +8,20 @@ use super::send::{SendOutput, SendPath};
 use super::split::SendAdapter;
 use crate::SideData;
 use crate::common_state::{
-    ConnectionOutput, Event, Output, OutputEvent, Side, UnborrowedPayload, maybe_send_fatal_alert,
+    ConnectionOutput, Event, Output, OutputEvent, Protocol, Side, UnborrowedPayload,
+    maybe_send_fatal_alert,
 };
 use crate::conn::private::SideOutput;
+use crate::conn::unacked_list::UnackedRecords;
 use crate::conn::{ConnectionCommon, StateMachine};
 use crate::crypto::cipher::{Decrypted, DecryptionState, EncodableVersion, Payload, Record};
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
-use crate::error::{AlertDescription, Error, PeerMisbehaved};
+use crate::error::{AlertDescription, Error, InvalidMessage, PeerMisbehaved};
 use crate::msgs::{
-    AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, Delocator,
-    HandshakeAlignedProof, Locator, Message, MessagePayload,
+    AckPayload, AckRecordSequenceNumber, AlertLevel, AlertLevelName, AlertMessagePayload, Deframed,
+    Deframer, Delocator, Epoch, FullRecordSequenceNumber, HandshakeAlignedProof,
+    HandshakeMessagePayload, HandshakeSequenceNumber, Locator, Message, MessagePayload,
+    RecordSequenceNumber,
 };
 use crate::quic::QuicOutput;
 use crate::tracing::{trace, warn};
@@ -147,7 +151,26 @@ impl<'a, 'm, Side: SideData, Send: SendOutput + 'a> MessageIter<'a, 'm, Side, Se
                     .recv
                     .receive_record(record, hs_aligned, output.tls, output.other.send)
                 {
-                    Ok(Some(input)) => st.handle(input, &mut output),
+                    Ok(Some(input)) => {
+                        let accepted_handshake = match input.message.payload {
+                            MessagePayload::Handshake {
+                                seq,
+                                parsed: HandshakeMessagePayload(ref handshake_message),
+                                ..
+                            } => Some((seq, handshake_message.handshake_type())),
+                            _ => None,
+                        };
+                        let res = st.handle(input, &mut output);
+                        if res.is_ok() {
+                            // Only ack messages that are *successfully* processed
+                            output.recv.process_unacked_list(
+                                accepted_handshake,
+                                output.other.send,
+                                output.tls,
+                            );
+                        }
+                        res
+                    }
                     Ok(None) => Ok(st),
                     Err(e) => Err(e),
                 };
@@ -204,6 +227,7 @@ impl<'a, 'm, Side: SideData, Send: SendOutput + 'a> MessageIter<'a, 'm, Side, Se
 
 pub(crate) struct ReceivePath {
     side: Side,
+    protocol: Protocol,
     pub(crate) decrypt_state: DecryptionState,
     pub(crate) may_receive_application_data: bool,
     /// If the peer has signaled end of stream.
@@ -217,13 +241,21 @@ pub(crate) struct ReceivePath {
     seen_consecutive_empty_fragments: u8,
 
     pub(crate) tls13_tickets_received: u32,
+
+    /// Handshake message acknowledgement.
+    handshake_acks: UnackedRecords,
+
+    /// Sequence numbers in the current epoch which have been acked by the peer.
+    // TODO(DTLS): as with current_flight_record_seqs, this could be a smallish array.
+    acked_by_peer: Vec<AckRecordSequenceNumber>,
 }
 
 impl ReceivePath {
-    pub(crate) fn new(side: Side) -> Self {
+    pub(crate) fn new(side: Side, protocol: Protocol) -> Self {
         Self {
             side,
-            decrypt_state: DecryptionState::new(),
+            protocol,
+            decrypt_state: DecryptionState::new(side),
             may_receive_application_data: false,
             has_received_close_notify: false,
             temper_counters: TemperCounters::default(),
@@ -231,6 +263,9 @@ impl ReceivePath {
             deframer: Deframer::default(),
             seen_consecutive_empty_fragments: 0,
             tls13_tickets_received: 0,
+
+            handshake_acks: UnackedRecords::new(side),
+            acked_by_peer: Vec::new(),
         }
     }
 
@@ -254,9 +289,16 @@ impl ReceivePath {
                 }));
             }
 
-            let (record, bounds) = loop {
+            let (record, bounds, epoch, record_seq) = loop {
                 match self.deframe_decrypted(buffer, &locator)? {
-                    DeframeResult::Decrypted(decrypted, bounds) => break (decrypted, bounds),
+                    DeframeResult::Decrypted {
+                        decrypted: plaintext,
+                        bounds,
+                        epoch,
+                        record_seq,
+                    } => {
+                        break (plaintext, bounds, epoch, record_seq);
+                    }
                     DeframeResult::DecryptionFailed => continue,
                     DeframeResult::None => return Ok(None),
                 }
@@ -274,6 +316,16 @@ impl ReceivePath {
                 // records, there MUST NOT be any other records between them."
                 // https://www.rfc-editor.org/rfc/rfc9846#section-5.1
                 return Err(PeerMisbehaved::MessageInterleavedWithHandshakeMessage.into());
+            }
+
+            if self
+                .negotiated_version()
+                .is_datagram_tls()
+            {
+                self.decrypt_state
+                    .anti_replay()
+                    .observe(record_seq)
+                    .map_err(|e| Error::DtlsRecordAntiReplay(e))?;
             }
 
             match (record.payload.len(), record.typ) {
@@ -310,9 +362,18 @@ impl ReceivePath {
             }
 
             let record = unborrowed.reborrow(&Delocator::new(buffer));
-            self.deframer
-                .input_message(record.version.version(), bounds, buffer);
-            self.deframer.coalesce(buffer)?;
+            if self.protocol.is_dtls() {
+                let handshake_seqs = self
+                    .deframer
+                    .input_message_dtls(record, bounds)?;
+                self.handshake_acks
+                    .observe_record_seq(epoch, record_seq, handshake_seqs);
+                self.deframer.coalesce_dtls(buffer);
+            } else {
+                self.deframer
+                    .input_message(record.version.version(), bounds, buffer);
+                self.deframer.coalesce(buffer)?;
+            }
         }
     }
 
@@ -321,8 +382,17 @@ impl ReceivePath {
         buffer: &'b mut [u8],
         locator: &Locator,
     ) -> Result<DeframeResult<'b>, Error> {
-        let (record, bounds) = match self.deframer.deframe(buffer) {
-            Some(Ok(Deframed { record, bounds })) => (record, bounds),
+        let (record, bounds, epoch, record_seq) = match self.deframer.deframe(
+            buffer,
+            self.decrypt_state.epoch(),
+            self.decrypt_state.read_seq(),
+        ) {
+            Some(Ok(Deframed {
+                record,
+                bounds,
+                epoch,
+                record_seq,
+            })) => (record, bounds, epoch, record_seq),
             Some(Err(err)) => return Err(err),
             None => return Ok(DeframeResult::None),
         };
@@ -337,34 +407,55 @@ impl ReceivePath {
             //   expect any plaintext.
             // * The payload size is indicative of a plaintext alert message.
             ContentType::Alert
-                if matches!(self.negotiated_version, Some(ProtocolVersion::TLSv1_3))
+                if (self.negotiated_version() == ProtocolVersion::TLSv1_3
+                    || self.negotiated_version() == ProtocolVersion::DTLSv1_3)
                     && !self.decrypt_state.has_decrypted()
                     && record.payload.len() <= 2 =>
             {
                 true
             }
+            // Handshake ACK occurs only in DTLS 1.3 and is unencrypted regardless of epoch or
+            // handshake state.
+            ContentType::Ack if self.negotiated_version() == ProtocolVersion::DTLSv1_3 => true,
             // In other circumstances, we expect all records to be encrypted.
             _ => false,
         };
 
         if allowed_plaintext && !self.deframer.is_active() {
-            return Ok(DeframeResult::Decrypted(
-                Decrypted {
+            let read_seq = if record.version.is_datagram_tls() {
+                self.decrypt_state.increment_sequence()
+            } else {
+                self.decrypt_state.read_seq()
+            };
+            assert_eq!(RecordSequenceNumber::Full(read_seq), record_seq);
+
+            return Ok(DeframeResult::Decrypted {
+                decrypted: Decrypted {
                     plaintext: record.into_plain_record(),
                     want_close_before_decrypt: false,
                 },
                 bounds,
-            ));
+                epoch,
+                record_seq: match record_seq {
+                    RecordSequenceNumber::Full(full) => full,
+                    _ => panic!("plaintext message must contain full sequence number"),
+                },
+            });
         }
 
         match self
             .decrypt_state
-            .decrypt_incoming(record)?
+            .decrypt_incoming(record, record_seq)?
         {
-            Some(decrypted) => {
+            Some((decrypted, record_seq)) => {
                 // After decryption, the payload is shorter
                 let bounds = locator.locate(decrypted.plaintext.payload);
-                Ok(DeframeResult::Decrypted(decrypted, bounds))
+                Ok(DeframeResult::Decrypted {
+                    decrypted,
+                    bounds,
+                    epoch,
+                    record_seq,
+                })
             }
 
             // failed decryption during trial decryption is not allowed to be
@@ -409,6 +500,11 @@ impl ReceivePath {
             return Ok(None);
         }
 
+        if let MessagePayload::Ack(ack) = &message.payload {
+            self.process_ack(ack)?;
+            return Ok(None);
+        }
+
         // For TLS1.2, outside of the handshake, send rejection alerts for
         // renegotiation requests.  These can occur any time.
         if self.reject_renegotiation_request(&message, tls, send)? {
@@ -423,7 +519,7 @@ impl ReceivePath {
 
     fn drop_tls13_ccs(&mut self, record: &Record<&'_ [u8]>) -> Result<bool, Error> {
         if self.may_receive_application_data
-            || !matches!(self.negotiated_version, Some(ProtocolVersion::TLSv1_3))
+            || self.negotiated_version() != ProtocolVersion::TLSv1_3
         {
             return Ok(false);
         }
@@ -447,7 +543,8 @@ impl ReceivePath {
         send: &mut dyn SendOutput,
     ) -> Result<bool, Error> {
         if !self.may_receive_application_data
-            || matches!(self.negotiated_version, Some(ProtocolVersion::TLSv1_3))
+            || self.negotiated_version() == ProtocolVersion::TLSv1_3
+            || self.negotiated_version() == ProtocolVersion::DTLSv1_3
         {
             return Ok(false);
         }
@@ -487,7 +584,8 @@ impl ReceivePath {
         if alert.level == AlertLevel::Warning {
             self.temper_counters
                 .received_warning_alert()?;
-            if matches!(self.negotiated_version, Some(ProtocolVersion::TLSv1_3))
+            if (self.negotiated_version() == ProtocolVersion::TLSv1_3
+                || self.negotiated_version() == ProtocolVersion::DTLSv1_3)
                 && alert.description != AlertDescription::UserCanceled
             {
                 return Err(PeerMisbehaved::IllegalWarningAlert(alert.description).into());
@@ -504,10 +602,66 @@ impl ReceivePath {
 
         Err(err)
     }
+
+    fn process_ack(&mut self, ack: &AckPayload) -> Result<(), Error> {
+        if !self.protocol.is_dtls() {
+            // ACKs are not allowed in stream TLS
+            return Err(Error::InvalidMessage(InvalidMessage::InvalidContentType));
+        }
+        // For compatibility with DTLS 1.2 endpoints, ignore ACKs until 1.3 has been established.
+        // <https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-7>
+        if self.decrypt_state.epoch() == Epoch::Unencrypted {
+            return Ok(());
+        }
+
+        for num in &ack.record_numbers {
+            if !self.acked_by_peer.contains(num) {
+                self.acked_by_peer.push(*num);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn negotiated_version(&self) -> ProtocolVersion {
+        if let Some(version) = self.negotiated_version {
+            version
+        }
+        // If the negotiated version has not been set yet, then we are early in the handshake and
+        // will behave as though doing (D)TLS 1.2 for backward compatibility
+        else if self.protocol.is_dtls() {
+            ProtocolVersion::DTLSv1_2
+        } else {
+            ProtocolVersion::TLSv1_2
+        }
+    }
+
+    pub(crate) fn acked_by_peer(&self) -> &[AckRecordSequenceNumber] {
+        &self.acked_by_peer
+    }
+
+    fn process_unacked_list(
+        &mut self,
+        accepted_message: Option<(HandshakeSequenceNumber, HandshakeType)>,
+        send: &mut dyn SendOutput,
+        tls: &mut Vec<u8>,
+    ) {
+        if let Some(to_ack) = self
+            .handshake_acks
+            .observe_handshake_seq(self.negotiated_version(), accepted_message)
+        {
+            send.ack_flight(&to_ack, tls);
+        }
+    }
 }
 
 enum DeframeResult<'b> {
-    Decrypted(Decrypted<'b>, Range<usize>),
+    Decrypted {
+        decrypted: Decrypted<'b>,
+        bounds: Range<usize>,
+        epoch: Epoch,
+        record_seq: FullRecordSequenceNumber,
+    },
     DecryptionFailed,
     None,
 }

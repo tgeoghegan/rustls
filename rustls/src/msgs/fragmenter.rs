@@ -1,18 +1,138 @@
+use alloc::vec::Vec;
+use core::cmp::min;
+use core::mem;
 use core::num::NonZeroUsize;
 
 use crate::Error;
-use crate::crypto::cipher::{EncodableVersion, OutboundPlain, Record};
-use crate::enums::ContentType;
+use crate::common_state::Protocol;
+use crate::crypto::cipher::{EncodableVersion, OutboundPlain, Payload, Record};
+use crate::enums::{ContentType, HandshakeType};
+use crate::msgs::{
+    Codec, DTLS_12_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment, HEADER_SIZE,
+    HandshakeSequenceNumber, U24,
+};
 
+#[cfg(test)]
+mod dtls_test;
+
+/// Maximum length of a TLSPlaintext payload permitted by TLS.
+///
+/// <https://www.rfc-editor.org/info/rfc9846/#section-5.1>
 pub(crate) const MAX_FRAGMENT_LEN: NonZeroUsize = NonZeroUsize::new(16384).unwrap();
-pub(crate) const PACKET_OVERHEAD: usize = 1 + 2 + 2;
-pub(crate) const MAX_FRAGMENT_SIZE: usize = MAX_FRAGMENT_LEN.get() + PACKET_OVERHEAD;
+
+/// Maxium length of a TLSPlaintext payload over streams (TCP or QUIC).
+///
+/// This includes the record header.
+const MAX_STREAM_FRAGMENT_SIZE: usize = MAX_FRAGMENT_LEN.get() + HEADER_SIZE;
+
+/// Maximum length of a TLSPlaintext payload over UDP.
+///
+/// This pessimistically includes the full DTLS record header, though a more compact unified header
+/// is used for the majority of DTLS 1.3 messages.
+const MAX_UDP_FRAGMENT_SIZE: usize = MAX_FRAGMENT_LEN.get() + DTLS_12_HEADER_SIZE;
 
 pub(crate) struct Fragmenter {
     max_frag: NonZeroUsize,
 }
 
 impl Fragmenter {
+    /// Fragment the flight of handshake messages into DTLS plaintext records.
+    ///
+    /// The emitted `EncodedMessage` values encode a DTLSPlaintext ([1]).
+    ///
+    /// Each emitted record may contain more than one handshake message, or just a single handshake
+    /// fragment.
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc9147#appendix-A.1
+    pub(crate) fn fragment_dtls_handshake_message_flight<'a, E: AsRef<[u8]>>(
+        &self,
+        version: EncodableVersion,
+        // TODO(timg): take &[u8] instead of Vec<u8> here
+        handshake_messages: &'a [(HandshakeType, HandshakeSequenceNumber, E)],
+    ) -> Vec<Record<Payload<'a>>> {
+        let mut records = Vec::new();
+        // The current record we are packing with the handshake flight. Does not include record
+        // header.
+        // TODO(DTLS): this is wrong: the sequence number will increase as we
+        // emit records, and could become big enough to require a larger unified
+        // header, so we need to recompute record capacity for each record.
+        let record_capacity = self.max_frag.get();
+        let mut curr_record = Vec::with_capacity(record_capacity);
+
+        let mut finish_record = |curr_record: &mut Vec<u8>| {
+            let finished_record = mem::replace(curr_record, Vec::with_capacity(record_capacity));
+            records.push(Record {
+                typ: ContentType::Handshake,
+                version,
+                payload: Payload::new(finished_record),
+            });
+        };
+
+        for (idx, (handshake_type, handshake_seq, handshake_payload)) in
+            handshake_messages.iter().enumerate()
+        {
+            // handshake_payload will have been encoded as a TLS handshake message, so we discard the
+            // front 4 bytes (1 byte of handshake type plus 3 bytes of length) so that we can re-encode
+            // as a DTLS handshake fragment.
+            let handshake_payload = &handshake_payload.as_ref()[4..];
+            assert!(handshake_payload.len() <= U24::MAX as usize);
+            let length = U24(handshake_payload.len() as u32);
+
+            let mut fragment_offset = 0;
+            loop {
+                if record_capacity - curr_record.len() <= DTLS_HANDSHAKE_HEADER_SIZE {
+                    // There's no room left in the current record for a handshake fragment. Start a
+                    // new record.
+                    finish_record(&mut curr_record);
+                }
+                // Fill fragment with either remainder of the handshake payload or the remaining
+                // capacity of the record.
+                let fragment_length = min(
+                    record_capacity - curr_record.len() - DTLS_HANDSHAKE_HEADER_SIZE,
+                    handshake_payload.len() - fragment_offset,
+                );
+
+                let fragment = DtlsHandshakeFragment {
+                    msg_type: *handshake_type,
+                    length,
+                    message_seq: *handshake_seq,
+                    fragment_offset: U24(fragment_offset.try_into().unwrap()),
+                    fragment_length: U24(fragment_length.try_into().unwrap()),
+                    fragment: Payload::Borrowed(
+                        &handshake_payload[fragment_offset..fragment_offset + fragment_length],
+                    ),
+                };
+
+                fragment_offset += fragment_length;
+
+                fragment.encode(&mut curr_record);
+
+                // Make sure we didn't accidentally grow the record
+                assert_eq!(
+                    curr_record.capacity(),
+                    record_capacity,
+                    "record len: {}",
+                    curr_record.len()
+                );
+
+                // If we have filled the current record or if this is the last fragment of the last
+                // handshake message, construct a record
+                if curr_record.len() == curr_record.capacity()
+                    || (idx + 1 == handshake_messages.len()
+                        && fragment_offset == handshake_payload.len())
+                {
+                    finish_record(&mut curr_record);
+                }
+
+                if fragment_offset == handshake_payload.len() {
+                    break;
+                }
+            }
+        }
+
+        records
+    }
+
     /// Take `payload` and fragment it into new records with given type and version.
     ///
     /// Each returned record size is no more than the most recently configured
@@ -29,6 +149,11 @@ impl Fragmenter {
         payload: OutboundPlain<'a>,
         encryption_overhead: usize,
     ) -> impl ExactSizeIterator<Item = Record<OutboundPlain<'a>>> + use<'a> {
+        assert!(
+            !version.is_datagram_tls(),
+            "To fragment a DTLS handshake message, use fragment_dtls_handshake_message. \
+            Other DTLS messages may not be fragmented.",
+        );
         let max_plaintext = NonZeroUsize::new(
             self.max_frag
                 .get()
@@ -45,19 +170,31 @@ impl Fragmenter {
     /// Set the maximum fragment size that will be produced.
     ///
     /// This is the maximum size of each TLS record on the wire, including the
-    /// five-byte record header. When records are encrypted, plaintext is fragmented
+    /// record header. When records are encrypted, plaintext is fragmented
     /// more aggressively so the protected record still fits in this limit.
     ///
     /// A `max_fragment_size` of `None` sets the highest allowable fragment size.
     ///
-    /// Returns BadMaxFragmentSize if the size is smaller than 32 or larger than 16389.
+    /// Returns BadMaxFragmentSize if the size is smaller than 32 or larger than 16389 (for
+    /// `Protocol::{Tls, Quic}`) or 16397 (`Protocol::Udp`).
+    ///
+    /// # Bugs
+    ///
+    /// This limit only applies to plaintext payload size and does not account for overhead from
+    /// encryption (#991).
     pub(crate) fn set_max_fragment_size(
         &mut self,
         max_fragment_size: Option<usize>,
+        protocol: Protocol,
     ) -> Result<(), Error> {
-        self.max_frag = match max_fragment_size {
-            Some(sz @ 32..=MAX_FRAGMENT_SIZE) => NonZeroUsize::new(sz - PACKET_OVERHEAD).unwrap(),
-            None => MAX_FRAGMENT_LEN,
+        self.max_frag = match (protocol, max_fragment_size) {
+            (Protocol::Tcp | Protocol::Quic(_), Some(sz @ 32..=MAX_STREAM_FRAGMENT_SIZE)) => {
+                NonZeroUsize::new(sz - HEADER_SIZE).unwrap()
+            }
+            (Protocol::Udp, Some(sz @ 32..=MAX_UDP_FRAGMENT_SIZE)) => {
+                NonZeroUsize::new(sz - DTLS_12_HEADER_SIZE).unwrap()
+            }
+            (_, None) => MAX_FRAGMENT_LEN,
             _ => return Err(Error::BadMaxFragmentSize),
         };
         Ok(())
@@ -111,9 +248,13 @@ mod tests {
     use alloc::vec::Vec;
     use std::vec;
 
-    use super::{Fragmenter, PACKET_OVERHEAD};
-    use crate::crypto::cipher::{EncodableVersion, OutboundPlain, Payload, Record};
+    use super::Fragmenter;
+    use crate::common_state::Protocol;
+    use crate::crypto::cipher::{
+        EncodableVersion, EncodingContext, OutboundPlain, Payload, Record,
+    };
     use crate::enums::{ContentType, ProtocolVersion};
+    use crate::msgs::HEADER_SIZE;
 
     fn record_eq(
         record: &Record<OutboundPlain<'_>>,
@@ -126,7 +267,7 @@ mod tests {
         assert_eq!(&record.version, version);
         assert_eq!(record.payload.to_vec(), bytes);
 
-        let buf = record.to_unencrypted_bytes();
+        let buf = record.to_unencrypted_bytes(EncodingContext::new());
 
         assert_eq!(total_len, buf.len());
     }
@@ -143,7 +284,7 @@ mod tests {
         };
 
         let mut frag = Fragmenter::default();
-        frag.set_max_fragment_size(Some(32))
+        frag.set_max_fragment_size(Some(32), Protocol::Tcp)
             .unwrap();
         let q = frag
             .fragment(record.typ, record.version, record.payload.bytes().into(), 0)
@@ -187,7 +328,7 @@ mod tests {
         };
 
         let mut frag = Fragmenter::default();
-        frag.set_max_fragment_size(Some(32))
+        frag.set_max_fragment_size(Some(32), Protocol::Tcp)
             .unwrap();
         let q = frag
             .fragment(record.typ, record.version, record.payload.bytes().into(), 0)
@@ -195,7 +336,7 @@ mod tests {
         assert_eq!(q.len(), 1);
         record_eq(
             &q[0],
-            PACKET_OVERHEAD + 8,
+            HEADER_SIZE + 8,
             &ContentType::Handshake,
             &EncodableVersion::Legacy(ProtocolVersion::TLSv1_2),
             b"\x01\x02\x03\x04\x05\x06\x07\x08",
@@ -209,7 +350,7 @@ mod tests {
         let payload_owner: Vec<&[u8]> = vec![&[b'a'; 8], &[b'b'; 12], &[b'c'; 32], &[b'd'; 20]];
         let borrowed_payload = OutboundPlain::new(&payload_owner);
         let mut frag = Fragmenter::default();
-        frag.set_max_fragment_size(Some(37)) // 32 + packet overhead
+        frag.set_max_fragment_size(Some(37), Protocol::Tcp) // 32 + packet overhead
             .unwrap();
 
         let fragments = frag
@@ -236,7 +377,7 @@ mod tests {
     #[test]
     fn fragment_respects_overhead() {
         let mut frag = Fragmenter::default();
-        frag.set_max_fragment_size(Some(32))
+        frag.set_max_fragment_size(Some(32), Protocol::Tcp)
             .unwrap();
 
         let p = Payload::new((0..128).collect::<Vec<u8>>());
@@ -249,7 +390,7 @@ mod tests {
             )
             .collect::<Vec<_>>();
 
-        let each_len = 32 - PACKET_OVERHEAD - 13;
+        let each_len = 32 - HEADER_SIZE - 13;
 
         let mut expect = vec![each_len; 128usize.div_euclid(each_len)];
         expect.push(128usize.rem_euclid(each_len));

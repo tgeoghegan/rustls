@@ -3,9 +3,13 @@
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
+use crate::common_state::Side;
 use crate::crypto::cipher::Payload;
 use crate::error::InvalidMessage;
-use crate::msgs::{Codec, ListLength, NonEmpty, Reader, SizedPayload, TlsListElement};
+use crate::msgs::{
+    Codec, DTLS_12_HEADER_SIZE, DTLS_13_UNIFIED_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE,
+    HANDSHAKE_HEADER_SIZE, HEADER_SIZE, ListLength, NonEmpty, Reader, SizedPayload, TlsListElement,
+};
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +162,31 @@ enum_builder! {
     }
 }
 
+impl HandshakeType {
+    /// Whether the handshake type can be first message in a flight per [1].
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-5.7
+    pub(crate) fn first_in_flight(&self, recipient: Side) -> bool {
+        match (*self, recipient) {
+            // Client initial flight is just ClientHello
+            (Self::ClientHello, Side::Server)
+            // If server sends HRR, it is a single-message flight
+            | (Self::HelloRetryRequest, Side::Client)
+            // Server's flight always starts with ServerHello
+            | (Self::ServerHello, Side::Client)
+            // Client's final flight starts with Certificate if client auth is in use, Finished
+            // otherwise
+            | (Self::Certificate, Side::Server)
+            | (Self::Finished, Side::Server)
+            // Post-handshake NewSessionTicket is a single-message flight
+            | (Self::NewSessionTicket, Side::Client) => true,
+            // KeyUpdate is a single-message flight regardless of recipient
+            | (Self::KeyUpdate, _) => true,
+            _ => false,
+        }
+    }
+}
+
 enum_builder! {
     /// The `ContentType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
@@ -169,6 +198,10 @@ enum_builder! {
         Handshake => 0x16,
         ApplicationData => 0x17,
         Heartbeat => 0x18,
+        /// ACK for DTLS 1.3 handshakes.
+        ///
+        /// <https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-7>
+        Ack => 0x1a,
     }
 }
 
@@ -187,6 +220,39 @@ enum_builder! {
         DTLSv1_0 => 0xFEFF,
         DTLSv1_2 => 0xFEFD,
         DTLSv1_3 => 0xFEFC,
+    }
+}
+
+impl ProtocolVersion {
+    /// Whether this protocol version is Datagram TLS.
+    pub fn is_datagram_tls(self) -> bool {
+        self == Self::DTLSv1_0 || self == Self::DTLSv1_2 || self == Self::DTLSv1_3
+    }
+
+    /// The size of a handshake message header in this protocol version.
+    pub fn handshake_header_size(self) -> usize {
+        if self.is_datagram_tls() {
+            DTLS_HANDSHAKE_HEADER_SIZE
+        } else {
+            HANDSHAKE_HEADER_SIZE
+        }
+    }
+
+    /// The size of a record header for an encrypted message in this protocol version.
+    pub fn encrypted_header_len(self) -> usize {
+        match self {
+            Self::DTLSv1_2 => DTLS_12_HEADER_SIZE,
+            Self::DTLSv1_3 => DTLS_13_UNIFIED_HEADER_SIZE,
+            _ => HEADER_SIZE,
+        }
+    }
+
+    /// The size of a record header for an unencrypted message in this protocol version.
+    pub fn unencrypted_header_len(self) -> usize {
+        match self {
+            Self::DTLSv1_2 | Self::DTLSv1_3 => DTLS_12_HEADER_SIZE,
+            _ => HEADER_SIZE,
+        }
     }
 }
 

@@ -43,6 +43,7 @@ impl RecordEncrypter for Tls12GcmRecordEncrypter {
         &mut self,
         record: Record<OutboundPlain<'_>>,
         seq: u64,
+        _header: &'a [u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
         let total_len = self.encrypted_payload_len(record.payload.len());
@@ -110,6 +111,10 @@ impl RecordEncrypter for Tls12GcmRecordEncrypter {
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + GCM_EXPLICIT_NONCE_LEN + self.provider.tag_len()
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
     }
 }
 
@@ -216,6 +221,7 @@ impl RecordEncrypter for Tls12ChaCha20Poly1305RecordEncrypter {
         &mut self,
         record: Record<OutboundPlain<'_>>,
         seq: u64,
+        _header: &'a [u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
         let total_len = self.encrypted_payload_len(record.payload.len());
@@ -264,6 +270,10 @@ impl RecordEncrypter for Tls12ChaCha20Poly1305RecordEncrypter {
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + self.provider.tag_len()
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
     }
 }
 

@@ -32,6 +32,8 @@ pub(crate) use send::{SendOutput, SendPath};
 pub(crate) mod split;
 use split::SplitConnection;
 
+mod unacked_list;
+
 /// A trait generalizing over buffered client or server connections.
 pub trait Connection: Debug + Deref<Target = ConnectionOutputs> {
     /// The side (client or server) that this type implements.
@@ -258,7 +260,7 @@ impl<Side: SideData> ConnectionCommon<Side> {
         let (secrets, state) = state.into_external_state(&tls13_key_schedule)?;
         let secrets = ExtractedSecrets {
             tx: (write_seq, secrets.tx),
-            rx: (read_seq, secrets.rx),
+            rx: (read_seq.into(), secrets.rx),
         };
         let external = KernelConnection::new(state, outputs, tls13_key_schedule)?;
 

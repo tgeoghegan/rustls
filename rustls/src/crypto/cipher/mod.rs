@@ -10,10 +10,14 @@ use crate::error::{ApiMisuse, Error};
 use crate::msgs::put_u64;
 use crate::suites::ConnectionTrafficSecrets;
 
+mod antireplay;
+pub use antireplay::AntiReplay;
+
 mod messages;
 pub(crate) use messages::encode_record_header;
 pub use messages::{
-    EncodableVersion, EncryptBuffer, InboundOpaque, OutboundPlain, Payload, Record, RecordError,
+    EncodableVersion, EncodingContext, EncryptBuffer, InboundOpaque, OutboundPlain, Payload,
+    Record, RecordError,
 };
 
 mod record_layer;
@@ -59,6 +63,12 @@ pub trait Tls13AeadAlgorithm: Send + Sync {
 
     /// Build a `RecordDecryptionProvider` for the given key.
     fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS13_AAD_SIZE>>;
+
+    /// Build a `RecordSequenceNumberEncrypter` for the given key.
+    fn record_sequence_encrypter(
+        &self,
+        key: BlockCipherKey,
+    ) -> Box<dyn RecordSequenceNumberEncrypter>;
 
     /// The length of key in bytes required by `encrypter()` and `decrypter()`.
     fn key_len(&self) -> usize;
@@ -231,6 +241,7 @@ pub trait RecordEncrypter: Send + Sync {
         &mut self,
         record: Record<OutboundPlain<'_>>,
         seq: u64,
+        header: &'a [u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error>;
 
@@ -242,6 +253,43 @@ pub trait RecordEncrypter: Send + Sync {
     /// payload to [`Self::encrypt()`] in chunks of length `F - A`.  Each `encrypt()`
     /// is then free to pad or otherwise transform the length at its option.
     fn encrypted_payload_len(&self, payload_len: usize) -> usize;
+
+    /// The protocol version that this message encrypter implements.
+    ///
+    /// This is a hack to make rustls-test, which does not use the record_layer module, work, since
+    /// it does odd things like send a TLS 1.3 ServerHello after a TLS 1.2 handshake has been
+    /// performed. This should go away before appearing in any PR.
+    fn protocol_version(&self) -> crate::enums::ProtocolVersion;
+}
+
+/// Encrypt and decrypt DTLS 1.3 record sequence numbers.
+///
+/// The encryption and decryption procedures are identical so a single trait covers both.
+///
+/// <https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-4.2.3>
+pub trait RecordSequenceNumberEncrypter: Send + Sync {
+    /// Encrypt or decrypt the record sequence number `seq`, in-place.
+    ///
+    /// The sequence number is transformed by XORing with a mask computed from the record number
+    /// encryption key and the first 16 bytes of ciphertext.
+    ///
+    /// `ciphertext` MUST be a 16 byte slice.
+    ///
+    /// The sequence number is provided as a byte buffer containing the encoded sequence number. Its
+    /// length may be either 1 or 2 bytes. The output will have the same length.
+    fn transform(&self, seq: &mut [u8], ciphertext: &[u8]) -> Result<(), Error> {
+        assert_eq!(ciphertext.len(), 16, "ciphertext too short to transform");
+        let mask = self.mask(ciphertext)?;
+
+        for (seq, mask) in seq.iter_mut().zip(mask) {
+            *seq = *seq ^ mask;
+        }
+
+        Ok(())
+    }
+
+    /// Compute the mask for record sequence number encryption.
+    fn mask(&self, ciphertext: &[u8]) -> Result<[u8; 2], Error>;
 }
 
 /// A write or read IV.
@@ -452,6 +500,21 @@ impl From<[u8; 16]> for AeadKey {
             buf: array::from_fn(|i| if i < 16 { buf[i] } else { 0 }),
             used: 16,
         }
+    }
+}
+
+/// A key for a single-block cipher (like AES-ECB).
+pub struct BlockCipherKey(AeadKey);
+
+impl AsRef<[u8]> for BlockCipherKey {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl From<[u8; 16]> for BlockCipherKey {
+    fn from(value: [u8; 16]) -> Self {
+        Self(AeadKey::from(value))
     }
 }
 

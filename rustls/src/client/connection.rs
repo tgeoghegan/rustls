@@ -20,7 +20,7 @@ use crate::crypto;
 use crate::crypto::cipher::OutboundPlain;
 use crate::enums::ApplicationProtocol;
 use crate::error::Error;
-use crate::msgs::ClientExtensionsInput;
+use crate::msgs::{AckRecordSequenceNumber, ClientExtensionsInput};
 use crate::quic::QuicOutput;
 use crate::suites::ExtractedSecrets;
 use crate::sync::Arc;
@@ -107,6 +107,10 @@ impl ClientConnection {
             .recv
             .tls13_tickets_received
     }
+
+    pub fn records_acked_by_peer(&self) -> &[AckRecordSequenceNumber] {
+        self.inner.common.recv.acked_by_peer()
+    }
 }
 
 impl Connection for ClientConnection {
@@ -168,6 +172,7 @@ pub struct ClientConnectionBuilder {
     pub(crate) config: Arc<ClientConfig>,
     pub(crate) name: ServerName<'static>,
     pub(crate) alpn_protocols: Option<Vec<ApplicationProtocol<'static>>>,
+    pub(crate) protocol: Protocol,
 }
 
 impl ClientConnectionBuilder {
@@ -177,12 +182,19 @@ impl ClientConnectionBuilder {
         self
     }
 
+    /// Specify the transport protocol for the conneciton.
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
     /// Finalize the builder and create the `ClientConnection`.
     pub fn build(self, tls: &mut Vec<u8>) -> Result<ClientConnection, Error> {
         let Self {
             config,
             name,
             alpn_protocols,
+            protocol,
         } = self;
 
         let alpn_protocols = alpn_protocols.unwrap_or_else(|| config.alpn_protocols.clone());
@@ -192,7 +204,7 @@ impl ClientConnectionBuilder {
                 name,
                 ClientExtensionsInput::from_alpn(alpn_protocols),
                 None,
-                Protocol::Tcp,
+                protocol,
                 tls,
             )?,
         })
@@ -271,7 +283,7 @@ impl ConnectionCommon<ClientSide> {
         protocol: Protocol,
         tls: &mut Vec<u8>,
     ) -> Result<Self, Error> {
-        let mut common_state = CommonState::new(Side::Client, config.fips());
+        let mut common_state = CommonState::new(Side::Client, config.fips(), protocol);
         common_state
             .send
             .set_max_fragment_size(config.max_fragment_size)?;

@@ -20,7 +20,7 @@ use crate::conn::{
 use crate::crypto;
 use crate::crypto::cipher::{OutboundPlain, Payload};
 use crate::error::Error;
-use crate::msgs::ServerExtensionsInput;
+use crate::msgs::{AckRecordSequenceNumber, ServerExtensionsInput};
 use crate::server::hs::{self, ChooseConfig, ExpectClientHello, ReadClientHello, ServerState};
 use crate::suites::ExtractedSecrets;
 use crate::sync::Arc;
@@ -40,11 +40,16 @@ impl ServerConnection {
     /// Make a new ServerConnection.  `config` controls how
     /// we behave in the TLS protocol.
     pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
+        Self::new_with_protocol(config, Protocol::Tcp)
+    }
+
+    /// Make a new ServerConnection over the specified transport protocol.
+    pub fn new_with_protocol(config: Arc<ServerConfig>, protocol: Protocol) -> Result<Self, Error> {
         Ok(Self {
             inner: ConnectionCommon::for_server(
                 config,
                 ServerExtensionsInput::default(),
-                Protocol::Tcp,
+                protocol,
             )?,
         })
     }
@@ -134,6 +139,10 @@ impl ServerConnection {
         } else {
             None
         }
+    }
+
+    pub fn records_acked_by_peer(&self) -> &[AckRecordSequenceNumber] {
+        self.inner.common.recv.acked_by_peer()
     }
 }
 
@@ -582,7 +591,7 @@ impl ConnectionCommon<ServerSide> {
         extra_exts: ServerExtensionsInput,
         protocol: Protocol,
     ) -> Result<Self, Error> {
-        let mut common = CommonState::new(Side::Server, config.fips());
+        let mut common = CommonState::new(Side::Server, config.fips(), protocol);
         common
             .send
             .set_max_fragment_size(config.max_fragment_size)?;
@@ -603,7 +612,7 @@ impl ConnectionCommon<ServerSide> {
         Self::new(
             ReadClientHello::new(protocol).into(),
             ServerConnectionData::default(),
-            CommonState::new(Side::Server, FipsStatus::Unvalidated),
+            CommonState::new(Side::Server, FipsStatus::Unvalidated, protocol),
         )
     }
 }

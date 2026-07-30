@@ -7,9 +7,9 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerVerifier;
 use rustls::crypto::cipher::{
     AeadKey, EncryptBuffer, Iv, KeyBlockShape, Nonce, RecordDecrypter, RecordDecryptionProvider,
-    RecordEncrypter, RecordEncryptionProvider, TLS12_AAD_SIZE, TLS13_AAD_SIZE, Tls12AeadAlgorithm,
-    Tls12GcmRecordDecrypter, Tls12GcmRecordEncrypter, Tls13AeadAlgorithm,
-    UnsupportedOperationError,
+    RecordEncrypter, RecordEncryptionProvider, RecordSequenceNumberEncrypter, TLS12_AAD_SIZE,
+    TLS13_AAD_SIZE, Tls12AeadAlgorithm, Tls12GcmRecordDecrypter, Tls12GcmRecordEncrypter,
+    Tls13AeadAlgorithm, UnsupportedOperationError,
 };
 use rustls::crypto::kx::{
     KeyExchangeAlgorithm, NamedGroup, SharedSecret, StartedKeyExchange, SupportedKxGroup,
@@ -276,6 +276,13 @@ impl Tls13AeadAlgorithm for Aead {
         Box::new(Tls13Cipher)
     }
 
+    fn record_sequence_encrypter(
+        &self,
+        _key: crypto::cipher::BlockCipherKey,
+    ) -> Box<dyn RecordSequenceNumberEncrypter> {
+        Box::new(Tls13Cipher)
+    }
+
     fn key_len(&self) -> usize {
         32
     }
@@ -391,6 +398,12 @@ impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13Cipher {
 
     fn tag_len(&self) -> usize {
         AEAD_TAG.len()
+    }
+}
+
+impl RecordSequenceNumberEncrypter for Tls13Cipher {
+    fn mask(&self, ciphertext: &[u8]) -> Result<[u8; 2], Error> {
+        Ok(*ciphertext[..2].as_array().unwrap())
     }
 }
 

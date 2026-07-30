@@ -30,8 +30,8 @@ use rustls::server::{
 };
 use rustls::{
     ClientConfig, ClientConnection, ConfigBuilder, Connection, ConnectionTrafficSecrets,
-    DistinguishedName, MessageHandler, RootCertStore, ServerConfig, ServerConnection, SideData,
-    SupportedCipherSuite, VecInput, WantsVerifier,
+    DistinguishedName, MessageHandler, Protocol, RootCertStore, ServerConfig, ServerConnection,
+    SideData, SupportedCipherSuite, VecInput, WantsVerifier,
 };
 use tracing::{Event, Level, Metadata, field, span, subscriber};
 
@@ -826,7 +826,17 @@ pub fn make_pair(
     provider: &CryptoProvider,
     client_output: &mut Vec<u8>,
 ) -> (ClientConnection, ServerConnection) {
-    make_pair_for_configs(
+    make_pair_with_protocol(Protocol::Tcp, kt, provider, client_output)
+}
+
+pub fn make_pair_with_protocol(
+    protocol: Protocol,
+    kt: KeyType,
+    provider: &CryptoProvider,
+    client_output: &mut Vec<u8>,
+) -> (ClientConnection, ServerConnection) {
+    make_pair_for_configs_with_protocol(
+        protocol,
         make_client_config(kt, provider),
         make_server_config(kt, provider),
         client_output,
@@ -838,7 +848,17 @@ pub fn make_pair_for_configs(
     server_config: ServerConfig,
     client_output: &mut Vec<u8>,
 ) -> (ClientConnection, ServerConnection) {
-    make_pair_for_arc_configs(
+    make_pair_for_configs_with_protocol(Protocol::Tcp, client_config, server_config, client_output)
+}
+
+pub fn make_pair_for_configs_with_protocol(
+    protocol: Protocol,
+    client_config: ClientConfig,
+    server_config: ServerConfig,
+    client_output: &mut Vec<u8>,
+) -> (ClientConnection, ServerConnection) {
+    make_pair_for_arc_configs_with_protocol(
+        protocol,
         &Arc::new(client_config),
         &Arc::new(server_config),
         client_output,
@@ -850,12 +870,27 @@ pub fn make_pair_for_arc_configs(
     server_config: &Arc<ServerConfig>,
     client_output: &mut Vec<u8>,
 ) -> (ClientConnection, ServerConnection) {
+    make_pair_for_arc_configs_with_protocol(
+        Protocol::Tcp,
+        client_config,
+        server_config,
+        client_output,
+    )
+}
+
+pub fn make_pair_for_arc_configs_with_protocol(
+    protocol: Protocol,
+    client_config: &Arc<ClientConfig>,
+    server_config: &Arc<ServerConfig>,
+    client_output: &mut Vec<u8>,
+) -> (ClientConnection, ServerConnection) {
     (
         client_config
             .connect(server_name("localhost"))
+            .with_protocol(protocol)
             .build(client_output)
             .unwrap(),
-        ServerConnection::new(server_config.clone()).unwrap(),
+        ServerConnection::new_with_protocol(server_config.clone(), protocol).unwrap(),
     )
 }
 
@@ -1537,32 +1572,37 @@ impl RawTls {
         const HEADER_SIZE: usize = 5;
 
         let msg = msg.borrow_outbound();
-        let mut record = vec![
-            0u8;
-            HEADER_SIZE
-                + self
-                    .encrypter
-                    .encrypted_payload_len(msg.payload.len())
-        ];
-        let encrypted = self
+        let encrypted_len = self
             .encrypter
-            .encrypt(msg, self.enc_seq, &mut record[HEADER_SIZE..])
-            .unwrap();
+            .encrypted_payload_len(msg.payload.len());
+
+        let mut header = vec![0u8; HEADER_SIZE];
+        // Simulate content type mangling that provider will do
+        let typ = match self.encrypter.protocol_version() {
+            ProtocolVersion::TLSv1_2 | ProtocolVersion::DTLSv1_2 => msg.typ,
+            ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3 => ContentType::ApplicationData,
+            _ => panic!("unsupported protocol version"),
+        };
 
         // Encode the TLS record header: 1 byte type, 2 bytes version, 2 bytes length
-        let (typ, version, len) = (
-            encrypted.typ,
-            encrypted.version.encode(),
-            encrypted.payload.len(),
-        );
-        record.truncate(HEADER_SIZE + len);
-        record[0] = typ.into();
-        record[1..3].copy_from_slice(&version.to_array());
-        record[3..5].copy_from_slice(&(len as u16).to_be_bytes());
+        header[0] = typ.into();
+        header[1..3].copy_from_slice(&msg.version.encode().to_array());
+        header[3..5].copy_from_slice(&(encrypted_len as u16).to_be_bytes());
+
+        let mut payload = vec![0u8; encrypted_len];
+
+        let encrypted = self
+            .encrypter
+            .encrypt(msg, self.enc_seq, &header, &mut payload)
+            .unwrap();
+
+        assert_eq!(typ, encrypted.typ);
+        assert_eq!(encrypted_len, encrypted.payload.len());
 
         self.enc_seq += 1;
+        header.extend_from_slice(&payload);
         peer_input
-            .read(&mut io::Cursor::new(record))
+            .read(&mut io::Cursor::new(header))
             .unwrap();
     }
 
@@ -1574,13 +1614,13 @@ impl RawTls {
         let typ = ContentType::from(data[0]);
         let version = ProtocolVersion::from(u16::from_be_bytes([data[1], data[2]]));
         let len = u16::from_be_bytes([data[3], data[4]]) as usize;
-        let left = &mut data[5..];
+        let (header, left) = data.split_at_mut(5);
         assert_eq!(len, left.len());
 
         let inbound = Record {
             typ,
             version: EncodableVersion::Legacy(version),
-            payload: InboundOpaque(left),
+            payload: InboundOpaque(header, left),
         };
 
         let record = self
@@ -1977,8 +2017,9 @@ pub fn certificate_error_expecting_name(expected: &str) -> CertificateError {
 mod plaintext {
     use rustls::ConnectionTrafficSecrets;
     use rustls::crypto::cipher::{
-        AeadKey, EncryptBuffer, Iv, OutboundPlain, RecordDecryptionProvider,
-        RecordEncryptionProvider, Tls13AeadAlgorithm, UnsupportedOperationError,
+        AeadKey, BlockCipherKey, EncryptBuffer, InboundOpaque, Iv, OutboundPlain, RecordDecrypter,
+        RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider,
+        RecordSequenceNumberEncrypter, Tls13AeadAlgorithm, UnsupportedOperationError,
     };
 
     use super::*;
@@ -2002,6 +2043,13 @@ mod plaintext {
             unreachable!()
         }
 
+        fn record_sequence_encrypter(
+            &self,
+            _key: BlockCipherKey,
+        ) -> Box<dyn RecordSequenceNumberEncrypter> {
+            Box::new(Encrypter)
+        }
+
         fn key_len(&self) -> usize {
             32
         }
@@ -2022,6 +2070,7 @@ mod plaintext {
             &mut self,
             record: Record<OutboundPlain<'_>>,
             _seq: u64,
+            _header: &[u8],
             out: &'a mut [u8],
         ) -> Result<Record<&'a [u8]>, Error> {
             let mut payload = EncryptBuffer::new(out, record.payload.len())?;
@@ -2036,6 +2085,16 @@ mod plaintext {
 
         fn encrypted_payload_len(&self, payload_len: usize) -> usize {
             payload_len
+        }
+
+        fn protocol_version(&self) -> ProtocolVersion {
+            ProtocolVersion::TLSv1_3
+        }
+    }
+
+    impl RecordSequenceNumberEncrypter for Encrypter {
+        fn mask(&self, ciphertext: &[u8]) -> Result<[u8; 2], Error> {
+            Ok(*ciphertext[..2].as_array().unwrap())
         }
     }
 

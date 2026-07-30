@@ -13,6 +13,7 @@ use rustls::crypto::cipher::{
 use rustls::crypto::kx::KeyExchangeAlgorithm;
 use rustls::crypto::tls12::PrfUsingHmac;
 use rustls::crypto::{CipherSuite, SignatureScheme};
+use rustls::enums::ProtocolVersion;
 use rustls::error::Error;
 use rustls::version::TLS12_VERSION;
 use rustls::{CipherSuiteCommon, ConnectionTrafficSecrets, Tls12CipherSuite};
@@ -290,11 +291,249 @@ impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for GcmRecordDecr
 impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for GcmRecordEncrypter {
     fn encrypt(
         &mut self,
+<<<<<<< HEAD
         nonce: Nonce,
         aad: [u8; AAD_SIZE],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
         let tag = self
+||||||| parent of fe87d8cf (WIP DTLS implementation)
+        msg: EncodedMessage<OutboundPlain<'_>>,
+        seq: u64,
+        out: &'a mut [u8],
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+        let mut payload = EncryptBuffer::new(out, total_len)?;
+
+        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
+        let aad = aead::Aad::from(make_tls12_aad(
+            seq,
+            msg.typ,
+            msg.version.encode(),
+            msg.payload.len(),
+        ));
+        payload.extend_from_slice(&nonce.as_ref()[4..]);
+        payload.extend_from_chunks(&msg.payload);
+
+        match self.enc_key.seal_in_place_separate_tag(
+            nonce,
+            aad,
+            &mut payload.as_mut()[GCM_EXPLICIT_NONCE_LEN..],
+        ) {
+            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
+            Err(_) => return Err(Error::EncryptError),
+        }
+
+        Ok(EncodedMessage {
+            typ: msg.typ,
+            version: msg.version,
+            payload: payload.into_written(),
+        })
+    }
+
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        payload_len + GCM_EXPLICIT_NONCE_LEN + self.enc_key.algorithm().tag_len()
+    }
+}
+
+/// The RFC 7905/RFC 7539 ChaCha20Poly1305 construction.
+/// This implementation does the AAD construction required in TLS1.2.
+/// TLS1.3 uses `TLS13MessageEncrypter`.
+struct ChaCha20Poly1305MessageEncrypter {
+    enc_key: aead::LessSafeKey,
+    enc_offset: Iv,
+}
+
+/// The RFC 7905/RFC 7539 ChaCha20Poly1305 construction.
+/// This implementation does the AAD construction required in TLS1.2.
+/// TLS1.3 uses `TLS13MessageDecrypter`.
+struct ChaCha20Poly1305MessageDecrypter {
+    dec_key: aead::LessSafeKey,
+    dec_offset: Iv,
+}
+
+const CHACHAPOLY1305_OVERHEAD: usize = 16;
+
+impl MessageDecrypter for ChaCha20Poly1305MessageDecrypter {
+    fn decrypt<'a>(
+        &mut self,
+        mut msg: EncodedMessage<InboundOpaque<'a>>,
+        seq: u64,
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let payload = &msg.payload;
+
+        if payload.len() < CHACHAPOLY1305_OVERHEAD {
+            return Err(Error::DecryptError);
+        }
+
+        let nonce =
+            aead::Nonce::assume_unique_for_key(Nonce::new(&self.dec_offset, seq).to_array()?);
+        let aad = aead::Aad::from(make_tls12_aad(
+            seq,
+            msg.typ,
+            msg.version.version(),
+            payload.len() - CHACHAPOLY1305_OVERHEAD,
+        ));
+
+        let payload = &mut msg.payload;
+        let plain_len = self
+            .dec_key
+            .open_in_place(nonce, aad, payload)
+            .map_err(|_| Error::DecryptError)?
+            .len();
+
+        if plain_len > MAX_FRAGMENT_LEN {
+            return Err(Error::PeerSentOversizedRecord);
+        }
+
+        payload.truncate(plain_len);
+        Ok(msg.into_plain_message())
+    }
+}
+
+impl MessageEncrypter for ChaCha20Poly1305MessageEncrypter {
+    fn encrypt<'a>(
+        &mut self,
+        msg: EncodedMessage<OutboundPlain<'_>>,
+        seq: u64,
+        out: &'a mut [u8],
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+        let mut payload = EncryptBuffer::new(out, total_len)?;
+
+        let nonce =
+            aead::Nonce::assume_unique_for_key(Nonce::new(&self.enc_offset, seq).to_array()?);
+        let aad = aead::Aad::from(make_tls12_aad(
+            seq,
+            msg.typ,
+            msg.version.encode(),
+            msg.payload.len(),
+        ));
+        payload.extend_from_chunks(&msg.payload);
+
+        match self
+=======
+        msg: EncodedMessage<OutboundPlain<'_>>,
+        seq: u64,
+        _header: &[u8],
+        out: &'a mut [u8],
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+        let mut payload = EncryptBuffer::new(out, total_len)?;
+
+        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
+        let aad = aead::Aad::from(make_tls12_aad(
+            seq,
+            msg.typ,
+            msg.version.encode(),
+            msg.payload.len(),
+        ));
+        payload.extend_from_slice(&nonce.as_ref()[4..]);
+        payload.extend_from_chunks(&msg.payload);
+
+        match self.enc_key.seal_in_place_separate_tag(
+            nonce,
+            aad,
+            &mut payload.as_mut()[GCM_EXPLICIT_NONCE_LEN..],
+        ) {
+            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
+            Err(_) => return Err(Error::EncryptError),
+        }
+
+        Ok(EncodedMessage {
+            typ: msg.typ,
+            version: msg.version,
+            payload: payload.into_written(),
+        })
+    }
+
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        payload_len + GCM_EXPLICIT_NONCE_LEN + self.enc_key.algorithm().tag_len()
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
+    }
+}
+
+/// The RFC 7905/RFC 7539 ChaCha20Poly1305 construction.
+/// This implementation does the AAD construction required in TLS1.2.
+/// TLS1.3 uses `TLS13MessageEncrypter`.
+struct ChaCha20Poly1305MessageEncrypter {
+    enc_key: aead::LessSafeKey,
+    enc_offset: Iv,
+}
+
+/// The RFC 7905/RFC 7539 ChaCha20Poly1305 construction.
+/// This implementation does the AAD construction required in TLS1.2.
+/// TLS1.3 uses `TLS13MessageDecrypter`.
+struct ChaCha20Poly1305MessageDecrypter {
+    dec_key: aead::LessSafeKey,
+    dec_offset: Iv,
+}
+
+const CHACHAPOLY1305_OVERHEAD: usize = 16;
+
+impl MessageDecrypter for ChaCha20Poly1305MessageDecrypter {
+    fn decrypt<'a>(
+        &mut self,
+        mut msg: EncodedMessage<InboundOpaque<'a>>,
+        seq: u64,
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let payload = &msg.payload;
+
+        if payload.len() < CHACHAPOLY1305_OVERHEAD {
+            return Err(Error::DecryptError);
+        }
+
+        let nonce =
+            aead::Nonce::assume_unique_for_key(Nonce::new(&self.dec_offset, seq).to_array()?);
+        let aad = aead::Aad::from(make_tls12_aad(
+            seq,
+            msg.typ,
+            msg.version.version(),
+            payload.len() - CHACHAPOLY1305_OVERHEAD,
+        ));
+
+        let payload = &mut msg.payload;
+        let plain_len = self
+            .dec_key
+            .open_in_place(nonce, aad, payload)
+            .map_err(|_| Error::DecryptError)?
+            .len();
+
+        if plain_len > MAX_FRAGMENT_LEN {
+            return Err(Error::PeerSentOversizedRecord);
+        }
+
+        payload.truncate(plain_len);
+        Ok(msg.into_plain_message())
+    }
+}
+
+impl MessageEncrypter for ChaCha20Poly1305MessageEncrypter {
+    fn encrypt<'a>(
+        &mut self,
+        msg: EncodedMessage<OutboundPlain<'_>>,
+        seq: u64,
+        _header: &[u8],
+        out: &'a mut [u8],
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+        let mut payload = EncryptBuffer::new(out, total_len)?;
+
+        let nonce =
+            aead::Nonce::assume_unique_for_key(Nonce::new(&self.enc_offset, seq).to_array()?);
+        let aad = aead::Aad::from(make_tls12_aad(
+            seq,
+            msg.typ,
+            msg.version.encode(),
+            msg.payload.len(),
+        ));
+        payload.extend_from_chunks(&msg.payload);
+
+        match self
+>>>>>>> fe87d8cf (WIP DTLS implementation)
             .enc_key
             .seal_in_place_separate_tag(
                 aead::Nonce::assume_unique_for_key(nonce.to_array()?),
@@ -374,6 +613,10 @@ impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for ChaCha20Poly1
 
     fn tag_len(&self) -> usize {
         self.enc_key.algorithm().tag_len()
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
     }
 }
 

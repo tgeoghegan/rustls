@@ -10,6 +10,8 @@ mod tests_with_ring {
     mod compress;
     #[path = "api/crypto.rs"]
     mod crypto;
+    #[path = "api/datagram.rs"]
+    mod datagram;
     #[path = "api/ffdhe.rs"]
     mod ffdhe;
     #[path = "api/io.rs"]
@@ -44,6 +46,8 @@ mod tests_with_aws_lc_rs {
     mod compress;
     #[path = "api/crypto.rs"]
     mod crypto;
+    #[path = "api/datagram.rs"]
+    mod datagram;
     #[path = "api/ffdhe.rs"]
     mod ffdhe;
     #[path = "api/io.rs"]

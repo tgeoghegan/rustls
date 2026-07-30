@@ -5,10 +5,10 @@ use core::time::Duration;
 use std::borrow::Cow;
 
 use crate::crypto::cipher::{
-    AeadKey, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, OutboundPlain, Record,
-    RecordDecrypter, RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider,
-    TLS12_AAD_SIZE, TLS13_AAD_SIZE, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
-    UnsupportedOperationError,
+    AeadKey, BlockCipherKey, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, OutboundPlain,
+    Record, RecordDecrypter, RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider,
+    RecordSequenceNumberEncrypter, TLS12_AAD_SIZE, TLS13_AAD_SIZE, Tls12AeadAlgorithm,
+    Tls13AeadAlgorithm, UnsupportedOperationError,
 };
 use crate::crypto::kx::{
     KeyExchangeAlgorithm, NamedGroup, SharedSecret, StartedKeyExchange, SupportedKxGroup,
@@ -17,7 +17,7 @@ use crate::crypto::{
     self, CipherSuite, CipherSuiteCommon, GetRandomFailed, HashAlgorithm, SignatureScheme,
     TicketProducer, WebPkiSupportedAlgorithms, hash, hmac, tls12, tls13,
 };
-use crate::enums::ContentType;
+use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::PeerMisbehaved;
 use crate::pki_types::{
     AlgorithmIdentifier, InvalidSignature, PrivateKeyDer, SignatureVerificationAlgorithm,
@@ -333,6 +333,13 @@ impl Tls13AeadAlgorithm for Aead {
         unreachable!()
     }
 
+    fn record_sequence_encrypter(
+        &self,
+        _key: BlockCipherKey,
+    ) -> Box<dyn RecordSequenceNumberEncrypter> {
+        Box::new(Tls13Cipher)
+    }
+
     fn key_len(&self) -> usize {
         16
     }
@@ -393,6 +400,7 @@ impl RecordEncrypter for Tls13Cipher {
         &mut self,
         record: Record<OutboundPlain<'_>>,
         seq: u64,
+        _header: &[u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
         let total_len = self.encrypted_payload_len(record.payload.len());
@@ -421,6 +429,16 @@ impl RecordEncrypter for Tls13Cipher {
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + 1 + AEAD_OVERHEAD
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_3
+    }
+}
+
+impl RecordSequenceNumberEncrypter for Tls13Cipher {
+    fn mask(&self, ciphertext: &[u8]) -> Result<[u8; 2], Error> {
+        Ok(*ciphertext[..2].as_array().unwrap())
     }
 }
 
@@ -463,6 +481,7 @@ impl RecordEncrypter for Tls12Cipher {
         &mut self,
         record: Record<OutboundPlain<'_>>,
         seq: u64,
+        _header: &[u8],
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
         let total_len = self.encrypted_payload_len(record.payload.len());
@@ -489,6 +508,10 @@ impl RecordEncrypter for Tls12Cipher {
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + AEAD_OVERHEAD
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::TLSv1_2
     }
 }
 
