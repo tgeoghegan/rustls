@@ -94,10 +94,15 @@ mod client_hello {
             mut st: ExpectClientHello,
             output: &mut dyn Output<'_>,
         ) -> Result<ServerState, Error> {
+            let version = if input.message.version.is_datagram_tls() {
+                ProtocolVersion::DTLSv1_2
+            } else {
+                ProtocolVersion::TLSv1_2
+            };
             let mut randoms = st.randoms(&input)?;
             let mut transcript = st
                 .transcript
-                .start(suite.common.hash_provider, ProtocolVersion::TLSv1_2)?;
+                .start(suite.common.hash_provider, version)?;
 
             // -- TLS1.2 only from hereon in --
             transcript.add_message(input.message);
@@ -151,7 +156,7 @@ mod client_hello {
                     suite,
                     st.using_ems,
                     output,
-                    ProtocolVersion::TLSv1_2,
+                    version,
                     input,
                     st.sni,
                     st.resumption_data,
@@ -181,7 +186,7 @@ mod client_hello {
                 alpn_protocol,
                 send_ticket,
             } = emit_server_hello(
-                ProtocolVersion::TLSv1_2,
+                version,
                 &mut flight,
                 &st.config,
                 output,

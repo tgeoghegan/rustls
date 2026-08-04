@@ -188,7 +188,7 @@ impl ExpectServerHello {
         // handshake_traffic_secret.
         suite
             .client_handler()
-            .handle_server_hello(suite, server_hello, input, self, output)
+            .handle_server_hello(version, suite, server_hello, input, self, output)
     }
 }
 

@@ -105,10 +105,15 @@ impl ClientHandler<Tls13CipherSuite> for Handler {
         mut st: ExpectServerHello,
         output: &mut dyn Output<'_>,
     ) -> Result<ClientState, Error> {
+        let version = if input.message.version.is_datagram_tls() {
+            ProtocolVersion::DTLSv1_3
+        } else {
+            ProtocolVersion::TLSv1_3
+        };
         // Start our handshake hash, and input the server-hello.
         let mut transcript = st
             .transcript_buffer
-            .start_hash(suite.common.hash_provider, ProtocolVersion::TLSv1_3);
+            .start_hash(suite.common.hash_provider, version);
         transcript.add_message(&input.message);
 
         let mut randoms = ConnectionRandoms::new(st.input.random, server_hello.random);

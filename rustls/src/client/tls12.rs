@@ -10,7 +10,6 @@ use subtle::ConstantTimeEq;
 use super::config::{ClientConfig, ClientSessionKey};
 use super::hs::ClientState;
 use super::{ClientAuthDetails, ServerCertDetails, Tls12Session};
-use crate::ConnectionTrafficSecrets;
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::common_state::{HandshakeKind, Output, OutputEvent, Side};
 use crate::conn::kernel::KernelState;
@@ -36,6 +35,7 @@ use crate::verify::{
     DigitallySignedStruct, FinishedMessageVerified, HandshakeSignatureValid, PeerVerified,
     ServerIdentity, SignatureVerificationInput, VerifiedIdentity,
 };
+use crate::{ConnectionTrafficSecrets, Protocol};
 
 #[expect(private_interfaces)]
 pub(crate) enum Tls12State {
@@ -94,10 +94,11 @@ mod server_hello {
             st: ExpectServerHello,
             output: &mut dyn Output<'_>,
         ) -> Result<ClientState, Error> {
+            let version = protocol_version(message);
             // Start our handshake hash, and input the server-hello.
             let mut transcript = st
                 .transcript_buffer
-                .start_hash(suite.common.hash_provider, ProtocolVersion::TLSv1_2);
+                .start_hash(suite.common.hash_provider, version);
             transcript.add_message(message);
 
             let mut randoms = ConnectionRandoms::new(st.input.random, server_hello.random);
@@ -737,6 +738,8 @@ impl ExpectServerDone {
 
         let proof = input.check_aligned_handshake()?;
 
+        let output_version = protocol_version(&input.message);
+
         trace!("Server cert is {:?}", self.server_cert.cert_chain);
         debug!("Server DNS name is {:?}", self.hs.session_key.server_name);
 
@@ -808,12 +811,7 @@ impl ExpectServerDone {
                     CertificateChain::from_signer(credentials)
                 }
             };
-            emit_certificate(
-                &mut self.hs.transcript,
-                ProtocolVersion::TLSv1_2,
-                certs,
-                output,
-            );
+            emit_certificate(&mut self.hs.transcript, output_version, certs, output);
         }
 
         // 4a.
@@ -847,7 +845,7 @@ impl ExpectServerDone {
         // 4b.
         emit_client_kx(
             &mut self.hs.transcript,
-            ProtocolVersion::TLSv1_2,
+            output_version,
             self.suite.kx,
             output,
             kx.pub_key(),
@@ -862,7 +860,7 @@ impl ExpectServerDone {
         if let Some(ClientAuthDetails::Verify { credentials, .. }) = self.client_auth {
             emit_certverify(
                 &mut self.hs.transcript,
-                ProtocolVersion::TLSv1_2,
+                output_version,
                 credentials.signer,
                 output,
             )?;
@@ -881,7 +879,7 @@ impl ExpectServerDone {
         output.output(OutputEvent::KeyExchangeGroup(skxg));
 
         // 4e. CCS. We are definitely going to switch on encryption.
-        emit_ccs(ProtocolVersion::TLSv1_2, output);
+        emit_ccs(output_version, output);
 
         // 4f. Now commit secrets.
         self.hs.config.key_log.log(
@@ -901,7 +899,7 @@ impl ExpectServerDone {
 
         // 5.
         emit_finished(
-            ProtocolVersion::TLSv1_2,
+            output_version,
             &secrets,
             &mut self.hs.transcript,
             output,
@@ -1116,6 +1114,7 @@ impl ExpectFinished {
         )?;
 
         let proof = input.check_aligned_handshake()?;
+        let output_version = protocol_version(&input.message);
 
         // Work out what verify_data we expect.
         let vh = st.hs.transcript.current_hash();
@@ -1141,7 +1140,7 @@ impl ExpectFinished {
         st.save_session();
 
         if let Some((_, encrypter)) = st.resuming.take() {
-            emit_ccs(ProtocolVersion::TLSv1_2, output);
+            emit_ccs(output_version, output);
             output.send().set_encrypter(
                 encrypter,
                 st.secrets
@@ -1150,7 +1149,7 @@ impl ExpectFinished {
                     .confidentiality_limit,
             );
             emit_finished(
-                ProtocolVersion::TLSv1_2,
+                output_version,
                 &st.secrets,
                 &mut st.hs.transcript,
                 output,
@@ -1264,5 +1263,14 @@ impl KernelState for ExpectTraffic {
 impl From<Box<ExpectTraffic>> for ClientState {
     fn from(value: Box<ExpectTraffic>) -> Self {
         Self::Tls12(Tls12State::Traffic(value))
+    }
+}
+
+/// [`ProtocolVersion`] implied by transport protocol.
+fn protocol_version(input: &Message<'_>) -> ProtocolVersion {
+    if input.version.is_datagram_tls() {
+        ProtocolVersion::DTLSv1_2
+    } else {
+        ProtocolVersion::TLSv1_2
     }
 }

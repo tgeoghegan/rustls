@@ -114,10 +114,15 @@ mod client_hello {
             mut st: ExpectClientHello,
             output: &mut dyn Output<'_>,
         ) -> Result<ServerState, Error> {
+            let version = if input.message.version.is_datagram_tls() {
+                ProtocolVersion::DTLSv1_3
+            } else {
+                ProtocolVersion::TLSv1_3
+            };
             let randoms = st.randoms(&input)?;
             let mut transcript = st
                 .transcript
-                .start(suite.common.hash_provider, ProtocolVersion::TLSv1_3)?;
+                .start(suite.common.hash_provider, version)?;
 
             if input
                 .client_hello
@@ -266,7 +271,7 @@ mod client_hello {
                 &mut transcript,
                 &randoms,
                 suite,
-                ProtocolVersion::TLSv1_3,
+                version,
                 output,
                 &input.client_hello.session_id,
                 chosen_share_and_kxg,

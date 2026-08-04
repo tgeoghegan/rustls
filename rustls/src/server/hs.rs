@@ -638,7 +638,7 @@ impl ExpectClientHello {
 
         suite
             .server_handler()
-            .handle_client_hello(suite, skxg, credentials, input, self, output)
+            .handle_client_hello(version, suite, skxg, credentials, input, self, output)
     }
 
     fn choose_suite_and_kx_group<T: Suite + 'static>(

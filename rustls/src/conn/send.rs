@@ -183,7 +183,7 @@ impl SendPath {
 }
 
 impl SendOutput for SendPath {
-    fn negotiated_version(&mut self, version: ProtocolVersion) {
+    fn set_negotiated_version(&mut self, version: ProtocolVersion) {
         self.negotiated_version = Some(version);
     }
 
@@ -300,7 +300,7 @@ enum KeyUpdateRemote {
 }
 
 pub(crate) trait SendOutput {
-    fn negotiated_version(&mut self, version: ProtocolVersion);
+    fn set_negotiated_version(&mut self, version: ProtocolVersion);
 
     fn queue_requested_key_update(&mut self);
 
