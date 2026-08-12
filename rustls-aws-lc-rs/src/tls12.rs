@@ -1,11 +1,12 @@
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use aws_lc_rs::{aead, tls_prf};
 use pki_types::FipsStatus;
 use rustls::crypto::cipher::{
     AeadKey, EncodedMessage, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, MessageDecrypter,
-    MessageEncrypter, NONCE_LEN, Nonce, OutboundPlain, Tls12AeadAlgorithm,
-    UnsupportedOperationError, make_tls12_aad,
+    MessageEncrypter, NONCE_LEN, Nonce, Tls12AeadAlgorithm, UnsupportedOperationError,
+    make_tls12_aad,
 };
 use rustls::crypto::kx::{ActiveKeyExchange, KeyExchangeAlgorithm, SharedSecret};
 use rustls::crypto::tls12::{Prf, PrfSecret};
@@ -302,46 +303,31 @@ impl MessageDecrypter for GcmMessageDecrypter {
 }
 
 impl MessageEncrypter for GcmMessageEncrypter {
-    fn encrypt<'a>(
+    fn encrypt_tag(
         &mut self,
-        msg: EncodedMessage<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = EncryptBuffer::new(out, total_len)?;
+        nonce: Nonce,
+        aad: &[u8],
+        in_out: &mut EncryptBuffer<'_>,
+    ) -> Result<Vec<u8>, Error> {
+        let nonce = aead::Nonce::assume_unique_for_key(nonce.to_array()?);
+        let aad = aead::Aad::from(aad);
 
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls12_aad(
-            seq,
-            msg.typ,
-            msg.version.encode(),
-            msg.payload.len(),
-        ));
-        payload.extend_from_slice(&nonce.as_ref()[4..]);
-        payload.extend_from_chunks(&msg.payload);
+        let tag = self
+            .enc_key
+            .seal_in_place_separate_tag(nonce, aad, &mut in_out.as_mut()[GCM_EXPLICIT_NONCE_LEN..])
+            .map_err(|_| Error::EncryptError)?;
 
-        match self.enc_key.seal_in_place_separate_tag(
-            nonce,
-            aad,
-            &mut payload.as_mut()[GCM_EXPLICIT_NONCE_LEN..],
-        ) {
-            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-            Err(_) => return Err(Error::EncryptError),
-        }
-
-        Ok(EncodedMessage {
-            typ: msg.typ,
-            version: msg.version,
-            payload: payload.into_written(),
-        })
+        Ok(tag.as_ref().to_vec())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + GCM_EXPLICIT_NONCE_LEN + self.enc_key.algorithm().tag_len()
     }
-}
 
+    fn iv(&self) -> &Iv {
+        &self.iv
+    }
+}
 /// The RFC 7905/RFC 7539 ChaCha20Poly1305 construction.
 /// This implementation does the AAD construction required in TLS1.2.
 /// TLS1.3 uses `TLS13MessageEncrypter`.
@@ -399,42 +385,29 @@ impl MessageDecrypter for ChaCha20Poly1305MessageDecrypter {
 }
 
 impl MessageEncrypter for ChaCha20Poly1305MessageEncrypter {
-    fn encrypt<'a>(
+    fn encrypt_tag(
         &mut self,
-        msg: EncodedMessage<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = EncryptBuffer::new(out, total_len)?;
+        nonce: Nonce,
+        aad: &[u8],
+        in_out: &mut EncryptBuffer<'_>,
+    ) -> Result<Vec<u8>, Error> {
+        let nonce = aead::Nonce::assume_unique_for_key(nonce.to_array()?);
+        let aad = aead::Aad::from(aad);
 
-        let nonce =
-            aead::Nonce::assume_unique_for_key(Nonce::new(&self.enc_offset, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls12_aad(
-            seq,
-            msg.typ,
-            msg.version.encode(),
-            msg.payload.len(),
-        ));
-        payload.extend_from_chunks(&msg.payload);
-
-        match self
+        let tag = self
             .enc_key
-            .seal_in_place_separate_tag(nonce, aad, payload.as_mut())
-        {
-            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-            Err(_) => return Err(Error::EncryptError),
-        }
+            .seal_in_place_separate_tag(nonce, aad, in_out.as_mut())
+            .map_err(|_| Error::EncryptError)?;
 
-        Ok(EncodedMessage {
-            typ: msg.typ,
-            version: msg.version,
-            payload: payload.into_written(),
-        })
+        Ok(tag.as_ref().to_vec())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + self.enc_key.algorithm().tag_len()
+    }
+
+    fn iv(&self) -> &Iv {
+        &self.enc_offset
     }
 }
 

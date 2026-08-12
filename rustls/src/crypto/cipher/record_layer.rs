@@ -72,24 +72,9 @@ impl EncryptionState {
         let seq = self.write_seq;
         self.write_seq += 1;
 
-        #[cfg(debug_assertions)]
-        let (out_ptr, out_len) = (out.as_ptr(), out.len());
         let encrypted = encrypter
-            .encrypt(plain, seq, &mut out[HEADER_SIZE..])
+            .encrypt(plain, seq, out)
             .unwrap();
-
-        #[cfg(debug_assertions)]
-        {
-            // `MessageEncrypter::encrypt()` requires the returned payload to be
-            // the written prefix of the passed-in buffer. Try to catch misbehaving
-            // implementations in debug mode. In release builds a violation would corrupt
-            // the sent stream.
-            debug_assert_eq!(
-                encrypted.payload.as_ptr(),
-                out_ptr.wrapping_add(HEADER_SIZE)
-            );
-            debug_assert!(encrypted.payload.len() <= out_len - HEADER_SIZE);
-        }
 
         let (typ, version, len) = (encrypted.typ, encrypted.version, encrypted.payload.len());
         debug_assert!(len <= usize::from(u16::MAX));

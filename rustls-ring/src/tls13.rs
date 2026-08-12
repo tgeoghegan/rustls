@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use pki_types::FipsStatus;
 use ring::hkdf::{self, KeyType};
@@ -6,10 +7,9 @@ use ring::{aead, hmac};
 use rustls::crypto::CipherSuite;
 use rustls::crypto::cipher::{
     AeadKey, EncodedMessage, EncryptBuffer, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter,
-    Nonce, OutboundPlain, Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
+    Nonce, Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
 };
 use rustls::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
-use rustls::enums::ContentType;
 use rustls::error::Error;
 use rustls::version::TLS13_VERSION;
 use rustls::{CipherSuiteCommon, ConnectionTrafficSecrets, Tls13CipherSuite, crypto};
@@ -195,38 +195,29 @@ struct Tls13MessageDecrypter {
 }
 
 impl MessageEncrypter for Tls13MessageEncrypter {
-    fn encrypt<'a>(
+    fn encrypt_tag(
         &mut self,
-        msg: EncodedMessage<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = EncryptBuffer::new(out, total_len)?;
+        nonce: Nonce,
+        aad: &[u8],
+        in_out: &mut EncryptBuffer<'_>,
+    ) -> Result<Vec<u8>, Error> {
+        let nonce = aead::Nonce::assume_unique_for_key(nonce.to_array()?);
+        let aad = aead::Aad::from(aad);
 
-        let typ = ContentType::ApplicationData;
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(typ, msg.version.encode(), total_len));
-        payload.extend_from_chunks(&msg.payload);
-        payload.extend_from_slice(&msg.typ.to_array());
-
-        match self
+        let tag = self
             .enc_key
-            .seal_in_place_separate_tag(nonce, aad, payload.as_mut())
-        {
-            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-            Err(_) => return Err(Error::EncryptError),
-        }
+            .seal_in_place_separate_tag(nonce, aad, in_out.as_mut())
+            .map_err(|_| Error::EncryptError)?;
 
-        Ok(EncodedMessage {
-            typ,
-            version: msg.version,
-            payload: payload.into_written(),
-        })
+        Ok(tag.as_ref().to_vec())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + 1 + self.enc_key.algorithm().tag_len()
+    }
+
+    fn iv(&self) -> &Iv {
+        &self.iv
     }
 }
 

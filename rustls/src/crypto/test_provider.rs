@@ -6,8 +6,7 @@ use std::borrow::Cow;
 
 use crate::crypto::cipher::{
     AeadKey, EncodedMessage, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, MessageDecrypter,
-    MessageEncrypter, OutboundPlain, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
-    UnsupportedOperationError,
+    MessageEncrypter, Nonce, Tls12AeadAlgorithm, Tls13AeadAlgorithm, UnsupportedOperationError,
 };
 use crate::crypto::kx::{
     KeyExchangeAlgorithm, NamedGroup, SharedSecret, StartedKeyExchange, SupportedKxGroup,
@@ -16,7 +15,6 @@ use crate::crypto::{
     self, CipherSuite, CipherSuiteCommon, GetRandomFailed, HashAlgorithm, SignatureScheme,
     TicketProducer, WebPkiSupportedAlgorithms, hash, hmac, tls12, tls13,
 };
-use crate::enums::ContentType;
 use crate::error::PeerMisbehaved;
 use crate::pki_types::{
     AlgorithmIdentifier, InvalidSignature, PrivateKeyDer, SignatureVerificationAlgorithm,
@@ -317,11 +315,11 @@ struct Aead;
 
 impl Tls13AeadAlgorithm for Aead {
     fn encrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn MessageEncrypter> {
-        Box::new(Tls13Cipher)
+        Box::new(Tls13Cipher::new())
     }
 
     fn decrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn MessageDecrypter> {
-        Box::new(Tls13Cipher)
+        Box::new(Tls13Cipher::new())
     }
 
     fn key_len(&self) -> usize {
@@ -339,11 +337,11 @@ impl Tls13AeadAlgorithm for Aead {
 
 impl Tls12AeadAlgorithm for Aead {
     fn encrypter(&self, _key: AeadKey, _iv: &[u8], _: &[u8]) -> Box<dyn MessageEncrypter> {
-        Box::new(Tls12Cipher)
+        Box::new(Tls12Cipher::new())
     }
 
     fn decrypter(&self, _key: AeadKey, _iv: &[u8]) -> Box<dyn MessageDecrypter> {
-        Box::new(Tls12Cipher)
+        Box::new(Tls12Cipher::new())
     }
 
     fn key_block_shape(&self) -> KeyBlockShape {
@@ -364,22 +362,26 @@ impl Tls12AeadAlgorithm for Aead {
     }
 }
 
-pub(crate) struct Tls13Cipher;
+pub(crate) struct Tls13Cipher {
+    iv: Iv,
+}
+
+impl Tls13Cipher {
+    pub(crate) fn new() -> Self {
+        Self {
+            iv: Iv::new(&[]).unwrap(),
+        }
+    }
+}
 
 impl MessageEncrypter for Tls13Cipher {
-    fn encrypt<'a>(
+    fn encrypt_tag(
         &mut self,
-        m: EncodedMessage<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = EncryptBuffer::new(out, total_len)?;
-
-        payload.extend_from_chunks(&m.payload);
-        payload.extend_from_slice(&m.typ.to_array());
-
-        for (p, mask) in payload
+        nonce: Nonce,
+        _aad: &[u8],
+        in_out: &mut EncryptBuffer<'_>,
+    ) -> Result<Vec<u8>, Error> {
+        for (p, mask) in in_out
             .as_mut()
             .iter_mut()
             .zip(AEAD_MASK.iter().cycle())
@@ -387,18 +389,17 @@ impl MessageEncrypter for Tls13Cipher {
             *p ^= *mask;
         }
 
-        payload.extend_from_slice(&seq.to_be_bytes());
-        payload.extend_from_slice(AEAD_TAG);
+        in_out.extend_from_slice(nonce.as_bytes());
 
-        Ok(EncodedMessage {
-            typ: ContentType::ApplicationData,
-            version: m.version,
-            payload: payload.into_written(),
-        })
+        Ok(AEAD_TAG.to_vec())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
         payload_len + 1 + AEAD_OVERHEAD
+    }
+
+    fn iv(&self) -> &Iv {
+        &self.iv
     }
 }
 
@@ -434,20 +435,26 @@ impl MessageDecrypter for Tls13Cipher {
     }
 }
 
-struct Tls12Cipher;
+struct Tls12Cipher {
+    iv: Iv,
+}
+
+impl Tls12Cipher {
+    pub(crate) fn new() -> Self {
+        Self {
+            iv: Iv::new(&[]).unwrap(),
+        }
+    }
+}
 
 impl MessageEncrypter for Tls12Cipher {
-    fn encrypt<'a>(
+    fn encrypt_tag(
         &mut self,
-        m: EncodedMessage<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(m.payload.len());
-        let mut payload = EncryptBuffer::new(out, total_len)?;
-        payload.extend_from_chunks(&m.payload);
-
-        for (p, mask) in payload
+        nonce: Nonce,
+        _aad: &[u8],
+        in_out: &mut EncryptBuffer<'_>,
+    ) -> Result<Vec<u8>, Error> {
+        for (p, mask) in in_out
             .as_mut()
             .iter_mut()
             .zip(AEAD_MASK.iter().cycle())
@@ -455,18 +462,17 @@ impl MessageEncrypter for Tls12Cipher {
             *p ^= *mask;
         }
 
-        payload.extend_from_slice(&seq.to_be_bytes());
-        payload.extend_from_slice(AEAD_TAG);
+        in_out.extend_from_slice(nonce.as_bytes());
 
-        Ok(EncodedMessage {
-            typ: m.typ,
-            version: m.version,
-            payload: payload.into_written(),
-        })
+        Ok(AEAD_TAG.to_vec())
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
-        payload_len + AEAD_OVERHEAD
+        payload_len + 1 + AEAD_OVERHEAD
+    }
+
+    fn iv(&self) -> &Iv {
+        &self.iv
     }
 }
 

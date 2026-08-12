@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 use core::{array, fmt};
 
 use pki_types::FipsStatus;
@@ -7,7 +8,7 @@ use zeroize::Zeroize;
 
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{ApiMisuse, Error};
-use crate::msgs::{put_u16, put_u64};
+use crate::msgs::{HEADER_SIZE, put_u16, put_u64};
 use crate::suites::ConnectionTrafficSecrets;
 
 mod messages;
@@ -159,6 +160,14 @@ pub trait MessageDecrypter: Send + Sync {
 
 /// Objects with this trait can encrypt TLS messages.
 pub trait MessageEncrypter: Send + Sync {
+    /// Encrypt, returning the AEAD tag.
+    fn encrypt_tag(
+        &mut self,
+        nonce: Nonce,
+        aad: &[u8],
+        in_out: &mut EncryptBuffer<'_>,
+    ) -> Result<Vec<u8>, Error>;
+
     /// Encrypt the given TLS message `msg` into `out`, using the sequence number
     /// `seq` which can be used to derive a unique [`Nonce`].
     ///
@@ -174,14 +183,49 @@ pub trait MessageEncrypter: Send + Sync {
     /// write it to `out` themselves.
     fn encrypt<'a>(
         &mut self,
-        msg: EncodedMessage<OutboundPlain<'_>>,
+        plain: EncodedMessage<OutboundPlain<'_>>,
         seq: u64,
         out: &'a mut [u8],
-    ) -> Result<EncodedMessage<&'a [u8]>, Error>;
+    ) -> Result<EncodedMessage<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(plain.payload.len());
+
+        let mut payload = EncryptBuffer::new(&mut out[HEADER_SIZE..], total_len)?;
+        payload.extend_from_chunks(&plain.payload);
+
+        let nonce = Nonce::new(self.iv(), seq);
+
+        let (typ, aad) = match plain.version.version() {
+            ProtocolVersion::TLSv1_2 => (
+                plain.typ,
+                make_tls12_aad(seq, plain.typ, plain.version.encode(), plain.payload.len())
+                    .to_vec(),
+            ),
+            ProtocolVersion::TLSv1_3 => {
+                payload.extend_from_slice(&plain.typ.to_array());
+                (
+                    ContentType::ApplicationData,
+                    make_tls13_aad(plain.typ, plain.version.encode(), plain.payload.len()).to_vec(),
+                )
+            }
+            _ => panic!("unsupported protocol version"),
+        };
+
+        let tag = self.encrypt_tag(nonce, aad.as_ref(), &mut payload)?;
+        payload.extend_from_slice(tag.as_ref());
+
+        Ok(EncodedMessage {
+            typ,
+            version: plain.version,
+            payload: payload.into_written(),
+        })
+    }
 
     /// Return the length of the ciphertext that results from encrypting plaintext of
     /// length `payload_len`
     fn encrypted_payload_len(&self, payload_len: usize) -> usize;
+
+    /// IV for encryption.
+    fn iv(&self) -> &Iv;
 }
 
 /// A write or read IV.

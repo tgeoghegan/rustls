@@ -1989,8 +1989,8 @@ pub fn certificate_error_expecting_name(expected: &str) -> CertificateError {
 mod plaintext {
     use rustls::ConnectionTrafficSecrets;
     use rustls::crypto::cipher::{
-        AeadKey, EncryptBuffer, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter,
-        OutboundPlain, Tls13AeadAlgorithm, UnsupportedOperationError,
+        AeadKey, EncryptBuffer, InboundOpaque, Iv, MessageDecrypter, MessageEncrypter, Nonce,
+        Tls13AeadAlgorithm, UnsupportedOperationError,
     };
 
     use super::*;
@@ -1999,7 +1999,9 @@ mod plaintext {
 
     impl Tls13AeadAlgorithm for Aead {
         fn encrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn MessageEncrypter> {
-            Box::new(Encrypter)
+            Box::new(Encrypter {
+                iv: Iv::new(&[]).unwrap(),
+            })
         }
 
         fn decrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn MessageDecrypter> {
@@ -2019,27 +2021,26 @@ mod plaintext {
         }
     }
 
-    struct Encrypter;
+    struct Encrypter {
+        iv: Iv,
+    }
 
     impl MessageEncrypter for Encrypter {
-        fn encrypt<'a>(
+        fn encrypt_tag<'a>(
             &mut self,
-            msg: EncodedMessage<OutboundPlain<'_>>,
-            _seq: u64,
-            out: &'a mut [u8],
-        ) -> Result<EncodedMessage<&'a [u8]>, Error> {
-            let mut payload = EncryptBuffer::new(out, msg.payload.len())?;
-            payload.extend_from_chunks(&msg.payload);
-
-            Ok(EncodedMessage {
-                typ: ContentType::ApplicationData,
-                version: msg.version,
-                payload: payload.into_written(),
-            })
+            _nonce: Nonce,
+            _aad: &'a [u8],
+            _in_out: &'a mut EncryptBuffer<'_>,
+        ) -> Result<Vec<u8>, Error> {
+            Ok(vec![])
         }
 
         fn encrypted_payload_len(&self, payload_len: usize) -> usize {
             payload_len
+        }
+
+        fn iv(&self) -> &Iv {
+            &self.iv
         }
     }
 
