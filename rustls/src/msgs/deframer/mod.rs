@@ -88,11 +88,11 @@ impl Deframer {
         let (typ, version, msg_epoch, record_seq, len, header_size) =
             if unprocessed_buf.len() > 0 && UnifiedHeader::is_unified_header(unprocessed_buf[0]) {
                 let UnifiedHeader {
-                    connection_id: _,
                     length,
                     epoch,
                     sequence,
-                } = match UnifiedHeader::read(&mut reader, current_epoch, highest_record_seq) {
+                    ..
+                } = match UnifiedHeader::read(&mut reader, current_epoch) {
                     Ok(header) => header,
                     Err(err) => return Some(Err(err.into())),
                 };

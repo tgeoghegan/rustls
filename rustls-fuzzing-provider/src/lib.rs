@@ -6,8 +6,8 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerVerifier;
 use rustls::crypto::cipher::{
     AeadKey, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, OutboundPlain, Record,
-    RecordDecrypter, RecordEncrypter, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
-    UnsupportedOperationError,
+    RecordDecrypter, RecordEncrypter, RecordSequenceNumberEncrypter, Tls12AeadAlgorithm,
+    Tls13AeadAlgorithm, UnsupportedOperationError,
 };
 use rustls::crypto::kx::{
     KeyExchangeAlgorithm, NamedGroup, SharedSecret, StartedKeyExchange, SupportedKxGroup,
@@ -275,6 +275,13 @@ impl Tls13AeadAlgorithm for Aead {
         Box::new(Tls13Cipher)
     }
 
+    fn record_sequence_encrypter(
+        &self,
+        _key: crypto::cipher::BlockCipherKey,
+    ) -> Box<dyn RecordSequenceNumberEncrypter> {
+        Box::new(Tls13Cipher)
+    }
+
     fn key_len(&self) -> usize {
         32
     }
@@ -387,6 +394,12 @@ impl RecordDecrypter for Tls13Cipher {
         }
 
         record.into_tls13_unpadded_record()
+    }
+}
+
+impl RecordSequenceNumberEncrypter for Tls13Cipher {
+    fn mask(&self, ciphertext: &[u8]) -> Result<[u8; 2], Error> {
+        Ok(*ciphertext[..2].as_array().unwrap())
     }
 }
 

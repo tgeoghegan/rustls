@@ -5,7 +5,9 @@ use core::ops::Deref;
 
 use crate::common_state::{Output, Side};
 use crate::conn::{Exporter, ReceivePath, SendOutput};
-use crate::crypto::cipher::{AeadKey, Iv, RecordDecrypter, Tls13AeadAlgorithm};
+use crate::crypto::cipher::{
+    AeadKey, BlockCipherKey, Iv, RecordDecrypter, RecordSequenceNumberEncrypter, Tls13AeadAlgorithm,
+};
 use crate::crypto::kx::SharedSecret;
 use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError, expand};
 use crate::crypto::{hash, hmac};
@@ -973,6 +975,8 @@ impl KeyScheduleSuite {
             suite.common.confidentiality_limit,
             purpose,
         );
+
+        send.set_record_sequence_number_encrypter(self.record_sequence_number_encrypter(secret));
     }
 
     fn set_decrypter(
@@ -990,6 +994,26 @@ impl KeyScheduleSuite {
                 purpose,
                 receive.version(),
             );
+
+        receive
+            .decrypt_state
+            .set_record_sequence_number_encrypter(self.record_sequence_number_encrypter(secret));
+    }
+
+    fn record_sequence_number_encrypter(
+        &self,
+        secret: &OkmBlock,
+    ) -> Box<dyn RecordSequenceNumberEncrypter> {
+        let suite = self.state.suite();
+        suite
+            .aead_alg
+            .record_sequence_encrypter(derive_record_sequence_number_encryption_key(
+                suite
+                    .hkdf_provider
+                    .expander_for_okm(secret)
+                    .as_ref(),
+                suite.aead_alg,
+            ))
     }
 
     fn derive_decrypter(&self, secret: &OkmBlock) -> Box<dyn RecordDecrypter> {
@@ -1094,6 +1118,23 @@ pub(crate) fn derive_traffic_key(
 /// [HKDF-Expand-Label]: <https://www.rfc-editor.org/rfc/rfc9846#section-7.1>
 pub(crate) fn derive_traffic_iv(expander: &dyn HkdfExpander, iv_len: usize) -> Iv {
     hkdf_expand_label_iv(expander, b"iv", &[], iv_len)
+}
+
+/// [HKDF-Expand-Label] where the output is a `[sender]_sn_key`.
+///
+/// Used in DTLS 1.3 for record sequence number encryption, described in [RFC 9147 section
+/// 4.2.3][1].
+///
+/// [HKDF-Expand-Label]: <https://www.rfc-editor.org/rfc/rfc9846#section-7.1>
+/// [1]: https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-4.2.3
+fn derive_record_sequence_number_encryption_key(
+    expander: &dyn HkdfExpander,
+    aead_alg: &dyn Tls13AeadAlgorithm,
+) -> BlockCipherKey {
+    // [sender]_sn_key derivation does not incorporate transcript hash
+    hkdf_expand_label_inner(expander, b"sn", &[], aead_alg.key_len(), |e, info| {
+        expand(e, info)
+    })
 }
 
 /// [HKDF-Expand-Label] where the output length is a compile-time constant, and therefore
@@ -1226,6 +1267,11 @@ enum SecretKind {
     DerivedSecret,
     ServerEchConfirmationSecret,
     ServerEchHrrConfirmationSecret,
+    /// Secret used for encrypting record sequence numbers.
+    ///
+    /// Only used in DTLS 1.3.
+    /// <https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-4.2.3>
+    RecordSequenceNumberSecret,
 }
 
 impl SecretKind {
@@ -1246,6 +1292,8 @@ impl SecretKind {
             ServerEchConfirmationSecret => b"ech accept confirmation",
             // https://datatracker.ietf.org/doc/html/rfc9849#section-7.2.1
             ServerEchHrrConfirmationSecret => b"hrr ech accept confirmation",
+            // https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-4.2.3
+            RecordSequenceNumberSecret => b"sn",
         }
     }
 

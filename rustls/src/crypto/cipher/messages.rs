@@ -189,7 +189,7 @@ impl Record<OutboundPlain<'_>> {
     }
 }
 
-/// Encode a TLS record header.
+/// Encode a TLS record header. Returns the encoded payload length.
 ///
 /// `typ`, `version` and `len` describe the record's payload.
 pub(crate) fn encode_record_header(
@@ -207,12 +207,13 @@ pub(crate) fn encode_record_header(
     into[0..1].copy_from_slice(&typ.to_array());
     into[1..3].copy_from_slice(&version.encode().to_array());
 
+    let encoded_len = len.to_be_bytes();
     if version.version().is_datagram_tls() {
         into[3..5].copy_from_slice(&cx.epoch.number().to_be_bytes());
         into[5..11].copy_from_slice(&(cx.record_seq).to_be_bytes()[2..]);
-        into[11..13].copy_from_slice(&(len).to_be_bytes());
+        into[11..13].copy_from_slice(&len.to_be_bytes());
     } else {
-        into[3..5].copy_from_slice(&len.to_be_bytes());
+        into[3..5].copy_from_slice(&encoded_len);
     }
 }
 
@@ -561,7 +562,7 @@ impl fmt::Debug for Payload<'_> {
 /// depends on the protocol version in use.
 #[derive(Debug)]
 #[expect(clippy::exhaustive_structs)]
-pub struct InboundOpaque<'a>(pub &'a [u8], pub &'a mut [u8]);
+pub struct InboundOpaque<'a>(pub &'a mut [u8], pub &'a mut [u8]);
 
 impl<'a> InboundOpaque<'a> {
     /// Truncate the payload to `len` bytes.
