@@ -3,6 +3,7 @@
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
+use crate::common_state::Side;
 use crate::crypto::cipher::Payload;
 use crate::error::InvalidMessage;
 use crate::msgs::{
@@ -161,6 +162,31 @@ enum_builder! {
     }
 }
 
+impl HandshakeType {
+    /// Whether the handshake type can be first message in a flight per [1].
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-5.7
+    pub(crate) fn first_in_flight(&self, recipient: Side) -> bool {
+        match (*self, recipient) {
+            // Client initial flight is just ClientHello
+            (Self::ClientHello, Side::Server)
+            // If server sends HRR, it is a single-message flight
+            | (Self::HelloRetryRequest, Side::Client)
+            // Server's flight always starts with ServerHello
+            | (Self::ServerHello, Side::Client)
+            // Client's final flight starts with Certificate if client auth is in use, Finished
+            // otherwise
+            | (Self::Certificate, Side::Server)
+            | (Self::Finished, Side::Server)
+            // Post-handshake NewSessionTicket is a single-message flight
+            | (Self::NewSessionTicket, Side::Client) => true,
+            // KeyUpdate is a single-message flight regardless of recipient
+            | (Self::KeyUpdate, _) => true,
+            _ => false,
+        }
+    }
+}
+
 enum_builder! {
     /// The `ContentType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
@@ -172,6 +198,10 @@ enum_builder! {
         Handshake => 0x16,
         ApplicationData => 0x17,
         Heartbeat => 0x18,
+        /// ACK for DTLS 1.3 handshakes.
+        ///
+        /// <https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-7>
+        Ack => 0x1a,
     }
 }
 

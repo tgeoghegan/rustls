@@ -7,8 +7,8 @@ use crate::crypto::cipher::EncryptionState;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{ApiMisuse, Error, InvalidMessage, PeerMisbehaved};
 use crate::msgs::{
-    Codec, Epoch, HEADER_SIZE, MAX_FRAGMENT_LEN, MessageHeader, Reader, UnifiedHeader, hex,
-    read_record_header,
+    Codec, Epoch, FullRecordSequenceNumber, HEADER_SIZE, MAX_FRAGMENT_LEN, MessageHeader, Reader,
+    UnifiedHeader, hex, read_record_header,
 };
 
 /// A TLS record with encoded (but not necessarily encrypted) payload.
@@ -209,8 +209,10 @@ pub(crate) fn encode_record_header(
 
     let encoded_len = len.to_be_bytes();
     if version.version().is_datagram_tls() {
-        into[3..5].copy_from_slice(&cx.epoch.number().to_be_bytes());
-        into[5..11].copy_from_slice(&(cx.record_seq).to_be_bytes()[2..]);
+        // Encode only the low 16 bits of epoch number into plaintext record header.
+        let epoch_16 = (cx.epoch.number() & 0xffff) as u16;
+        into[3..5].copy_from_slice(&epoch_16.to_be_bytes());
+        cx.record_seq.encode(&mut into[5..11]);
         into[11..13].copy_from_slice(&len.to_be_bytes());
     } else {
         into[3..5].copy_from_slice(&encoded_len);
@@ -670,7 +672,7 @@ pub struct EncodingContext {
     /// Record layer sequence number.
     ///
     /// Ignored unless message protocol version is DTLS.
-    pub(crate) record_seq: u64,
+    pub(crate) record_seq: FullRecordSequenceNumber,
 }
 
 impl EncodingContext {
@@ -679,7 +681,7 @@ impl EncodingContext {
         Self {
             payload_is_encrypted: false,
             epoch: Epoch::Unencrypted,
-            record_seq: 0,
+            record_seq: 0.into(),
         }
     }
 
@@ -690,7 +692,7 @@ impl EncodingContext {
     }
 
     /// Set record sequence number.
-    pub fn with_record_seq(mut self, seq: u64) -> Self {
+    pub fn with_record_seq(mut self, seq: FullRecordSequenceNumber) -> Self {
         self.record_seq = seq;
         self
     }
@@ -957,10 +959,10 @@ mod tests {
             };
 
             let mut cx = EncodingContext::new().with_payload_encryption(false);
-            if version.version().is_datagram_tls() {
+            if version.is_datagram_tls() {
                 cx = cx
                     .with_epoch(Epoch::ApplicationData(17))
-                    .with_record_seq(156);
+                    .with_record_seq(156.into());
             }
 
             let encoded = record.clone().to_unencrypted_bytes(cx);

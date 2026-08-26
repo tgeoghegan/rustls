@@ -9,8 +9,8 @@ use crate::crypto::cipher::{
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
 use crate::msgs::{
-    AlertLevel, Codec, EncrypterDecrypterPurpose, Epoch, Fragmenter, HandshakeSequence,
-    HandshakeSequenceNumber, Message, MessagePayload,
+    AckRecordSequenceNumber, AlertLevel, Codec, EncrypterDecrypterPurpose, Fragmenter,
+    HandshakeSequence, HandshakeSequenceNumber, Message, MessagePayload,
 };
 use crate::tls13::key_schedule::KeyScheduleTrafficSend;
 use crate::tracing::{debug, error};
@@ -30,7 +30,6 @@ pub(crate) struct SendPath {
     negotiated_version: Option<ProtocolVersion>,
     pub(crate) tls13_key_schedule: Option<Box<KeyScheduleTrafficSend>>,
     handshake_sequence: HandshakeSequence,
-    unencrypted_record_seq: u64,
     side: Side,
 }
 
@@ -49,7 +48,6 @@ impl SendPath {
             negotiated_version: None,
             tls13_key_schedule: None,
             handshake_sequence: HandshakeSequence::default(),
-            unencrypted_record_seq: 0,
             side,
         }
     }
@@ -172,14 +170,22 @@ impl SendPath {
                 true => self
                     .encrypt_state
                     .encrypt_outgoing(record, tls),
-                false => record.encode_unencrypted(
-                    tls,
-                    EncodingContext {
-                        payload_is_encrypted: false,
-                        epoch: Epoch::Unencrypted,
-                        record_seq: self.outbound_unencrypted_record_seq(),
-                    },
-                ),
+                false => {
+                    record.encode_unencrypted(
+                        tls,
+                        EncodingContext {
+                            payload_is_encrypted: false,
+                            // Despite the message being unencrypted, we still indicate the current
+                            // epoch
+                            epoch: self.encrypt_state.epoch(),
+                            record_seq: if record.version.is_datagram_tls() {
+                                self.encrypt_state.increment_sequence()
+                            } else {
+                                self.encrypt_state.write_seq().into()
+                            },
+                        },
+                    )
+                }
             }
         }
     }
@@ -286,12 +292,6 @@ impl SendPath {
             ),
         };
     }
-
-    fn outbound_unencrypted_record_seq(&mut self) -> u64 {
-        let old = self.unencrypted_record_seq;
-        self.unencrypted_record_seq += 1;
-        old
-    }
 }
 
 impl SendOutput for SendPath {
@@ -304,13 +304,44 @@ impl SendOutput for SendPath {
             return;
         }
 
-        let record = Record::<Payload<'static>>::from(Message::build_key_update_notify(
-            self.version(),
-            self.outbound_handshake_seq(),
-        ));
-        let mut queued = Vec::new();
-        self.encrypt_state
-            .encrypt_outgoing(record.borrow_outbound(), &mut queued);
+        // TODO(DTLS): this is horrible but we have to fragment the key update
+        let handshake_seq = self.outbound_handshake_seq();
+        let message = Message::build_key_update_notify(self.version(), handshake_seq);
+        let queued = if self.version() == ProtocolVersion::DTLSv1_3 {
+            let MessagePayload::Handshake {
+                seq,
+                parsed,
+                encoded,
+            } = message.payload
+            else {
+                unreachable!("it's a handshake i promise");
+            };
+
+            let slice = [(parsed.0.handshake_type(), seq, encoded.bytes())];
+            let records: Vec<_> = self
+                .fragmenter
+                .fragment_dtls_handshake_message_flight(message.version, &slice)
+                .into_iter()
+                .map(|m| Record {
+                    typ: m.typ,
+                    version: m.version,
+                    payload: m.payload,
+                })
+                .collect();
+
+            let mut queued = Vec::new();
+            for record in records {
+                self.encrypt_state
+                    .encrypt_outgoing(record.borrow_outbound(), &mut queued);
+            }
+            queued
+        } else {
+            let message = Record::<Payload<'static>>::from(message);
+            let mut queued = Vec::new();
+            self.encrypt_state
+                .encrypt_outgoing(message.borrow_outbound(), &mut queued);
+            queued
+        };
         self.key_update_remote = KeyUpdateRemote::Queued(queued);
 
         if let Some(mut ks) = self.tls13_key_schedule.take() {
@@ -435,6 +466,10 @@ impl SendOutput for SendPath {
     fn outbound_handshake_seq(&mut self) -> HandshakeSequenceNumber {
         self.handshake_sequence.increment()
     }
+
+    fn ack_flight(&mut self, record_seqs: &[AckRecordSequenceNumber], tls: &mut Vec<u8>) {
+        self.send_msg(Message::build_ack(record_seqs), false, tls);
+    }
 }
 
 /// State machine for TLS1.3 key updates triggered by us.
@@ -490,4 +525,6 @@ pub(crate) trait SendOutput {
     fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, tls: &mut Vec<u8>);
 
     fn outbound_handshake_seq(&mut self) -> HandshakeSequenceNumber;
+
+    fn ack_flight(&mut self, record_seqs: &[AckRecordSequenceNumber], tls: &mut Vec<u8>);
 }

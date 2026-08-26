@@ -378,16 +378,12 @@ impl RecordSequenceNumberEncrypter for ChaCha20RecordSequenceNumberEncrypter {
     fn mask(&self, ciphertext: &[u8]) -> Result<[u8; 2], Error> {
         // The mask derivation for DTLS 1.3 record number protection is identical to that for QUIC
         // header protection, which means we can use `aws_lc_rs::aead::quic::HeaderProtectionKey`.
-        let key =
-            HeaderProtectionKey::new(&aead::quic::CHACHA20, self.key.as_ref()).map_err(|_| {
-                std::println!("error creating HeaderProtectionKey");
-                Error::DecryptError
-            })?;
+        let key = HeaderProtectionKey::new(&aead::quic::CHACHA20, self.key.as_ref())
+            .map_err(|_| Error::DecryptError)?;
 
-        let mask = key.new_mask(ciphertext).map_err(|_| {
-            std::println!("error creating QUIC new_mask");
-            Error::DecryptError
-        })?;
+        let mask = key
+            .new_mask(ciphertext)
+            .map_err(|_| Error::DecryptError)?;
 
         Ok([mask[0], mask[1]])
     }
@@ -484,11 +480,7 @@ impl RecordDecrypter for GcmRecordDecrypter {
     ) -> Result<Record<&'a [u8]>, Error> {
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
         let tls13_aad = make_tls13_aad(record.typ, record.version.version(), record.payload.len());
-        let aad = if record
-            .version
-            .version()
-            .is_datagram_tls()
-        {
+        let aad = if record.version.is_datagram_tls() {
             // For DTLS 1.3, the AAD is the record's unified header, verbatim
             aead::Aad::from(record.payload.0.to_vec())
         } else {
@@ -525,16 +517,12 @@ impl RecordSequenceNumberEncrypter for GcmRecordSequenceNumberEncrypter {
     fn mask(&self, ciphertext: &[u8]) -> Result<[u8; 2], Error> {
         // The mask derivation for DTLS 1.3 record number protection is identical to that for QUIC
         // header protection, which means we can use `aws_lc_rs::aead::quic::HeaderProtectionKey`.
-        let key =
-            HeaderProtectionKey::new(&aead::quic::AES_128, self.key.as_ref()).map_err(|_| {
-                std::println!("error creating HeaderProtectionKey");
-                Error::DecryptError
-            })?;
+        let key = HeaderProtectionKey::new(&aead::quic::AES_128, self.key.as_ref())
+            .map_err(|_| Error::DecryptError)?;
 
-        let mask = key.new_mask(ciphertext).map_err(|_| {
-            std::println!("error creating QUIC new_mask");
-            Error::DecryptError
-        })?;
+        let mask = key
+            .new_mask(ciphertext)
+            .map_err(|_| Error::DecryptError)?;
 
         Ok([mask[0], mask[1]])
     }

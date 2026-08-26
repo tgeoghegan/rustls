@@ -10,7 +10,10 @@ use crate::crypto::cipher::{
 };
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::Error;
-use crate::msgs::{EncrypterDecrypterPurpose, Epoch, HandshakeAlignedProof, Reader, UnifiedHeader};
+use crate::msgs::{
+    EncrypterDecrypterPurpose, Epoch, FullRecordSequenceNumber, HandshakeAlignedProof,
+    RecordSequenceNumber,
+};
 use crate::tracing::trace;
 
 /// Record layer that tracks encryption keys.
@@ -22,7 +25,7 @@ pub(crate) struct EncryptionState {
     ///
     /// This value is tracked for all protocol versions, but only used for DTLS.
     epoch: Epoch,
-    write_seq: u64,
+    write_seq: FullRecordSequenceNumber,
     side: Side,
 }
 
@@ -34,7 +37,7 @@ impl EncryptionState {
             record_sequence_number_encrypter: None,
             write_seq_max: 0,
             epoch: Epoch::Unencrypted,
-            write_seq: 0,
+            write_seq: 0.into(),
             side,
         }
     }
@@ -87,12 +90,6 @@ impl EncryptionState {
         let header_size = version_in_use.encrypted_header_len();
         let encrypter = self.record_encrypter.as_mut().unwrap();
 
-        let record_seq = self
-            .epoch
-            .per_record_additional_data(self.write_seq, plain.version.version());
-        std::println!("encrypting with record seq {record_seq}");
-        self.write_seq += 1;
-
         let (header, payload) = out.split_at_mut(header_size);
 
         // First, encode the header, because DTLS 1.3 needs to use it as the AAD.
@@ -109,16 +106,21 @@ impl EncryptionState {
             EncodingContext {
                 payload_is_encrypted: true,
                 epoch: self.epoch,
-                record_seq,
+                record_seq: self.write_seq.into(),
             },
             header,
         );
+
+        let aad_seq = self
+            .epoch
+            .per_record_additional_data(self.write_seq.into(), plain.version.version());
+        self.write_seq.increment();
 
         #[cfg(debug_assertions)]
         let (out_ptr, out_len) = (payload.as_ptr(), payload.len());
         let encrypted_len = {
             let encrypted = encrypter
-                .encrypt(plain, record_seq, header, payload)
+                .encrypt(plain, aad_seq, header, payload)
                 .unwrap();
 
             #[cfg(debug_assertions)]
@@ -136,20 +138,18 @@ impl EncryptionState {
             encrypted.payload.len()
         };
 
-        if let Some(record_sequence_number_encrypter) = self
-            .record_sequence_number_encrypter
-            .as_ref()
-            && version_in_use.is_datagram_tls()
-        {
-            let mut encoded_record_seq = (record_seq as u16).to_be_bytes();
-
-            // Now that we have encrypted the record, we can use the ciphertext to encrypt the
-            // record number and overwrite the previously written header.
-            record_sequence_number_encrypter
-                .transform(&mut encoded_record_seq, &payload[..16])
-                .unwrap();
-
-            header[1..3].copy_from_slice(&encoded_record_seq);
+        if version_in_use == ProtocolVersion::DTLSv1_3 {
+            // Now that we have encrypted the record payload, we can use that ciphertext to protect
+            // the record number and overwrite the previously encoded header.
+            FullRecordSequenceNumber::from(aad_seq)
+                .truncate()
+                .protect(
+                    self.record_sequence_number_encrypter
+                        .as_ref()
+                        .unwrap(),
+                    &payload[..16],
+                )
+                .encode(&mut header[1..3]);
         }
 
         header_size + encrypted_len
@@ -167,7 +167,7 @@ impl EncryptionState {
         self.record_encrypter = Some(cipher);
         self.write_seq_max = min(SEQ_SOFT_LIMIT, max_records);
         self.epoch = self.epoch.increment(purpose, version);
-        self.write_seq = 0;
+        self.write_seq = 0.into();
     }
 
     pub(crate) fn set_record_sequence_number_encrypter(
@@ -182,7 +182,7 @@ impl EncryptionState {
     /// `add` is added to the current sequence number.  `add` as `0` means
     /// "the next record processed by `encrypt_outgoing`"
     pub(crate) fn pre_encrypt_action(&self, add: u64) -> Option<PreEncryptAction> {
-        match self.write_seq.saturating_add(add) {
+        match u64::from(self.write_seq).saturating_add(add) {
             v if v == self.write_seq_max => Some(PreEncryptAction::RefreshOrClose),
             SEQ_HARD_LIMIT.. => Some(PreEncryptAction::Refuse),
             _ => None,
@@ -206,12 +206,22 @@ impl EncryptionState {
     }
 
     pub(crate) fn write_seq(&self) -> u64 {
-        self.write_seq
+        self.write_seq.into()
     }
 
     /// Current epoch.
     pub(crate) fn epoch(&self) -> Epoch {
         self.epoch
+    }
+
+    /// Increment the sequence number.
+    ///
+    /// Should be used only when sending unencrypted messages (e.g., DTLS 1.3 ACK) as the sequence
+    /// is otherwise incremented in [`Self::encrypt_outgoing`].
+    pub(crate) fn increment_sequence(&mut self) -> FullRecordSequenceNumber {
+        let old = self.write_seq;
+        self.write_seq.increment();
+        old
     }
 }
 
@@ -223,7 +233,7 @@ pub(crate) struct DecryptionState {
     ///
     /// This value is tracked for all protocol versions, but only used for Datagram TLS.
     epoch: Epoch,
-    read_seq: u64,
+    read_seq: FullRecordSequenceNumber,
     has_decrypted: bool,
 
     // Records encrypted with other keys may be encountered, so failures
@@ -246,7 +256,7 @@ impl DecryptionState {
             record_decrypter: None,
             record_sequence_number_encrypter: None,
             epoch: Epoch::Unencrypted,
-            read_seq: 0,
+            read_seq: 0.into(),
             has_decrypted: false,
             trial_decryption_len: None,
             side,
@@ -262,39 +272,40 @@ impl DecryptionState {
     pub(crate) fn decrypt_incoming<'a>(
         &mut self,
         encr: Record<InboundOpaque<'a>>,
-        record_seq: u64,
-    ) -> Result<Option<Decrypted<'a>>, Error> {
-        let Some(decrypter) = &mut self.record_decrypter else {
-            return Ok(Some(Decrypted {
-                want_close_before_decrypt: false,
-                plaintext: encr.into_plain_record(),
-            }));
+        record_seq: RecordSequenceNumber,
+    ) -> Result<Option<(Decrypted<'a>, FullRecordSequenceNumber)>, Error> {
+        let record_seq = match record_seq {
+            RecordSequenceNumber::Full(seq) => seq,
+            RecordSequenceNumber::Protected(seq) => {
+                let truncated = seq.deprotect(
+                    self.record_sequence_number_encrypter
+                        .as_ref()
+                        .unwrap(),
+                    &encr.payload.iter().as_ref()[..16],
+                );
+
+                // Copy deprotected, truncated sequence number into encoded header so it can be used
+                // as AAD later.
+                truncated.encode(&mut encr.payload.0[1..3]);
+
+                // Reconstruct full sequence number to be used in replay protection, ACKs, etc.
+                truncated.reconstruct(self.read_seq.into())
+            }
         };
 
-        let record_seq = if let Some(record_sequence_number_encrypter) = self
-            .record_sequence_number_encrypter
-            .as_ref()
-            && encr.version.version().is_datagram_tls()
-        {
-            let mut encoded_record_seq = (record_seq as u16).to_be_bytes();
-
-            // Now that we have encrypted the record, we can use the ciphertext to encrypt the
-            // record number and overwrite the previously written header.
-            record_sequence_number_encrypter
-                .transform(&mut encoded_record_seq, &encr.payload.iter().as_ref()[..16])
-                .unwrap();
-
-            encr.payload.0[1..3].copy_from_slice(&encoded_record_seq);
-
-            // TODO(DTLS): it sucks to have to re-parse the header here. Should work out a way to
-            // make the parsed header available to this function.
-            let mut unified_header =
-                UnifiedHeader::read(&mut Reader::new(encr.payload.0), self.epoch).unwrap();
-            unified_header.reconstruct_sequence_number(self.read_seq);
-
-            unified_header.sequence()
-        } else {
-            record_seq
+        let Some(decrypter) = &mut self.record_decrypter else {
+            if encr.version.is_datagram_tls() {
+                // Gross: for DTLS, we need record seq to increment even with unencrypted messages,
+                // but for stream TLS it should only increment when actual decryption occurs.
+                self.read_seq.increment();
+            }
+            return Ok(Some((
+                Decrypted {
+                    want_close_before_decrypt: false,
+                    plaintext: encr.into_plain_record(),
+                },
+                record_seq,
+            )));
         };
 
         // Set to `true` if the peer appears to getting close to encrypting
@@ -305,22 +316,25 @@ impl DecryptionState {
         //
         // Note that there's no reason to refuse to decrypt: the security
         // failure has already happened.
-        let want_close_before_decrypt = self.read_seq == SEQ_SOFT_LIMIT;
+        let want_close_before_decrypt = u64::from(self.read_seq) == SEQ_SOFT_LIMIT;
 
         let encrypted_len = encr.payload.len();
-        let seq = self
+        let aad_seq = self
             .epoch
-            .per_record_additional_data(record_seq, encr.version.version());
-        match decrypter.decrypt(encr, seq) {
+            .per_record_additional_data(record_seq.into(), encr.version.version());
+        match decrypter.decrypt(encr, aad_seq.into()) {
             Ok(plaintext) => {
-                self.read_seq += 1;
+                self.read_seq.increment();
                 if !self.has_decrypted {
                     self.has_decrypted = true;
                 }
-                Ok(Some(Decrypted {
-                    want_close_before_decrypt,
-                    plaintext,
-                }))
+                Ok(Some((
+                    Decrypted {
+                        want_close_before_decrypt,
+                        plaintext,
+                    },
+                    record_seq,
+                )))
             }
             Err(Error::DecryptError) if self.doing_trial_decryption(encrypted_len) => {
                 trace!("Dropping undecryptable record after aborted early_data");
@@ -340,7 +354,7 @@ impl DecryptionState {
         version: ProtocolVersion,
     ) {
         self.record_decrypter = Some(cipher);
-        self.read_seq = 0;
+        self.read_seq = 0.into();
         self.epoch = self.epoch.increment(purpose, version);
         self.trial_decryption_len = None;
         self.anti_replay = ReplayWindow::default();
@@ -358,7 +372,7 @@ impl DecryptionState {
         version: ProtocolVersion,
     ) {
         self.record_decrypter = Some(cipher);
-        self.read_seq = 0;
+        self.read_seq = 0.into();
         self.epoch = self.epoch.increment(purpose, version);
         self.trial_decryption_len = Some(max_length);
         self.anti_replay = ReplayWindow::default();
@@ -385,7 +399,17 @@ impl DecryptionState {
         self.epoch
     }
 
-    pub(crate) fn read_seq(&self) -> u64 {
+    /// Increment the sequence number.
+    ///
+    /// Should be used only when receiving unencrypted messages (e.g., DTLS 1.3 ACK) as the sequence
+    /// is otherwise incremented in [`Self::decrypt_incoming`].
+    pub(crate) fn increment_sequence(&mut self) -> FullRecordSequenceNumber {
+        let old = self.read_seq;
+        self.read_seq.increment();
+        old
+    }
+
+    pub(crate) fn read_seq(&self) -> FullRecordSequenceNumber {
         self.read_seq
     }
 
@@ -462,7 +486,7 @@ mod tests {
         // A record layer starts out invalid, having never decrypted.
         let mut record_layer = DecryptionState::new(Side::Server);
         assert!(record_layer.record_decrypter.is_none());
-        assert_eq!(record_layer.read_seq, 0);
+        assert_eq!(record_layer.read_seq, 0.into());
         assert!(!record_layer.has_decrypted());
 
         // Initializing the record layer should update the decrypt state, but shouldn't affect whether it
@@ -475,7 +499,7 @@ mod tests {
             ProtocolVersion::TLSv1_3,
         );
         assert!(record_layer.record_decrypter.is_some());
-        assert_eq!(record_layer.read_seq, 0);
+        assert_eq!(record_layer.read_seq, 0.into());
         assert!(!record_layer.has_decrypted());
 
         // Decrypting a record should update the read_seq and track that we have now performed
@@ -487,10 +511,10 @@ mod tests {
                     EncodableVersion::Legacy(ProtocolVersion::TLSv1_3),
                     InboundOpaque(&mut [], &mut [0xC0, 0xFF, 0xEE]),
                 ),
-                record_layer.read_seq,
+                RecordSequenceNumber::Full(record_layer.read_seq),
             )
             .unwrap();
-        assert_eq!(record_layer.read_seq, 1);
+        assert_eq!(record_layer.read_seq, 1.into());
         assert!(record_layer.has_decrypted());
 
         // Resetting the record layer decrypter (as if a key update occurred) should reset
@@ -501,7 +525,7 @@ mod tests {
             EncrypterDecrypterPurpose::ApplicationData,
             ProtocolVersion::TLSv1_3,
         );
-        assert_eq!(record_layer.read_seq, 0);
+        assert_eq!(record_layer.read_seq, 0.into());
         assert!(record_layer.has_decrypted());
     }
 }

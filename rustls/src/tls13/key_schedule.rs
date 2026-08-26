@@ -1267,11 +1267,6 @@ enum SecretKind {
     DerivedSecret,
     ServerEchConfirmationSecret,
     ServerEchHrrConfirmationSecret,
-    /// Secret used for encrypting record sequence numbers.
-    ///
-    /// Only used in DTLS 1.3.
-    /// <https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-4.2.3>
-    RecordSequenceNumberSecret,
 }
 
 impl SecretKind {
@@ -1292,8 +1287,6 @@ impl SecretKind {
             ServerEchConfirmationSecret => b"ech accept confirmation",
             // https://datatracker.ietf.org/doc/html/rfc9849#section-7.2.1
             ServerEchHrrConfirmationSecret => b"hrr ech accept confirmation",
-            // https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-4.2.3
-            RecordSequenceNumberSecret => b"sn",
         }
     }
 
