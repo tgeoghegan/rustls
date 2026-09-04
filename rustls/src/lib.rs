@@ -358,6 +358,7 @@ mod sync {
 #[expect(unnameable_types)]
 #[macro_use]
 mod msgs;
+pub use msgs::StreamDeframerCore;
 mod common_state;
 pub mod compress;
 mod conn;
@@ -407,7 +408,8 @@ pub mod split {
 }
 pub use crate::error::Error;
 pub use crate::key_log::{KeyLog, NoKeyLog};
-pub use crate::msgs::{AckRecordSequenceNumber, Epoch, FullRecordSequenceNumber};
+pub use crate::msgs::Epoch;
+pub use crate::msgs::dtls::{AckRecordSequenceNumber, FullRecordSequenceNumber};
 pub use crate::suites::{
     CipherSuiteCommon, ConnectionTrafficSecrets, ExtractedSecrets, SupportedCipherSuite,
 };

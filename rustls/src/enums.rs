@@ -6,9 +6,12 @@ use alloc::vec::Vec;
 use crate::common_state::Side;
 use crate::crypto::cipher::Payload;
 use crate::error::InvalidMessage;
+use crate::msgs::dtls::{
+    DTLS_12_HEADER_SIZE, DTLS_13_UNIFIED_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE,
+};
 use crate::msgs::{
-    Codec, DTLS_12_HEADER_SIZE, DTLS_13_UNIFIED_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE,
-    HANDSHAKE_HEADER_SIZE, HEADER_SIZE, ListLength, NonEmpty, Reader, SizedPayload, TlsListElement,
+    Codec, HANDSHAKE_HEADER_SIZE, HEADER_SIZE, ListLength, NonEmpty, Reader, SizedPayload,
+    TlsListElement,
 };
 
 #[non_exhaustive]

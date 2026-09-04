@@ -359,7 +359,12 @@ mod client_hello {
             // are encrypted with the handshake keys.
             match doing_early_data {
                 EarlyDataDecision::Disabled => {
-                    key_schedule.set_handshake_decrypter(None, output.receive(), &input.proof);
+                    key_schedule.set_handshake_decrypter(
+                        None,
+                        output.decryption_state(),
+                        &input.proof,
+                        version,
+                    );
                 }
                 EarlyDataDecision::RequestedButRejected => {
                     debug!(
@@ -367,8 +372,9 @@ mod client_hello {
                     );
                     key_schedule.set_handshake_decrypter(
                         Some(max_early_data_size(st.config.max_early_data_size)),
-                        output.receive(),
+                        output.decryption_state(),
                         &input.proof,
+                        version,
                     );
                 }
                 EarlyDataDecision::Accepted { .. } => {
@@ -609,6 +615,7 @@ mod client_hello {
                 &randoms.client,
                 output,
                 proof,
+                version.version(),
             );
 
             if config.max_early_data_size > 0 {
@@ -1257,8 +1264,15 @@ impl ExpectEarlyData {
                 ..
             } => {
                 let proof = input.check_aligned_handshake()?;
-                self.key_schedule
-                    .update_decrypter(output.receive(), &proof);
+                self.key_schedule.update_decrypter(
+                    output.decryption_state(),
+                    &proof,
+                    if input.message.version.is_datagram_tls() {
+                        ProtocolVersion::DTLSv1_3
+                    } else {
+                        ProtocolVersion::TLSv1_3
+                    },
+                );
                 self.hs
                     .transcript
                     .add_message(&input.message);
@@ -1500,9 +1514,17 @@ impl ExpectFinished {
 
         let handshake_hash = self.hs.transcript.current_hash();
         let proof = input.check_aligned_handshake()?;
-        let (key_schedule_before_finished, expect_verify_data) = self
-            .key_schedule
-            .sign_client_finish(&handshake_hash, output.receive(), &proof);
+        let (key_schedule_before_finished, expect_verify_data) =
+            self.key_schedule.sign_client_finish(
+                &handshake_hash,
+                output.decryption_state(),
+                &proof,
+                if input.message.version.is_datagram_tls() {
+                    ProtocolVersion::DTLSv1_3
+                } else {
+                    ProtocolVersion::TLSv1_3
+                },
+            );
 
         let fin = match ConstantTimeEq::ct_eq(expect_verify_data.as_ref(), finished.bytes()).into()
         {
@@ -1609,8 +1631,15 @@ impl ExpectTraffic {
         }
 
         // Update our read-side keys.
-        self.key_schedule_recv
-            .update_decrypter(output.receive(), &proof);
+        self.key_schedule_recv.update_decrypter(
+            output.decryption_state(),
+            if input.message.version.is_datagram_tls() {
+                ProtocolVersion::DTLSv1_3
+            } else {
+                ProtocolVersion::TLSv1_3
+            },
+            &proof,
+        );
         Ok(())
     }
 }

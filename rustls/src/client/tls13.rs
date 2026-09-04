@@ -270,6 +270,7 @@ impl ClientHandler<Tls13CipherSuite> for Handler {
             &randoms.client,
             output,
             &proof,
+            version,
         );
 
         // TODO(DTLS): figure out how to lower the check for DTLS into emit_fake_ccs with the QUIC
@@ -1349,6 +1350,11 @@ impl ExpectFinished {
             HandshakePayload::Finished
         )?;
 
+        let version = if input.message.version.is_datagram_tls() {
+            ProtocolVersion::DTLSv1_3
+        } else {
+            ProtocolVersion::TLSv1_3
+        };
         let proof = input.check_aligned_handshake()?;
         let handshake_hash = st.hs.transcript.current_hash();
         let expect_verify_data = st
@@ -1372,8 +1378,7 @@ impl ExpectFinished {
         /* The EndOfEarlyData message to server is still encrypted with early data keys,
          * but appears in the transcript after the server Finished. */
         if st.in_early_traffic {
-            // TODO(DTLS): handle early data and end thereof for DTLS
-            emit_end_of_early_data_tls13(ProtocolVersion::TLSv1_3, &mut st.hs.transcript, output);
+            emit_end_of_early_data_tls13(version, &mut st.hs.transcript, output);
             output.emit(Event::EarlyData(EarlyDataEvent::Finished));
             st.hs
                 .key_schedule
@@ -1465,8 +1470,12 @@ impl ExpectFinished {
             .remove_tls12_session(&st.hs.session_key);
 
         /* Now move to our application traffic keys. */
-        let (key_schedule, exporter, resumption) =
-            key_schedule_pre_finished.into_traffic(output, st.hs.transcript.current_hash(), &proof);
+        let (key_schedule, exporter, resumption) = key_schedule_pre_finished.into_traffic(
+            output,
+            st.hs.transcript.current_hash(),
+            &proof,
+            version,
+        );
         let (key_schedule_send, key_schedule_recv) = key_schedule.split();
 
         let _cert_verified = st
@@ -1570,7 +1579,7 @@ impl ExpectTraffic {
         output: &mut dyn Output<'_>,
         nst: &NewSessionTicketPayloadTls13,
     ) -> Result<(), Error> {
-        let received = &mut output.receive().tls13_tickets_received;
+        let received = output.tls13_tickets_received();
         *received = received.saturating_add(1);
         self.handle_new_ticket_impl(nst)
     }
@@ -1597,8 +1606,15 @@ impl ExpectTraffic {
         }
 
         // Update our read-side keys.
-        self.key_schedule_recv
-            .update_decrypter(output.receive(), &proof);
+        self.key_schedule_recv.update_decrypter(
+            output.decryption_state(),
+            if input.message.version.is_datagram_tls() {
+                ProtocolVersion::DTLSv1_3
+            } else {
+                ProtocolVersion::TLSv1_3
+            },
+            &proof,
+        );
         Ok(())
     }
 }

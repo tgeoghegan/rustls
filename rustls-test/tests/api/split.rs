@@ -8,7 +8,7 @@ use std::io::Cursor;
 
 use rustls::error::{AlertDescription, ApiMisuse, InvalidMessage};
 use rustls::split::{ReceiveTraffic, ReceiveTrafficState, SplitConnection};
-use rustls::{Connection, Error, SideData, SliceInput, VecInput};
+use rustls::{Connection, Error, SideData, SliceInput, StreamDeframerCore, VecInput};
 use rustls_test::{KeyType, do_handshake, make_pair};
 
 #[test]
@@ -402,10 +402,10 @@ fn read_invalid_data_and_send_alert() {
 
 #[track_caller]
 fn check_receive<Side: SideData>(
-    recv: ReceiveTraffic<Side>,
+    recv: ReceiveTraffic<Side, StreamDeframerCore>,
     mut chunk: Vec<u8>,
     mut consume_state: impl ConsumeReceiveState,
-) -> (Vec<u8>, Option<ReceiveTraffic<Side>>) {
+) -> (Vec<u8>, Option<ReceiveTraffic<Side, StreamDeframerCore>>) {
     let mut inp = SliceInput::new(&mut chunk);
     let recv = consume_state.consume(dbg!(
         recv.read(&mut inp, &mut Vec::new())
@@ -418,10 +418,10 @@ fn check_receive<Side: SideData>(
 
 #[track_caller]
 fn check_receive_all<Side: SideData>(
-    recv: ReceiveTraffic<Side>,
+    recv: ReceiveTraffic<Side, StreamDeframerCore>,
     mut chunk: Vec<u8>,
     mut consume_state: impl ConsumeReceiveState,
-) -> Option<ReceiveTraffic<Side>> {
+) -> Option<ReceiveTraffic<Side, StreamDeframerCore>> {
     let mut inp = SliceInput::new(&mut chunk);
     let recv = consume_state.consume(dbg!(
         recv.read(&mut inp, &mut Vec::new())
@@ -434,8 +434,8 @@ fn check_receive_all<Side: SideData>(
 trait ConsumeReceiveState {
     fn consume<'a, Side: SideData>(
         &mut self,
-        state: ReceiveTrafficState<'a, Side>,
-    ) -> Option<ReceiveTraffic<Side>>;
+        state: ReceiveTrafficState<'a, Side, StreamDeframerCore>,
+    ) -> Option<ReceiveTraffic<Side, StreamDeframerCore>>;
 }
 
 struct ExpectData<'a, T: ConsumeReceiveState> {
@@ -446,8 +446,8 @@ struct ExpectData<'a, T: ConsumeReceiveState> {
 impl<T: ConsumeReceiveState> ConsumeReceiveState for ExpectData<'_, T> {
     fn consume<'a, Side: SideData>(
         &mut self,
-        state: ReceiveTrafficState<'a, Side>,
-    ) -> Option<ReceiveTraffic<Side>> {
+        state: ReceiveTrafficState<'a, Side, StreamDeframerCore>,
+    ) -> Option<ReceiveTraffic<Side, StreamDeframerCore>> {
         match state {
             ReceiveTrafficState::Available(mut received) => {
                 assert_eq!(received.data(), self.expected);
@@ -465,8 +465,8 @@ struct ExpectFlushSender<T: ConsumeReceiveState> {
 impl<T: ConsumeReceiveState> ConsumeReceiveState for ExpectFlushSender<T> {
     fn consume<'a, Side: SideData>(
         &mut self,
-        state: ReceiveTrafficState<'a, Side>,
-    ) -> Option<ReceiveTraffic<Side>> {
+        state: ReceiveTrafficState<'a, Side, StreamDeframerCore>,
+    ) -> Option<ReceiveTraffic<Side, StreamDeframerCore>> {
         match state {
             ReceiveTrafficState::FlushSender(service_sender) => self
                 .then
@@ -481,8 +481,8 @@ struct ExpectReadMore;
 impl ConsumeReceiveState for ExpectReadMore {
     fn consume<'a, Side: SideData>(
         &mut self,
-        state: ReceiveTrafficState<'a, Side>,
-    ) -> Option<ReceiveTraffic<Side>> {
+        state: ReceiveTrafficState<'a, Side, StreamDeframerCore>,
+    ) -> Option<ReceiveTraffic<Side, StreamDeframerCore>> {
         match state {
             ReceiveTrafficState::ReadMore(receive_traffic) => Some(receive_traffic),
             other => panic!("unexpected state for ExpectReadMore: got {other:?}"),
@@ -495,8 +495,8 @@ struct ExpectCloseNotify;
 impl ConsumeReceiveState for ExpectCloseNotify {
     fn consume<'a, Side: SideData>(
         &mut self,
-        state: ReceiveTrafficState<'a, Side>,
-    ) -> Option<ReceiveTraffic<Side>> {
+        state: ReceiveTrafficState<'a, Side, StreamDeframerCore>,
+    ) -> Option<ReceiveTraffic<Side, StreamDeframerCore>> {
         match state {
             ReceiveTrafficState::CloseNotify => None,
             other => panic!("unexpected state for ExpectCloseNotify: got {other:?}"),

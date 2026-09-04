@@ -7,13 +7,11 @@ use crate::crypto::cipher::{EncodableVersion, InboundOpaque, Record, RecordError
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage};
 use crate::msgs::codec::{Codec, Reader, U24};
-use crate::msgs::{
-    DTLS_12_HEADER_SIZE, DTLS_13_UNIFIED_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE,
-    DtlsHandshakeFragment, Epoch, FullRecordSequenceNumber, HEADER_SIZE, HandshakeSequenceNumber,
-    MessageHeader, RecordSequenceNumber, UnifiedHeader, is_unified_header, read_record_header,
-};
+use crate::msgs::dtls::RecordSequenceNumber;
+use crate::msgs::{Epoch, HEADER_SIZE, HandshakeSequenceNumber, read_record_header};
 
 mod buffers;
+mod dtls;
 #[cfg(test)]
 mod dtls_test;
 use buffers::Coalescer;
@@ -21,8 +19,8 @@ pub(crate) use buffers::{Delocator, Locator};
 
 pub fn fuzz_deframer(data: &[u8]) {
     let mut buf = data.to_vec();
-    let mut deframer = Deframer::default();
-    while let Some(result) = deframer.deframe(&mut buf, Epoch::Unencrypted, 0.into()) {
+    let mut deframer = StreamDeframer::default();
+    while let Some(result) = deframer.deframe(&mut buf, Epoch::Unencrypted) {
         if result.is_err() {
             break;
         }
@@ -31,13 +29,14 @@ pub fn fuzz_deframer(data: &[u8]) {
     assert!(deframer.processed() <= buf.len());
 }
 
+pub(crate) type StreamDeframer = Deframer<StreamDeframerCore>;
+
 #[derive(Debug)]
-pub(crate) struct Deframer {
+pub(crate) struct Deframer<Core> {
+    core: Core,
+
     /// Spans covering individual handshake payloads, in order of receipt.
     spans: VecDeque<FragmentSpan>,
-
-    /// Whether any span declared a size exceeding `MAX_HANDSHAKE_SIZE`.
-    too_large: bool,
 
     /// Prefix of the buffer that has been processed so far.
     ///
@@ -56,162 +55,16 @@ pub(crate) struct Deframer {
     ///
     /// 0 <= discard <= len
     discard: usize,
-
-    /// Deframed messages that are for future epochs
-    future_epoch_records: VecDeque<FutureEpochDeframed>,
 }
 
-impl Deframer {
+impl<Core: DeframerCore> Deframer<Core> {
     pub(crate) fn deframe<'a>(
         &mut self,
         buf: &'a mut [u8],
         current_epoch: Epoch,
-        highest_record_seq: FullRecordSequenceNumber,
     ) -> Option<Result<Deframed<'a>, Error>> {
-        // Check whether any previously buffered future epoch records are now from an older epoch
-        // and toss 'em.
-        while self
-            .future_epoch_records
-            .pop_front_if(|f| f.epoch.before(current_epoch))
-            .is_some()
-        {}
-
-        // Check if any previously buffered future epoch record matches the requested epoch
-        let (was_future_record, unprocessed_buf) = match self
-            .future_epoch_records
-            .pop_front_if(|f| f.epoch == current_epoch)
-        {
-            Some(FutureEpochDeframed { bounds, .. }) => (Some(bounds.clone()), buf.get(bounds)?),
-            None => (None, buf.get(self.processed..)?),
-        };
-
-        let mut reader = Reader::new(unprocessed_buf);
-        let (typ, version, msg_epoch, record_seq, len, header_size) =
-            if unprocessed_buf.len() > 0 && is_unified_header(unprocessed_buf[0]) {
-                let UnifiedHeader {
-                    connection_id: _,
-                    length,
-                    epoch,
-                    sequence,
-                    ..
-                } = match UnifiedHeader::read(&mut reader, current_epoch) {
-                    Ok(header) => header,
-                    Err(err) => return Some(Err(err.into())),
-                };
-
-                // If there's no length in the unified header, then assume the record occupies the
-                // entirety of the provided buffer, which is in turn assumed to be a whole datagram.
-                // TODO(timg): I don't have a test that exercises this because the send path/fragmenter
-                // doesn't know how to omit length
-                let length = length.unwrap_or_else(|| buf.len() as u16);
-
-                (
-                    // We will claim to have seen application data on the wire, so that the record can
-                    // be handled similarly to a stream TLS 1.3 record, meaning that the true content
-                    // type will be in the last unpadded byte of the deprotected record.
-                    ContentType::ApplicationData,
-                    ProtocolVersion::DTLSv1_3,
-                    epoch,
-                    RecordSequenceNumber::Protected(sequence),
-                    length,
-                    DTLS_13_UNIFIED_HEADER_SIZE,
-                )
-            } else {
-                let MessageHeader {
-                    typ,
-                    version,
-                    epoch_and_sequence,
-                    len,
-                } = match read_record_header(&mut reader) {
-                    Ok(header) => header,
-                    Err(err) => {
-                        let err = match err {
-                            RecordError::TooShortForHeader | RecordError::TooShortForLength => {
-                                return None;
-                            }
-                            RecordError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
-                            RecordError::MessageTooLarge => InvalidMessage::MessageTooLarge,
-                            RecordError::InvalidContentType => InvalidMessage::InvalidContentType,
-                            RecordError::UnknownProtocolVersion => {
-                                InvalidMessage::UnknownProtocolVersion
-                            }
-                        };
-                        return Some(Err(err.into()));
-                    }
-                };
-
-                let (epoch, sequence) = epoch_and_sequence.unwrap_or_else(|| {
-                    // If no epoch and sequence were read, then we are not doing TLS and are receiving
-                    // messages over a reliable, in-order transport. We assume that the epoch hasn't
-                    // changed and that we have received the next message in sequence.
-                    (current_epoch, highest_record_seq)
-                });
-
-                (
-                    typ,
-                    version,
-                    epoch,
-                    RecordSequenceNumber::Full(sequence),
-                    len,
-                    // If we're here, then there wasn't a unified header on the record, and so DTLS 1.2
-                    // and 1.3 records have the same header size.
-                    if version.is_datagram_tls() {
-                        DTLS_12_HEADER_SIZE
-                    } else {
-                        HEADER_SIZE
-                    },
-                )
-            };
-
-        let (header, payload, bounds) = if let Some(bounds) = was_future_record {
-            let (header, rest) = buf.split_at_mut(bounds.start + header_size);
-            (
-                header,
-                &mut rest[..bounds.end - (bounds.start + header_size)],
-                bounds,
-            )
-        } else {
-            // we now have a TLS header and body on the front of `self.buf`.  remove
-            // it from the front.
-            let end = self.processed + header_size + len as usize;
-            let head = buf.get_mut(..end)?;
-            // This bound, returned from the function, INCLUDES the TLS record header. However
-            // message.payload is split into the header and payload, separately.
-            let bounds = self.processed..end;
-            self.processed = end;
-            let record = &mut head[bounds.start..];
-            let (header, rest) = record.split_at_mut(header_size);
-            (header, rest, bounds)
-        };
-
-        // If a message is from the very next epoch, we buffer it so that it can be processed later.
-        // But messages from past epochs or more than one epoch into the future are discarded.
-        //
-        // <https://datatracker.ietf.org/doc/html/rfc9147#section-4.2.1>
-        // <https://www.rfc-editor.org/info/rfc6347/#section-4.1>
-        if msg_epoch != current_epoch {
-            if current_epoch.successor(msg_epoch) {
-                self.future_epoch_records
-                    .push_back(FutureEpochDeframed {
-                        bounds,
-                        epoch: msg_epoch,
-                    });
-            } else {
-                self.discard = self.processed;
-            }
-            return None;
-        }
-
-        Some(Ok(Deframed {
-            record: Record {
-                typ,
-                version: EncodableVersion::Legacy(version),
-                payload: InboundOpaque(header, payload),
-            },
-            bounds,
-            epoch: msg_epoch,
-            record_seq,
-        }))
+        self.core
+            .deframe(&mut self.processed, &mut self.discard, buf, current_epoch)
     }
 
     /// Accepts a QUIC frame into the deframer.
@@ -220,10 +73,10 @@ impl Deframer {
     /// this exposes a simpler API for accepting handshake messages directly.
     ///
     /// `buf` is a buffer containing a handshake message.
-    pub(crate) fn input_quic(&mut self, buf: &mut [u8]) -> Result<(), InvalidMessage> {
+    pub(crate) fn input_quic(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         let bounds = self.processed..buf.len();
         self.processed += bounds.len();
-        self.input_message(ProtocolVersion::TLSv1_3, bounds, buf);
+        self.input_message(ProtocolVersion::TLSv1_3, bounds, buf)?;
         self.coalesce(buf)?;
         Ok(())
     }
@@ -240,395 +93,19 @@ impl Deframer {
     /// `CryptoProvider` interface).  `coalesce()` arranges for that to happen, but
     /// to do so it needs to move the fragments together in the original buffer.
     /// This would not be possible if the messages were borrowing from that buffer.
-    ///
-    /// This function is for inputting TLS message fragments. Use [`Self::input_message_dtls`] for
-    /// DTLS records containing handshake fragments.
     pub(crate) fn input_message(
         &mut self,
         version: ProtocolVersion,
         bounds: Range<usize>,
         buf: &[u8],
-    ) {
-        debug_assert!(!version.is_datagram_tls());
-
-        let Some(payload) = buf.get(bounds.start..bounds.end) else {
-            return;
-        };
-
-        // if our last span is incomplete, we can blindly add this as a new span --
-        // no need to attempt parsing it with `DissectHandshakeIter`.
-        //
-        // `coalesce()` will later move this new message to be contiguous with
-        // `_last_incomplete`, and reparse the result.
-        //
-        // we cannot merge these processes, because `coalesce` mutates the underlying
-        // buffer, and `msg` borrows it.
-        if let Some(_last_incomplete) = self
-            .spans
-            .back()
-            .filter(|span| !span.is_complete())
-        {
-            self.spans
-                .push_back(FragmentSpan::new(version, None, bounds));
-            return;
-        }
-
-        // otherwise, we can expect `msg` to contain a handshake header introducing
-        // a new message (and perhaps several of them.)
-        let iter = DissectHandshakeIter {
-            version,
-            payload,
-            bounds,
-        };
-
-        for span in iter {
-            self.too_large |= span.size.unwrap_or_default() > MAX_HANDSHAKE_SIZE;
-            self.spans.push_back(span);
-        }
-    }
-
-    /// Input a DTLS record containing one or more handshake fragments so that they can be
-    /// re-ordered and re-assembled by [`Self::coalesce_dtls`]. There should not be any trailing
-    /// bytes on the message payload.
-    ///
-    /// `msg` is a parsed TLS record, which may contain one or more handshake messages, each
-    /// starting with a handshake header.
-    ///
-    /// `bounds` is the position within the containing buffer of the record payload. That is, it
-    /// begins at the start of the first handshake header.
-    ///
-    /// The handshake sequence numbers observed in the record are returned.
-    pub(crate) fn input_message_dtls(
-        &mut self,
-        msg: Record<&'_ [u8]>,
-        bounds: Range<usize>,
     ) -> Result<Vec<HandshakeSequenceNumber>, Error> {
-        debug_assert!(msg.typ == ContentType::Handshake);
-        debug_assert!(msg.version.is_datagram_tls());
-
-        let mut handshake_seqs = Vec::new();
-
-        // Using DissectHandshakeIter wouldn't be appropriate here because parsing DTLS handshake
-        // fragments is fallible: if there isn't enough room for a handshake fragment header, we
-        // have a short read.
-        let mut bound_start = bounds.start;
-        let mut reader = Reader::new(msg.payload);
-        while reader.any_left() {
-            let handshake_fragment = DtlsHandshakeFragment::read(&mut reader)?;
-            let fragment_len =
-                DTLS_HANDSHAKE_HEADER_SIZE + handshake_fragment.fragment_length.0 as usize;
-            self.spans.push_back(FragmentSpan {
-                version: msg.version.version(),
-                size: Some(handshake_fragment.length.into()),
-                bounds: bound_start..bound_start + fragment_len,
-                dtls_fragment_fields: Some((
-                    handshake_fragment.message_seq,
-                    handshake_fragment.fragment_offset,
-                    handshake_fragment.fragment_length,
-                )),
-                is_coalesced: false,
-            });
-            bound_start += fragment_len;
-            if bound_start > bounds.end {
-                return Err(Error::InvalidMessage(InvalidMessage::MessageTooLarge));
-            }
-            if !handshake_seqs.contains(&handshake_fragment.message_seq) {
-                handshake_seqs.push(handshake_fragment.message_seq);
-            }
-        }
-
-        Ok(handshake_seqs)
+        self.core
+            .input_message(&mut self.spans, version, bounds, buf)
     }
 
-    /// Coalesce the handshake portions of the given buffer,
-    /// if needed.
-    ///
-    /// This does nothing if there is nothing to do.
-    ///
-    /// In a normal TLS stream, handshake messages need not be contiguous.
-    /// For example, each handshake message could be delivered in its own
-    /// outer TLS record.  This would mean the handshake messages are
-    /// separated by the outer TLS record headers, and likely also
-    /// separated by encryption overhead (any explicit nonce in front,
-    /// any padding and authentication tag afterwards).
-    ///
-    /// For a toy example of one handshake message in two fragments, and:
-    ///
-    /// - the letter `h` for handshake header octets
-    /// - the letter `H` for handshake payload octets
-    /// - the letter `x` for octets in the buffer ignored by this code,
-    ///
-    /// the buffer and `spans` data structure could look like:
-    ///
-    /// ```text
-    /// 0 1 2 3 4 5 6 7 8 9 a b c d e f 0 1 2 3 4 5 6 7 8 9
-    /// x x x x x h h h h H H H x x x x x H H H H H H x x x
-    ///           '------------'          '----------'
-    ///            |                               |
-    /// spans = [ { bounds = (5, 12),              |
-    ///              size = Some(9), .. },         |
-    ///                                 { bounds = (17, 23), .. } ]
-    /// ```
-    ///
-    /// In this case, `requires_coalesce` returns `Some(0)`.  Then
-    /// `coalesce_one` moves the second range leftwards:
-    ///
-    /// ```text
-    /// 0 1 2 3 4 5 6 7 8 9 a b c d e f 0 1 2 3 4 5 6 7 8 9
-    /// x x x x x h h h h H H H x x x x x H H H H H H x x x
-    ///                         '----------'
-    ///                          ^        '----------'
-    ///                          |         v
-    ///                          '--<---<--'
-    ///                 copy_within(from = (17, 23),
-    ///                             to = (12, 18))
-    /// ```
-    ///
-    /// Leaving the buffer and spans:
-    ///
-    /// ```text
-    /// 0 1 2 3 4 5 6 7 8 9 a b c d e f 0 1 2 3 4 5 6 7 8 9
-    /// x x x x x h h h h H H H H H H H H H x x x x x x x x
-    ///           '------------------------'
-    ///            |
-    /// spans = [ { bounds = (5, 18), size = Some(9), .. } ]
-    /// ```
     pub(crate) fn coalesce(&mut self, containing_buffer: &mut [u8]) -> Result<(), InvalidMessage> {
-        // Strategy: while there is work to do, scan `spans`
-        // for a pair where the first is not complete.  move
-        // the second down towards the first, then reparse the contents.
-        loop {
-            // this covers spans that never require coalescing, eg. a single
-            // complete QUIC handshake message with an excessive declared size
-            if self.too_large {
-                return Err(InvalidMessage::HandshakePayloadTooLarge);
-            }
-
-            let limit = self.spans.len().saturating_sub(1);
-            let iter = self.spans.iter();
-            let Some(index) = iter
-                .enumerate()
-                .take(limit)
-                .find_map(|(i, span)| (!span.is_complete()).then_some(i))
-            else {
-                return Ok(());
-            };
-
-            let Some(second) = self.spans.remove(index + 1) else {
-                return Ok(());
-            };
-
-            let Some(mut first) = self.spans.remove(index) else {
-                self.spans.insert(index + 1, second);
-                return Ok(());
-            };
-
-            // move the entirety of `second` to be contiguous with `first`
-            let len = second.bounds.len();
-            let target = Range {
-                start: first.bounds.end,
-                end: first.bounds.end + len,
-            };
-
-            let mut coalescer = Coalescer::new(containing_buffer);
-            coalescer.copy_within(second.bounds, target);
-            let delocator = coalescer.delocator();
-
-            // now adjust `first` to cover both
-            first.bounds.end += len;
-
-            // finally, attempt to re-dissect `first`
-            let record = Record {
-                typ: ContentType::Handshake,
-                version: EncodableVersion::Legacy(first.version),
-                payload: delocator.slice_from_range(&first.bounds),
-            };
-
-            let iter = DissectHandshakeIter {
-                version: first.version,
-                payload: record.payload,
-                bounds: first.bounds.start..first.bounds.end,
-            };
-
-            for (i, span) in iter.enumerate() {
-                self.too_large |= span.size.unwrap_or_default() > MAX_HANDSHAKE_SIZE;
-                self.spans.insert(index + i, span);
-            }
-        }
-    }
-
-    /// Coalesce the contents of `containing_buffer` into one or more complete DTLS handshake
-    /// messages.
-    ///
-    /// `containing_buffer` is understood to contain some number of DTLS records containing
-    /// handshake messages, i.e., a record header, then one or more handshake headers and payloads.
-    /// Before calling this function, each of those records must have been parsed by
-    /// [`Self::deframe`] and then input into this deframer with [`Self::input_message_dtls`].
-    ///
-    /// If `containing_buffer` contains all the fragments of a handshake message, then on return,
-    /// the buffer will contain the coalesced (reassembled) handshake message, followed by any
-    /// remaining uncoalesced fragments.
-    ///
-    /// If `containing_buffer` contains all the fragments of multiple handshake messages, then on
-    /// return, the buffer will contain coalesced handshake messages, ordered by the handshake
-    /// sequence number, not to be confused with the sequence number at the DTLS record layer.
-    ///
-    /// Coalesced handshake messages consist of the handshake header of the first fragment,
-    /// concatenated with just the handshake payloads of subsequent fragments. Coalesced messages
-    /// include `DTLSHandshake.{message_seq, fragment_offset, fragment_length}` values but these are
-    /// no longer meaningful since the message is coalesced. See [1], [2] for details of the
-    /// `DTLSHandshake` structure.
-    ///
-    /// After calling this method, callers should call [`Self::complete_span`] to find out the
-    /// position of the next coalesced handshake message, if any, and then [`Self::message`] to
-    /// obtain it.
-    ///
-    /// More fragments may then be added into the deframer by calling [`Self::deframe`] and
-    /// [`Self::input_message_dtls`] again.
-    ///
-    /// [1]: https://datatracker.ietf.org/doc/html/rfc6347#section-4.2.2
-    /// [2]: https://datatracker.ietf.org/doc/html/rfc9147#section-5.2
-    pub(crate) fn coalesce_dtls(&mut self, containing_buffer: &mut [u8]) {
-        // Sort the spans by sequence number and fragment offset so we can reorder
-        // containing_buffer.
-        self.spans
-            .make_contiguous()
-            .sort_by(|left, right| {
-                // Unwrap safety: this method should only be used for DTLS, in which case these
-                // fields are always set
-                let (left_seq, left_fragment_offset, _) = left.dtls_fragment_fields.unwrap();
-                let (right_seq, right_fragment_offset, _) = right.dtls_fragment_fields.unwrap();
-
-                (left_seq, left_fragment_offset).cmp(&(right_seq, right_fragment_offset))
-            });
-
-        // Scratch buffer to hold fragments while we slide the rest of `containing_buffer` around.
-        // 4096 is chosen because it's _probably_ bigger than the PMTU anyone will use and thus
-        // _probably_ big enough for any DTLS fragment we'll encounter.
-        // TODO(timg): We shouldn't make guesses about PMTU here. Make this a smaller buffer, say
-        // 1024 bytes, and then do the copy-aside-and-slide-containing-buffer dance one chunk at
-        // a time.
-        let mut scratch = [0u8; 4096];
-
-        // Which handshake message are we reassembling into?
-        let mut first_fragment_index = 0;
-        // How much of the current handshake message have we reassembled (excluding handshake
-        // headers)?
-        let mut current_message_len = 0;
-        // How many bytes of handshake message have we reassembled, total, including the first
-        // fragment's handshake header but excluding any headers from subsequent messages?
-        // Equivalentlty, what position of containing_buffer are we copying into?
-        let mut reassembled_len = 0;
-
-        // We can't idiomatically iterate over self.spans because we need to mutably borrow elements
-        // besides the current one in the loop body.
-        for index in 0..self.spans.len() {
-            let (current_seq, U24(current_fragment_offset), U24(current_fragment_length)) = self
-                .spans[index]
-                .dtls_fragment_fields
-                .unwrap();
-
-            let (coalesce_into_seq, coalsce_into_offset, _) = self.spans[first_fragment_index]
-                .dtls_fragment_fields
-                .unwrap();
-
-            let is_first_fragment = index == 0 || current_seq > coalesce_into_seq;
-            if is_first_fragment {
-                first_fragment_index = index;
-                current_message_len = 0;
-            }
-
-            if current_fragment_offset > current_message_len {
-                // We are still missing some fragments and can't yet reassemble this handshake.
-                break;
-            }
-
-            // Figure out what portion of the current handshake fragment we'll copy aside and back
-            // into containing_buffer.
-            let mut copy_bounds = self.spans[index].bounds.clone();
-
-            // Each span's bounds include only the handshake header and the handshake message
-            // fragment. We retain the handshake header for the first fragment of each handshake
-            // message, but skip it for subsequent fragments. As a result, after decoalescing,
-            // we'll have what appears to be a single handshake message.
-            if !is_first_fragment {
-                copy_bounds.start += self.spans[index]
-                    .version
-                    .handshake_header_size();
-            }
-
-            // DTLS handshake fragments may overlap, so work out what portion of this span to append
-            let overlap = current_message_len - current_fragment_offset;
-            copy_bounds.start += overlap as usize;
-            current_message_len += current_fragment_length - overlap;
-
-            if !is_first_fragment {
-                // Grow the fragment we coalesce into and mark the fragment we coalesced from for
-                // pruning.
-                self.spans[first_fragment_index]
-                    .bounds
-                    .end += copy_bounds.len();
-                self.spans[first_fragment_index].dtls_fragment_fields = Some((
-                    coalesce_into_seq,
-                    coalsce_into_offset,
-                    U24(current_message_len),
-                ));
-                self.spans[index].is_coalesced = true;
-            }
-
-            // Copy the fragment we want into scratch.
-            scratch[0..copy_bounds.len()].copy_from_slice(&containing_buffer[copy_bounds.clone()]);
-
-            // If there is any portion of containing_buffer between the fragment we coalesce into
-            // and the fragment we are copying, shift that portion to the right to make room. The
-            // span might be preceded by a record header, but we don't need to preserve it.
-            let curr_fragment_start = self.spans[index].bounds.start;
-            if curr_fragment_start > reassembled_len {
-                let shifted_range = reassembled_len..curr_fragment_start;
-                let dest = reassembled_len + copy_bounds.len();
-                containing_buffer.copy_within(shifted_range.clone(), dest);
-
-                // Fix up bounds of all spans in the portion that got shifted.
-                for span in &mut self.spans {
-                    if shifted_range.contains(&span.bounds.start)
-                        && shifted_range.contains(&(span.bounds.end - 1))
-                    {
-                        span.bounds.start += copy_bounds.len();
-                        span.bounds.end += copy_bounds.len();
-                    }
-                }
-
-                // And of any future records
-                for future_record in &mut self.future_epoch_records {
-                    if shifted_range.contains(&future_record.bounds.start)
-                        && shifted_range.contains(&(future_record.bounds.end - 1))
-                    {
-                        future_record.bounds.start += copy_bounds.len();
-                        future_record.bounds.end += copy_bounds.len();
-                    }
-                }
-            }
-
-            // Copy the span we want from scratch back into containing_buffer
-            let destination_bounds = reassembled_len..reassembled_len + copy_bounds.len();
-            containing_buffer[destination_bounds.clone()]
-                .copy_from_slice(&scratch[0..copy_bounds.len()]);
-
-            if is_first_fragment {
-                // We may have copied the first fragment to a new position, so fix up its bounds
-                self.spans[index].bounds = destination_bounds;
-            }
-
-            reassembled_len += copy_bounds.len();
-        }
-
-        // Remove spans which have been coalesced into other spans so we don't have to deal with
-        // them later. Iterate in reverse so we can use Vec::remove without invalidating indices.
-        for index in (0..self.spans.len()).rev() {
-            if self.spans[index].is_coalesced {
-                self.spans.remove(index);
-            }
-        }
+        self.core
+            .coalesce(&mut self.spans, containing_buffer)
     }
 
     /// Yield the next complete handshake message from `containing_buffer`.
@@ -702,19 +179,267 @@ impl Deframer {
     }
 }
 
-impl Default for Deframer {
+impl<Core: DeframerCore> Default for Deframer<Core> {
     fn default() -> Self {
         Self {
+            core: Core::default(),
             // capacity: a typical upper limit on handshake messages in
             // a single flight
             spans: VecDeque::with_capacity(16),
-            too_large: false,
             processed: 0,
             discard: 0,
-            // TODO(DTLS): choose a reasonable number of future epoch messages to buffer
-            future_epoch_records: VecDeque::with_capacity(16),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamDeframerCore {
+    /// Whether any span declared a size exceeding `MAX_HANDSHAKE_SIZE`.
+    too_large: bool,
+}
+
+impl DeframerCore for StreamDeframerCore {
+    fn deframe<'a>(
+        &mut self,
+        processed: &mut usize,
+        _discard: &mut usize,
+        buf: &'a mut [u8],
+        current_epoch: Epoch,
+    ) -> Option<Result<Deframed<'a>, Error>> {
+        let mut reader = Reader::new(buf.get(*processed..)?);
+
+        let (typ, version, len) = match read_record_header(&mut reader) {
+            Ok(header) => header,
+            Err(err) => {
+                let err = match err {
+                    RecordError::TooShortForHeader | RecordError::TooShortForLength => {
+                        return None;
+                    }
+                    RecordError::InvalidEmptyPayload => InvalidMessage::InvalidEmptyPayload,
+                    RecordError::MessageTooLarge => InvalidMessage::MessageTooLarge,
+                    RecordError::InvalidContentType => InvalidMessage::InvalidContentType,
+                    RecordError::UnknownProtocolVersion => InvalidMessage::UnknownProtocolVersion,
+                };
+                return Some(Err(err.into()));
+            }
+        };
+
+        // we now have a TLS header and body on the front of `self.buf`.  remove
+        // it from the front.
+        let end = *processed + HEADER_SIZE + len as usize;
+        let head = buf.get_mut(..end)?;
+        // This bound, returned from the function, includes the record header. However
+        // message.payload is split into the header and payload.
+        let bounds = *processed..end;
+        *processed = end;
+        let record = &mut head[bounds.start..];
+        let (header, payload) = record.split_at_mut(HEADER_SIZE);
+
+        Some(Ok(Deframed {
+            record: Record {
+                typ,
+                version: EncodableVersion::Legacy(version),
+                payload: InboundOpaque(header, payload),
+            },
+            bounds,
+            epoch: current_epoch,
+            record_seq: None,
+        }))
+    }
+
+    fn input_message(
+        &mut self,
+        spans: &mut VecDeque<FragmentSpan>,
+        version: ProtocolVersion,
+        bounds: Range<usize>,
+        buf: &[u8],
+    ) -> Result<Vec<HandshakeSequenceNumber>, Error> {
+        let Some(payload) = buf.get(bounds.start..bounds.end) else {
+            return Ok(Vec::new());
+        };
+
+        // if our last span is incomplete, we can blindly add this as a new span --
+        // no need to attempt parsing it with `DissectHandshakeIter`.
+        //
+        // `coalesce()` will later move this new message to be contiguous with
+        // `_last_incomplete`, and reparse the result.
+        //
+        // we cannot merge these processes, because `coalesce` mutates the underlying
+        // buffer, and `msg` borrows it.
+        if let Some(_last_incomplete) = spans
+            .back()
+            .filter(|span| !span.is_complete())
+        {
+            spans.push_back(FragmentSpan::new(version, None, bounds));
+            return Ok(Vec::new());
+        }
+
+        // otherwise, we can expect `msg` to contain a handshake header introducing
+        // a new message (and perhaps several of them.)
+        let iter = DissectHandshakeIter {
+            version,
+            payload,
+            bounds,
+        };
+
+        for span in iter {
+            self.too_large |= span.size.unwrap_or_default() > MAX_HANDSHAKE_SIZE;
+            spans.push_back(span);
+        }
+
+        return Ok(Vec::new());
+    }
+
+    /// Coalesce the handshake portions of the given buffer,
+    /// if needed.
+    ///
+    /// This does nothing if there is nothing to do.
+    ///
+    /// In a normal TLS stream, handshake messages need not be contiguous.
+    /// For example, each handshake message could be delivered in its own
+    /// outer TLS record.  This would mean the handshake messages are
+    /// separated by the outer TLS record headers, and likely also
+    /// separated by encryption overhead (any explicit nonce in front,
+    /// any padding and authentication tag afterwards).
+    ///
+    /// For a toy example of one handshake message in two fragments, and:
+    ///
+    /// - the letter `h` for handshake header octets
+    /// - the letter `H` for handshake payload octets
+    /// - the letter `x` for octets in the buffer ignored by this code,
+    ///
+    /// the buffer and `spans` data structure could look like:
+    ///
+    /// ```text
+    /// 0 1 2 3 4 5 6 7 8 9 a b c d e f 0 1 2 3 4 5 6 7 8 9
+    /// x x x x x h h h h H H H x x x x x H H H H H H x x x
+    ///           '------------'          '----------'
+    ///            |                               |
+    /// spans = [ { bounds = (5, 12),              |
+    ///              size = Some(9), .. },         |
+    ///                                 { bounds = (17, 23), .. } ]
+    /// ```
+    ///
+    /// In this case, `requires_coalesce` returns `Some(0)`.  Then
+    /// `coalesce_one` moves the second range leftwards:
+    ///
+    /// ```text
+    /// 0 1 2 3 4 5 6 7 8 9 a b c d e f 0 1 2 3 4 5 6 7 8 9
+    /// x x x x x h h h h H H H x x x x x H H H H H H x x x
+    ///                         '----------'
+    ///                          ^        '----------'
+    ///                          |         v
+    ///                          '--<---<--'
+    ///                 copy_within(from = (17, 23),
+    ///                             to = (12, 18))
+    /// ```
+    ///
+    /// Leaving the buffer and spans:
+    ///
+    /// ```text
+    /// 0 1 2 3 4 5 6 7 8 9 a b c d e f 0 1 2 3 4 5 6 7 8 9
+    /// x x x x x h h h h H H H H H H H H H x x x x x x x x
+    ///           '------------------------'
+    ///            |
+    /// spans = [ { bounds = (5, 18), size = Some(9), .. } ]
+    /// ```
+    fn coalesce(
+        &mut self,
+        spans: &mut VecDeque<FragmentSpan>,
+        containing_buffer: &mut [u8],
+    ) -> Result<(), InvalidMessage> {
+        // Strategy: while there is work to do, scan `spans`
+        // for a pair where the first is not complete.  move
+        // the second down towards the first, then reparse the contents.
+        loop {
+            // this covers spans that never require coalescing, eg. a single
+            // complete QUIC handshake message with an excessive declared size
+            if self.too_large {
+                return Err(InvalidMessage::HandshakePayloadTooLarge);
+            }
+
+            let limit = spans.len().saturating_sub(1);
+            let iter = spans.iter();
+            let Some(index) = iter
+                .enumerate()
+                .take(limit)
+                .find_map(|(i, span)| (!span.is_complete()).then_some(i))
+            else {
+                return Ok(());
+            };
+
+            let Some(second) = spans.remove(index + 1) else {
+                return Ok(());
+            };
+
+            let Some(mut first) = spans.remove(index) else {
+                spans.insert(index + 1, second);
+                return Ok(());
+            };
+
+            // move the entirety of `second` to be contiguous with `first`
+            let len = second.bounds.len();
+            let target = Range {
+                start: first.bounds.end,
+                end: first.bounds.end + len,
+            };
+
+            let mut coalescer = Coalescer::new(containing_buffer);
+            coalescer.copy_within(second.bounds, target);
+            let delocator = coalescer.delocator();
+
+            // now adjust `first` to cover both
+            first.bounds.end += len;
+
+            // finally, attempt to re-dissect `first`
+            let record = Record {
+                typ: ContentType::Handshake,
+                version: EncodableVersion::Legacy(first.version),
+                payload: delocator.slice_from_range(&first.bounds),
+            };
+
+            let iter = DissectHandshakeIter {
+                version: first.version,
+                payload: record.payload,
+                bounds: first.bounds.start..first.bounds.end,
+            };
+
+            for (i, span) in iter.enumerate() {
+                self.too_large |= span.size.unwrap_or_default() > MAX_HANDSHAKE_SIZE;
+                spans.insert(index + i, span);
+            }
+        }
+    }
+}
+
+impl Default for StreamDeframerCore {
+    fn default() -> Self {
+        Self { too_large: false }
+    }
+}
+
+pub trait DeframerCore: Default {
+    fn deframe<'a>(
+        &mut self,
+        processed: &mut usize,
+        discard: &mut usize,
+        buf: &'a mut [u8],
+        current_epoch: Epoch,
+    ) -> Option<Result<Deframed<'a>, Error>>;
+
+    fn input_message(
+        &mut self,
+        spans: &mut VecDeque<FragmentSpan>,
+        version: ProtocolVersion,
+        bounds: Range<usize>,
+        buf: &[u8],
+    ) -> Result<Vec<HandshakeSequenceNumber>, Error>;
+
+    fn coalesce(
+        &mut self,
+        spans: &mut VecDeque<FragmentSpan>,
+        containing_buffer: &mut [u8],
+    ) -> Result<(), InvalidMessage>;
 }
 
 struct DissectHandshakeIter<'b> {
@@ -807,18 +532,11 @@ impl FragmentSpan {
     }
 }
 
-pub(crate) struct Deframed<'a> {
+pub struct Deframed<'a> {
     pub(crate) record: Record<InboundOpaque<'a>>,
     pub(crate) bounds: Range<usize>,
     pub(crate) epoch: Epoch,
-    pub(crate) record_seq: RecordSequenceNumber,
-}
-
-/// A deframed message from a future epoch.
-#[derive(Clone, Debug)]
-struct FutureEpochDeframed {
-    bounds: Range<usize>,
-    epoch: Epoch,
+    pub(crate) record_seq: Option<RecordSequenceNumber>,
 }
 
 /// Proof type that the handshake deframer is aligned.
@@ -849,15 +567,17 @@ mod tests {
         }
     }
 
-    fn add_bytes(deframer: &mut Deframer, range: Range<usize>, within: &[u8]) {
+    fn add_bytes(deframer: &mut Deframer<StreamDeframerCore>, range: Range<usize>, within: &[u8]) {
         deframer.processed = range.end;
-        deframer.input_message(ProtocolVersion::TLSv1_3, range, within);
+        deframer
+            .input_message(ProtocolVersion::TLSv1_3, range, within)
+            .unwrap();
     }
 
     #[test]
     fn coalesce() {
         let mut input = vec![0, 0, 0, 0x21, 0, 0, 0, 0, 0x01, 0xff, 0x00, 0x01];
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
 
         add_bytes(&mut deframer, 3..4, &input);
         add_bytes(&mut deframer, 4..6, &input);
@@ -882,7 +602,7 @@ mod tests {
     #[test]
     fn append() {
         let mut input = vec![0, 0, 0, 0x21, 0, 0, 5, 0, 0, 1, 2, 3, 4, 5, 0];
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
 
         add_bytes(&mut deframer, 3..7, &input);
         add_bytes(&mut deframer, 9..14, &input);
@@ -905,7 +625,7 @@ mod tests {
     fn coalesce_rejects_excess_size_message() {
         const X: u8 = 0xff;
         let mut input = vec![0x21, 0x01, 0x00, X, 0x00, 0xab, X];
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
 
         // split header over multiple records, which motivates doing
         // this check in `coalesce()`
@@ -924,7 +644,7 @@ mod tests {
         // a 0x010000-byte body (one over `MAX_HANDSHAKE_SIZE`) in a single
         // fragment, so `coalesce()` performs no merging (the QUIC CRYPTO shape)
         let mut input = vec![0x21, 0x01, 0x00, 0x00, X, X];
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
 
         add_bytes(&mut deframer, 0..6, &input);
 
@@ -938,7 +658,7 @@ mod tests {
     fn iter_only_returns_full_messages() {
         let input = [0, 0, 0, 0x21, 0, 0, 1, 0xab, 0x21, 0, 0, 1];
 
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
 
         add_bytes(&mut deframer, 3..8, &input);
         add_bytes(&mut deframer, 8..12, &input);
@@ -959,17 +679,19 @@ mod tests {
         // intended to be a realistic example
         let mut input = include_bytes!("../../testdata/handshake-test.1.bin").to_vec();
 
-        let mut deframer = Deframer::default();
-        while let Some(result) = deframer.deframe(&mut input, Epoch::Unencrypted, 0.into()) {
+        let mut deframer = StreamDeframer::default();
+        while let Some(result) = deframer.deframe(&mut input, Epoch::Unencrypted) {
             let Deframed { record, bounds, .. } = result.unwrap();
             let plain = record.into_plain_record();
             std::println!("record {plain:?}");
 
-            deframer.input_message(
-                plain.version.version(),
-                bounds.start + HEADER_SIZE..bounds.end,
-                &input,
-            );
+            deframer
+                .input_message(
+                    plain.version.version(),
+                    bounds.start + HEADER_SIZE..bounds.end,
+                    &input,
+                )
+                .unwrap();
         }
 
         deframer
@@ -1008,37 +730,33 @@ mod tests {
     #[test]
     fn iterator_empty_before_header_received() {
         assert!(
-            Deframer::default()
-                .deframe(&mut [], Epoch::Unencrypted, 0.into())
+            StreamDeframer::default()
+                .deframe(&mut [], Epoch::Unencrypted)
                 .is_none()
         );
         assert!(
-            Deframer::default()
-                .deframe(&mut [0x16], Epoch::Unencrypted, 0.into())
+            StreamDeframer::default()
+                .deframe(&mut [0x16], Epoch::Unencrypted)
                 .is_none()
         );
         assert!(
-            Deframer::default()
-                .deframe(&mut [0x16, 0x03], Epoch::Unencrypted, 0.into())
+            StreamDeframer::default()
+                .deframe(&mut [0x16, 0x03], Epoch::Unencrypted)
                 .is_none()
         );
         assert!(
-            Deframer::default()
-                .deframe(&mut [0x16, 0x03, 0x03], Epoch::Unencrypted, 0.into())
+            StreamDeframer::default()
+                .deframe(&mut [0x16, 0x03, 0x03], Epoch::Unencrypted)
                 .is_none()
         );
         assert!(
-            Deframer::default()
-                .deframe(&mut [0x16, 0x03, 0x03, 0x00], Epoch::Unencrypted, 0.into())
+            StreamDeframer::default()
+                .deframe(&mut [0x16, 0x03, 0x03, 0x00], Epoch::Unencrypted)
                 .is_none()
         );
         assert!(
-            Deframer::default()
-                .deframe(
-                    &mut [0x16, 0x03, 0x03, 0x00, 0x01],
-                    Epoch::Unencrypted,
-                    0.into()
-                )
+            StreamDeframer::default()
+                .deframe(&mut [0x16, 0x03, 0x03, 0x00, 0x01], Epoch::Unencrypted,)
                 .is_none()
         );
     }
@@ -1046,10 +764,10 @@ mod tests {
     #[test]
     fn iterate_one_record() {
         let mut buffer = [0x17, 0x03, 0x03, 0x00, 0x01, 0x00];
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
 
         let Deframed { record, bounds, .. } = deframer
-            .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+            .deframe(&mut buffer, Epoch::Unencrypted)
             .unwrap()
             .unwrap();
 
@@ -1057,7 +775,7 @@ mod tests {
         assert_eq!(bounds.end, 6);
         assert!(
             deframer
-                .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+                .deframe(&mut buffer, Epoch::Unencrypted)
                 .is_none()
         );
     }
@@ -1067,10 +785,10 @@ mod tests {
         let mut buffer = [
             0x16, 0x03, 0x03, 0x00, 0x01, 0x00, 0x17, 0x03, 0x03, 0x00, 0x01, 0x00,
         ];
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
 
         let Deframed { record, bounds, .. } = deframer
-            .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+            .deframe(&mut buffer, Epoch::Unencrypted)
             .unwrap()
             .unwrap();
 
@@ -1078,7 +796,7 @@ mod tests {
         assert_eq!(bounds.end, 6);
 
         let Deframed { record, bounds, .. } = deframer
-            .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+            .deframe(&mut buffer, Epoch::Unencrypted)
             .unwrap()
             .unwrap();
 
@@ -1086,7 +804,7 @@ mod tests {
         assert_eq!(bounds.end, 12);
         assert!(
             deframer
-                .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+                .deframe(&mut buffer, Epoch::Unencrypted)
                 .is_none()
         );
     }
@@ -1094,9 +812,9 @@ mod tests {
     #[test]
     fn iterator_invalid_protocol_version_rejected() {
         let mut buffer = include_bytes!("../../testdata/deframer-invalid-version.bin").to_vec();
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
         let result = deframer
-            .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+            .deframe(&mut buffer, Epoch::Unencrypted)
             .unwrap();
         assert_eq!(
             result.err(),
@@ -1109,9 +827,9 @@ mod tests {
     #[test]
     fn iterator_invalid_content_type_rejected() {
         let mut buffer = include_bytes!("../../testdata/deframer-invalid-contenttype.bin").to_vec();
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
         let result = deframer
-            .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+            .deframe(&mut buffer, Epoch::Unencrypted)
             .unwrap();
         assert_eq!(
             result.err(),
@@ -1122,9 +840,9 @@ mod tests {
     #[test]
     fn iterator_excess_record_length_rejected() {
         let mut buffer = include_bytes!("../../testdata/deframer-invalid-length.bin").to_vec();
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
         let result = deframer
-            .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+            .deframe(&mut buffer, Epoch::Unencrypted)
             .unwrap();
         assert_eq!(
             result.err(),
@@ -1135,9 +853,9 @@ mod tests {
     #[test]
     fn iterator_zero_record_length_rejected() {
         let mut buffer = include_bytes!("../../testdata/deframer-invalid-empty.bin").to_vec();
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
         let result = deframer
-            .deframe(&mut buffer, Epoch::Unencrypted, 0.into())
+            .deframe(&mut buffer, Epoch::Unencrypted)
             .unwrap();
         assert_eq!(
             result.err(),
@@ -1152,11 +870,11 @@ mod tests {
         buffer.extend(client_hello);
         buffer.extend(client_hello);
         buffer.extend(client_hello);
-        let mut deframer = Deframer::default();
+        let mut deframer = StreamDeframer::default();
         let mut count = 0;
         let mut end = 0;
 
-        while let Some(result) = deframer.deframe(&mut buffer, Epoch::Unencrypted, 0.into()) {
+        while let Some(result) = deframer.deframe(&mut buffer, Epoch::Unencrypted) {
             let Deframed { record, bounds, .. } = result.unwrap();
             assert_eq!(ContentType::Handshake, record.typ);
             count += 1;

@@ -15,9 +15,10 @@ use crate::crypto::cipher::{OutboundPlain, RecordEncrypter, RecordSequenceNumber
 use crate::enums::ProtocolVersion;
 use crate::error::{AlertDescription, ErrorWithAlert};
 use crate::lock::Mutex;
+use crate::msgs::dtls::AckRecordSequenceNumber;
 use crate::msgs::{
-    AckRecordSequenceNumber, AlertLevel, Delocator, EncrypterDecrypterPurpose,
-    HandshakeSequenceNumber, Message,
+    AlertLevel, DeframerCore, Delocator, EncrypterDecrypterPurpose, HandshakeSequenceNumber,
+    Message, StreamDeframerCore,
 };
 use crate::sync::Arc;
 use crate::tls13::key_schedule::KeyScheduleTrafficSend;
@@ -33,7 +34,7 @@ pub struct SplitConnection<Side: SideData> {
     /// The ability to encrypt data to be sent.
     pub send: SendTraffic,
     /// The ability to decrypt received data.
-    pub receive: ReceiveTraffic<Side>,
+    pub receive: ReceiveTraffic<Side, StreamDeframerCore>,
     /// Facts about the connection established during the handshake.
     pub outputs: ConnectionOutputs,
 }
@@ -170,14 +171,14 @@ impl fmt::Debug for SendTraffic {
 /// The receive-side of a connection, after a successful handshake.
 ///
 /// You can use this object to receive data from the peer.
-pub struct ReceiveTraffic<Side: SideData> {
+pub struct ReceiveTraffic<Side: SideData, Deframe: DeframerCore> {
     pub(crate) state: Side::State,
-    pub(crate) recv: ReceivePath,
+    pub(crate) recv: ReceivePath<Deframe>,
     pub(crate) send: Arc<Mutex<SendPath>>,
     pub(crate) pending_flush_sender: bool,
 }
 
-impl<Side: SideData> ReceiveTraffic<Side> {
+impl<Side: SideData, Deframe: DeframerCore> ReceiveTraffic<Side, Deframe> {
     /// Receive application data from the peer.
     ///
     /// `received_tls` is an instance of the receive buffer abstraction containing
@@ -194,7 +195,7 @@ impl<Side: SideData> ReceiveTraffic<Side> {
         self,
         input: &'a mut impl TlsInputBuffer,
         tls: &'t mut Vec<u8>,
-    ) -> Result<ReceiveTrafficState<'a, Side>, ErrorWithAlert<'t>> {
+    ) -> Result<ReceiveTrafficState<'a, Side, Deframe>, ErrorWithAlert<'t>> {
         let Self {
             state,
             mut recv,
@@ -211,8 +212,9 @@ impl<Side: SideData> ReceiveTraffic<Side> {
             side: &mut Discard,
         };
 
-        let mut iter =
-            MessageIter::<Side, _>::receive(input, tls, &mut state, &mut recv, output, true);
+        let mut iter = MessageIter::<Side, _, Deframe>::receive(
+            input, tls, &mut state, &mut recv, output, true,
+        );
         let received_plain = match iter.next() {
             Some(Ok(payload)) => Some(payload),
             Some(Err(error)) => {
@@ -288,14 +290,14 @@ impl<Side: SideData> ReceiveTraffic<Side> {
     }
 }
 
-impl ReceiveTraffic<ClientSide> {
+impl<Deframe: DeframerCore> ReceiveTraffic<ClientSide, Deframe> {
     /// Returns the number of TLS1.3 tickets that have been received.
     pub fn tls13_tickets_received(&self) -> u32 {
         self.recv.tls13_tickets_received
     }
 }
 
-impl<Side: SideData> fmt::Debug for ReceiveTraffic<Side> {
+impl<Side: SideData, Deframe: DeframerCore> fmt::Debug for ReceiveTraffic<Side, Deframe> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiveTraffic")
             .finish_non_exhaustive()
@@ -343,17 +345,17 @@ impl<Side: SideData> fmt::Debug for ReceiveTraffic<Side> {
 /// [`Available`]: ReceiveTrafficState::Available
 /// [`CloseNotify`]: ReceiveTrafficState::CloseNotify
 #[expect(clippy::exhaustive_enums)]
-pub enum ReceiveTrafficState<'a, Side: SideData> {
+pub enum ReceiveTrafficState<'a, Side: SideData, Deframe: DeframerCore> {
     /// More input is required.
     ///
     /// Collect it into your input buffer, and then call [`ReceiveTraffic::read()`] again.
-    ReadMore(ReceiveTraffic<Side>),
+    ReadMore(ReceiveTraffic<Side, Deframe>),
 
     /// The sender may have new data to send.
-    FlushSender(FlushSender<Side>),
+    FlushSender(FlushSender<Side, Deframe>),
 
     /// Some application data has been received.
-    Available(ReceivedApplicationData<'a, Side>),
+    Available(ReceivedApplicationData<'a, Side, Deframe>),
 
     /// We received a `close_notify` alert from the peer.
     ///
@@ -361,7 +363,7 @@ pub enum ReceiveTrafficState<'a, Side: SideData> {
     CloseNotify,
 }
 
-impl<Side: SideData> fmt::Debug for ReceiveTrafficState<'_, Side> {
+impl<Side: SideData, Deframe: DeframerCore> fmt::Debug for ReceiveTrafficState<'_, Side, Deframe> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadMore(_) => f
@@ -379,7 +381,7 @@ impl<Side: SideData> fmt::Debug for ReceiveTrafficState<'_, Side> {
 }
 
 /// Received application data.
-pub struct ReceivedApplicationData<'a, Side: SideData> {
+pub struct ReceivedApplicationData<'a, Side: SideData, Deframe: DeframerCore> {
     /// The source buffer for the data.
     input: &'a mut dyn TlsInputBuffer,
 
@@ -393,10 +395,10 @@ pub struct ReceivedApplicationData<'a, Side: SideData> {
     /// buffer via [`TlsInputBuffer::discard()`].
     pending_discard: usize,
 
-    rt: ReceiveTraffic<Side>,
+    rt: ReceiveTraffic<Side, Deframe>,
 }
 
-impl<Side: SideData> ReceivedApplicationData<'_, Side> {
+impl<Side: SideData, Deframe: DeframerCore> ReceivedApplicationData<'_, Side, Deframe> {
     /// Return the application data bytes.
     pub fn data(&mut self) -> &[u8] {
         Delocator::new(self.input.slice_mut()).slice_from_range(&self.range)
@@ -408,7 +410,7 @@ impl<Side: SideData> ReceivedApplicationData<'_, Side> {
     /// discard the received data.
     ///
     /// Returns the next [`ReceiveTrafficState`] state.
-    pub fn into_next(mut self) -> ReceiveTrafficState<'static, Side> {
+    pub fn into_next(mut self) -> ReceiveTrafficState<'static, Side, Deframe> {
         self.input.discard(self.pending_discard);
 
         if core::mem::take(&mut self.rt.pending_flush_sender) {
@@ -427,13 +429,13 @@ impl<Side: SideData> ReceivedApplicationData<'_, Side> {
 /// The caller may wish to check whether there is any IO necessary on the send side. If it does
 /// not, and ignores this state, any pending new data to send will be included in the next
 /// attempt to send data.
-pub struct FlushSender<Side: SideData> {
-    rt: ReceiveTraffic<Side>,
+pub struct FlushSender<Side: SideData, Deframe: DeframerCore> {
+    rt: ReceiveTraffic<Side, Deframe>,
 }
 
-impl<Side: SideData> FlushSender<Side> {
+impl<Side: SideData, Deframe: DeframerCore> FlushSender<Side, Deframe> {
     /// Obtain the next receive-side state.
-    pub fn into_next(self) -> ReceiveTrafficState<'static, Side> {
+    pub fn into_next(self) -> ReceiveTrafficState<'static, Side, Deframe> {
         match self.rt.recv.has_received_close_notify {
             true => ReceiveTrafficState::CloseNotify,
             false => ReceiveTrafficState::ReadMore(self.rt),

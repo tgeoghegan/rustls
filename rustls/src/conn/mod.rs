@@ -12,7 +12,9 @@ use crate::common_state::{
 use crate::crypto::cipher::{OutboundPlain, Payload};
 use crate::error::{ApiMisuse, Error};
 use crate::kernel::KernelState;
-use crate::msgs::{Delocator, Message, Random, ServerExtensionsInput};
+use crate::msgs::{
+    DeframerCore, Delocator, Message, Random, ServerExtensionsInput, StreamDeframerCore,
+};
 use crate::quic::QuicOutput;
 use crate::server::{ChooseConfig, ServerConfig, ServerSide};
 use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
@@ -138,11 +140,15 @@ pub trait Connection: Debug + Deref<Target = ConnectionOutputs> {
 pub(crate) struct ConnectionCommon<Side: SideData> {
     pub(crate) state: Result<Side::State, Error>,
     pub(crate) side: Side::Data,
-    pub(crate) common: CommonState,
+    pub(crate) common: CommonState<StreamDeframerCore>,
 }
 
 impl<Side: SideData> ConnectionCommon<Side> {
-    pub(crate) fn new(state: Side::State, side: Side::Data, common: CommonState) -> Self {
+    pub(crate) fn new(
+        state: Side::State,
+        side: Side::Data,
+        common: CommonState<StreamDeframerCore>,
+    ) -> Self {
         Self {
             state: Ok(state),
             side,
@@ -228,9 +234,9 @@ impl<Side: SideData> ConnectionCommon<Side> {
         )
     }
 
-    pub(crate) fn from_parts_into_kernel_connection(
+    pub(crate) fn from_parts_into_kernel_connection<Deframe: DeframerCore>(
         send: &mut SendPath,
-        recv: ReceivePath,
+        recv: ReceivePath<Deframe>,
         outputs: ConnectionOutputs,
         state: Side::State,
     ) -> Result<(ExtractedSecrets, KernelConnection<Side>), Error> {
@@ -285,7 +291,7 @@ impl ConnectionCommon<ServerSide> {
 }
 
 impl<Side: SideData> Deref for ConnectionCommon<Side> {
-    type Target = CommonState;
+    type Target = CommonState<StreamDeframerCore>;
 
     fn deref(&self) -> &Self::Target {
         &self.common
@@ -307,7 +313,7 @@ impl<Side: SideData> DerefMut for ConnectionCommon<Side> {
 /// buffer, [`VecInput::read()`] will not ingest more data once the internal buffer is full.
 #[must_use]
 pub struct MessageHandler<'a, 'm, Side: SideData> {
-    iter: MessageIter<'a, 'm, Side, SendPath>,
+    iter: MessageIter<'a, 'm, Side, SendPath, StreamDeframerCore>,
     done: bool,
 }
 
@@ -480,7 +486,7 @@ pub struct IoState {
 }
 
 impl IoState {
-    pub(crate) fn new(recv: &ReceivePath) -> Self {
+    pub(crate) fn new<D: DeframerCore>(recv: &ReceivePath<D>) -> Self {
         Self {
             peer_has_closed: recv.has_received_close_notify,
         }
@@ -501,7 +507,7 @@ impl IoState {
 pub(crate) struct SideCommonOutput<'a, 'q> {
     pub(crate) side: &'a mut dyn SideOutput,
     pub(crate) quic: Option<&'q mut dyn QuicOutput>,
-    pub(crate) common: &'a mut CommonState,
+    pub(crate) common: &'a mut CommonState<StreamDeframerCore>,
     pub(crate) tls: &'a mut Vec<u8>,
 }
 
@@ -546,8 +552,12 @@ impl<'q> Output<'_> for SideCommonOutput<'_, 'q> {
             .start_outgoing_traffic();
     }
 
-    fn receive(&mut self) -> &mut ReceivePath {
-        &mut self.common.recv
+    fn decryption_state(&mut self) -> &mut crate::crypto::cipher::DecryptionState {
+        &mut self.common.recv.decrypt_state
+    }
+
+    fn tls13_tickets_received(&mut self) -> &mut u32 {
+        &mut self.common.recv.tls13_tickets_received
     }
 
     fn send(&mut self) -> &mut dyn SendOutput {

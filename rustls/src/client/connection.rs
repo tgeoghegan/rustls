@@ -20,7 +20,8 @@ use crate::crypto;
 use crate::crypto::cipher::OutboundPlain;
 use crate::enums::ApplicationProtocol;
 use crate::error::Error;
-use crate::msgs::{AckRecordSequenceNumber, ClientExtensionsInput};
+use crate::msgs::dtls::AckRecordSequenceNumber;
+use crate::msgs::{ClientExtensionsInput, StreamDeframerCore};
 use crate::quic::QuicOutput;
 use crate::suites::ExtractedSecrets;
 use crate::sync::Arc;
@@ -219,7 +220,7 @@ impl ClientConnectionBuilder {
 /// Use [`Self::write_tls()`] to encrypt early data into TLS records.
 pub struct WriteEarlyData<'a> {
     early_data: &'a mut EarlyData,
-    common: &'a mut CommonState,
+    common: &'a mut CommonState<StreamDeframerCore>,
 }
 
 impl<'a> WriteEarlyData<'a> {

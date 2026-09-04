@@ -20,7 +20,8 @@ use crate::conn::{
 use crate::crypto;
 use crate::crypto::cipher::{OutboundPlain, Payload};
 use crate::error::Error;
-use crate::msgs::{AckRecordSequenceNumber, ServerExtensionsInput};
+use crate::msgs::dtls::AckRecordSequenceNumber;
+use crate::msgs::{ServerExtensionsInput, StreamDeframerCore};
 use crate::server::hs::{self, ChooseConfig, ExpectClientHello, ReadClientHello, ServerState};
 use crate::suites::ExtractedSecrets;
 use crate::sync::Arc;
@@ -304,7 +305,8 @@ impl NeedsInput {
         input: &mut dyn TlsInputBuffer,
         tls: &mut Vec<u8>,
     ) -> Result<ServerHandshake, Error> {
-        let mut iter = MessageIter::new(input, tls, None, &mut self.inner, false);
+        let mut iter =
+            MessageIter::<_, _, StreamDeframerCore>::new(input, tls, None, &mut self.inner, false);
         let r = loop {
             match iter.next() {
                 Some(Ok(_)) => {}

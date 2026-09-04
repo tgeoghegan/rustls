@@ -10,10 +10,8 @@ use crate::crypto::cipher::{
 };
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::Error;
-use crate::msgs::{
-    EncrypterDecrypterPurpose, Epoch, FullRecordSequenceNumber, HandshakeAlignedProof,
-    RecordSequenceNumber,
-};
+use crate::msgs::dtls::{FullRecordSequenceNumber, RecordSequenceNumber};
+use crate::msgs::{EncrypterDecrypterPurpose, Epoch, HandshakeAlignedProof};
 use crate::tracing::trace;
 
 /// Record layer that tracks encryption keys.
@@ -272,11 +270,11 @@ impl DecryptionState {
     pub(crate) fn decrypt_incoming<'a>(
         &mut self,
         encr: Record<InboundOpaque<'a>>,
-        record_seq: RecordSequenceNumber,
+        record_seq: Option<RecordSequenceNumber>,
     ) -> Result<Option<(Decrypted<'a>, FullRecordSequenceNumber)>, Error> {
         let record_seq = match record_seq {
-            RecordSequenceNumber::Full(seq) => seq,
-            RecordSequenceNumber::Protected(seq) => {
+            Some(RecordSequenceNumber::Full(seq)) => seq,
+            Some(RecordSequenceNumber::Protected(seq)) => {
                 let truncated = seq.deprotect(
                     self.record_sequence_number_encrypter
                         .as_ref()
@@ -291,6 +289,7 @@ impl DecryptionState {
                 // Reconstruct full sequence number to be used in replay protection, ACKs, etc.
                 truncated.reconstruct(self.read_seq.into())
             }
+            None => self.read_seq,
         };
 
         let Some(decrypter) = &mut self.record_decrypter else {
@@ -468,7 +467,7 @@ mod tests {
     use super::*;
     use crate::crypto::cipher::EncodableVersion;
     use crate::enums::{ContentType, ProtocolVersion};
-    use crate::msgs::Deframer;
+    use crate::msgs::StreamDeframer;
 
     #[test]
     fn test_has_decrypted() {
@@ -491,7 +490,7 @@ mod tests {
 
         // Initializing the record layer should update the decrypt state, but shouldn't affect whether it
         // has decrypted.
-        let deframer = Deframer::default();
+        let deframer = StreamDeframer::default();
         record_layer.set_record_decrypter(
             Box::new(PassThroughDecrypter),
             &deframer.aligned().unwrap(),
@@ -511,7 +510,7 @@ mod tests {
                     EncodableVersion::Legacy(ProtocolVersion::TLSv1_3),
                     InboundOpaque(&mut [], &mut [0xC0, 0xFF, 0xEE]),
                 ),
-                RecordSequenceNumber::Full(record_layer.read_seq),
+                None,
             )
             .unwrap();
         assert_eq!(record_layer.read_seq, 1.into());

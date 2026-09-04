@@ -1027,8 +1027,7 @@ impl ExpectCcs {
 
         // Note: msgs layer validates trivial contents of CCS.
         output
-            .receive()
-            .decrypt_state
+            .decryption_state()
             .set_record_decrypter(
                 self.pending_decrypter,
                 &proof,

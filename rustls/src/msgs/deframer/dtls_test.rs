@@ -1,11 +1,16 @@
+use crate::FullRecordSequenceNumber;
 use crate::common_state::Protocol;
 use crate::crypto::CipherSuite;
 use crate::crypto::cipher::{EncodableVersion, EncodingContext};
 use crate::enums::HandshakeType;
+use crate::msgs::deframer::dtls::DtlsDeframer;
+use crate::msgs::dtls::{
+    DTLS_12_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_EXTRA, DTLS_HANDSHAKE_HEADER_SIZE,
+    DtlsHandshakeFragment, ProtectedRecordSequenceNumber,
+};
 use crate::msgs::{
-    ClientExtensions, ClientHelloPayload, Codec, Compression, DTLS_HANDSHAKE_HEADER_EXTRA,
-    DTLS_HANDSHAKE_HEADER_SIZE, Fragmenter, HANDSHAKE_HEADER_SIZE, HandshakeMessagePayload,
-    HandshakePayload, Message, MessagePayload, Payload, ProtectedRecordSequenceNumber, Random,
+    ClientExtensions, ClientHelloPayload, Codec, Compression, Fragmenter, HANDSHAKE_HEADER_SIZE,
+    HandshakeMessagePayload, HandshakePayload, Message, MessagePayload, Payload, Random,
     ServerNamePayload, SessionId,
 };
 
@@ -68,7 +73,7 @@ fn single_handshake_fragment(version: ProtocolVersion, encrypted: bool) {
     let record_wire_bytes_len = record_wire_bytes.len();
 
     // Deframe the record to parse its header and get the body as an InboundOpaque
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     let Deframed {
         record: deframed_record,
@@ -76,7 +81,7 @@ fn single_handshake_fragment(version: ProtocolVersion, encrypted: bool) {
         epoch,
         record_seq,
     } = deframer
-        .deframe(&mut record_wire_bytes, Epoch::Unencrypted, 5.into())
+        .deframe(&mut record_wire_bytes, Epoch::Unencrypted)
         .unwrap()
         .unwrap();
 
@@ -85,7 +90,7 @@ fn single_handshake_fragment(version: ProtocolVersion, encrypted: bool) {
     assert_eq!(bounds.end, record_wire_bytes_len);
 
     assert_eq!(epoch, Epoch::Unencrypted);
-    check_record_sequence(version, encrypted, 6, record_seq);
+    check_record_sequence(version, encrypted, 6, record_seq.unwrap());
 
     // Simulate decryption
     let mut message = deframed_record.into_plain_record();
@@ -94,11 +99,13 @@ fn single_handshake_fragment(version: ProtocolVersion, encrypted: bool) {
 
     // Feed the record payload into the deframer. It should be a complete span.
     deframer
-        .input_message_dtls(message, bounds)
+        .input_message(message.version.version(), bounds, message.payload)
         .unwrap();
 
     // Coalescing should be a no-op with only one span
-    deframer.coalesce_dtls(&mut record_wire_bytes);
+    deframer
+        .coalesce(&mut record_wire_bytes)
+        .unwrap();
     let message_span = deframer.complete_span().unwrap();
 
     // We should get the whole handshake message out of the deframer
@@ -111,6 +118,7 @@ fn single_handshake_fragment(version: ProtocolVersion, encrypted: bool) {
     );
 }
 
+#[test]
 fn multiple_handshake_fragment_in_order_unencrypted_dtls_12() {
     multiple_handshake_fragment_in_order(
         ProtocolVersion::DTLSv1_2,
@@ -223,7 +231,7 @@ fn multiple_handshake_fragment_in_order(
         );
     }
 
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     // Deframe records and feed messages into the deframer to be coalesced. We should not
     // get a complete span until all records are fed in.
@@ -235,7 +243,7 @@ fn multiple_handshake_fragment_in_order(
             epoch,
             record_seq,
         } = deframer
-            .deframe(&mut encoded_records, start_epoch, start_seq.into())
+            .deframe(&mut encoded_records, start_epoch)
             .unwrap()
             .unwrap();
 
@@ -243,7 +251,7 @@ fn multiple_handshake_fragment_in_order(
         // that we reassembled them properly.
         assert_eq!(epoch, start_epoch);
         let expect_record_seq = start_seq + record_idx as u64;
-        check_record_sequence(version, encrypted, expect_record_seq, record_seq);
+        check_record_sequence(version, encrypted, expect_record_seq, record_seq.unwrap());
 
         // Simulate in-place decryption
         let mut message = deframed_record.into_plain_record();
@@ -251,9 +259,11 @@ fn multiple_handshake_fragment_in_order(
         let bounds = bounds.start + header_size..bounds.end;
 
         deframer
-            .input_message_dtls(message, bounds)
+            .input_message(message.version.version(), bounds, message.payload)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_records);
+        deframer
+            .coalesce(&mut encoded_records)
+            .unwrap();
 
         if record_idx < records.len() - 1 {
             assert!(deframer.complete_span().is_none());
@@ -355,7 +365,7 @@ fn multiple_handshake_fragment_overlapping(version: ProtocolVersion) {
         );
     }
 
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     // Deframe records and feed messages into the deframer to be coalesced. We should not
     // get a complete span until all records are fed in.
@@ -367,16 +377,12 @@ fn multiple_handshake_fragment_overlapping(version: ProtocolVersion) {
             epoch,
             record_seq,
         } = deframer
-            .deframe(
-                &mut encoded_records,
-                Epoch::ApplicationData(5),
-                (221 + record_idx as u64).into(),
-            )
+            .deframe(&mut encoded_records, Epoch::ApplicationData(5))
             .unwrap()
             .unwrap();
 
         assert_eq!(epoch, Epoch::ApplicationData(5));
-        check_record_sequence(version, true, 222 + record_idx as u64, record_seq);
+        check_record_sequence(version, true, 222 + record_idx as u64, record_seq.unwrap());
 
         // Simulate in-place decryption
         let mut message = deframed_record.into_plain_record();
@@ -384,9 +390,11 @@ fn multiple_handshake_fragment_overlapping(version: ProtocolVersion) {
         let bounds = bounds.start + header_size..bounds.end;
 
         deframer
-            .input_message_dtls(message, bounds)
+            .input_message(message.version.version(), bounds, message.payload)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_records);
+        deframer
+            .coalesce(&mut encoded_records)
+            .unwrap();
 
         if record_idx < records.len() - 1 {
             assert!(
@@ -471,11 +479,10 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1(version: Pro
         );
     }
 
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     // Deframe records and feed messages into the deframer to be coalesced.
     let mut saw_first_message = false;
-    let mut highest_observed_seq = 0;
     for record_idx in 0..records.len() {
         std::println!("record_idx {record_idx}");
         let Deframed {
@@ -484,22 +491,14 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1(version: Pro
             epoch,
             record_seq,
         } = deframer
-            .deframe(
-                &mut encoded_records,
-                Epoch::ApplicationData(5),
-                highest_observed_seq.into(),
-            )
+            .deframe(&mut encoded_records, Epoch::ApplicationData(5))
             .unwrap()
             .unwrap();
 
         assert_eq!(epoch, Epoch::ApplicationData(5));
 
         let expect_record_seq = 222 + records_order[record_idx] as u64;
-        check_record_sequence(version, true, expect_record_seq, record_seq);
-
-        if expect_record_seq > highest_observed_seq {
-            highest_observed_seq = expect_record_seq;
-        }
+        check_record_sequence(version, true, expect_record_seq, record_seq.unwrap());
 
         // Simulate in-place decryption
         let mut message = deframed_record.into_plain_record();
@@ -507,9 +506,11 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_1(version: Pro
         let bounds = bounds.start + header_size..bounds.end;
 
         deframer
-            .input_message_dtls(message, bounds)
+            .input_message(message.version.version(), bounds, message.payload)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_records);
+        deframer
+            .coalesce(&mut encoded_records)
+            .unwrap();
 
         if let Some(span) = deframer.complete_span() {
             // Because of how we laid out encoded_fragments, no message will be available until the
@@ -602,12 +603,11 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2(version: Pro
         );
     }
 
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     // Deframe records and feed messages into the deframer to be coalesced.
     let mut saw_first_message = false;
     let mut saw_second_message = false;
-    let mut highest_observed_seq = 0;
     for record_idx in 0..records.len() {
         std::println!("record_idx {record_idx}");
         let Deframed {
@@ -616,21 +616,13 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2(version: Pro
             epoch,
             record_seq,
         } = deframer
-            .deframe(
-                &mut encoded_records,
-                Epoch::ApplicationData(5),
-                (221 + record_idx as u64).into(),
-            )
+            .deframe(&mut encoded_records, Epoch::ApplicationData(5))
             .unwrap()
             .unwrap();
 
         assert_eq!(epoch, Epoch::ApplicationData(5));
         let expect_record_seq = 222 + records_order[record_idx] as u64;
-        check_record_sequence(version, true, expect_record_seq, record_seq);
-
-        if expect_record_seq > highest_observed_seq {
-            highest_observed_seq = expect_record_seq;
-        }
+        check_record_sequence(version, true, expect_record_seq, record_seq.unwrap());
 
         // Simulate in-place decryption
         let mut message = deframed_record.into_plain_record();
@@ -638,9 +630,11 @@ fn multiple_handshake_fragment_out_of_order_and_more_than_one_seq_2(version: Pro
         let bounds = bounds.start + header_size..bounds.end;
 
         deframer
-            .input_message_dtls(message, bounds)
+            .input_message(message.version.version(), bounds, message.payload)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_records);
+        deframer
+            .coalesce(&mut encoded_records)
+            .unwrap();
 
         if let Some(span) = deframer.complete_span() {
             let reassembled_handshake_message = deframer.record(span, &encoded_records);
@@ -729,7 +723,7 @@ fn single_record_multiple_handshake_messages(version: ProtocolVersion) {
         record_seq: 255.into(),
     });
 
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     // Deframe the record and feed it into the deframer to be coalesced.
     let Deframed {
@@ -738,12 +732,12 @@ fn single_record_multiple_handshake_messages(version: ProtocolVersion) {
         epoch,
         record_seq,
     } = deframer
-        .deframe(&mut encoded_record, Epoch::ApplicationData(11), 254.into())
+        .deframe(&mut encoded_record, Epoch::ApplicationData(11))
         .unwrap()
         .unwrap();
 
     assert_eq!(epoch, Epoch::ApplicationData(11));
-    check_record_sequence(version, true, 255, record_seq);
+    check_record_sequence(version, true, 255, record_seq.unwrap());
 
     // Simulate in-place decryption
     let mut message = deframed_record.into_plain_record();
@@ -751,9 +745,11 @@ fn single_record_multiple_handshake_messages(version: ProtocolVersion) {
     let bounds = bounds.start + header_size..bounds.end;
 
     deframer
-        .input_message_dtls(message, bounds)
+        .input_message(message.version.version(), bounds, message.payload)
         .unwrap();
-    deframer.coalesce_dtls(&mut encoded_record);
+    deframer
+        .coalesce(&mut encoded_record)
+        .unwrap();
 
     // The first and only record contains three complete handshake messages which should now be
     // available.
@@ -855,7 +851,7 @@ fn handshake_messages_span_records(version: ProtocolVersion) {
         encoded_records.extend_from_slice(&encoded_record.as_slice());
     }
 
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     // Deframe records and feed messages into the deframer to be coalesced.
     for record_idx in 0..records.len() {
@@ -866,16 +862,12 @@ fn handshake_messages_span_records(version: ProtocolVersion) {
             epoch,
             record_seq,
         } = deframer
-            .deframe(
-                &mut encoded_records,
-                Epoch::ApplicationData(11),
-                (254 + record_idx as u64).into(),
-            )
+            .deframe(&mut encoded_records, Epoch::ApplicationData(11))
             .unwrap()
             .unwrap();
 
         assert_eq!(epoch, Epoch::ApplicationData(11));
-        check_record_sequence(version, true, 255 + record_idx as u64, record_seq);
+        check_record_sequence(version, true, 255 + record_idx as u64, record_seq.unwrap());
 
         // Simulate in-place decryption
         let mut message = deframed_record.into_plain_record();
@@ -884,9 +876,11 @@ fn handshake_messages_span_records(version: ProtocolVersion) {
         let bounds = bounds.start + header_size..bounds.end;
 
         deframer
-            .input_message_dtls(message, bounds)
+            .input_message(message.version.version(), bounds, message.payload)
             .unwrap();
-        deframer.coalesce_dtls(&mut encoded_records);
+        deframer
+            .coalesce(&mut encoded_records)
+            .unwrap();
 
         if record_idx == 0 {
             // First record contains incomplete handshake message
@@ -974,7 +968,7 @@ fn multiple_fragments_application_data(version: ProtocolVersion) {
     wire_bytes.extend(&encoded_first_record);
     wire_bytes.extend(&encoded_second_record);
 
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     for (encoded_record, expect_start, expect_end, expect_epoch, expect_record_seq) in [
         (
@@ -998,11 +992,7 @@ fn multiple_fragments_application_data(version: ProtocolVersion) {
             epoch,
             record_seq,
         } = deframer
-            .deframe(
-                &mut wire_bytes,
-                expect_epoch,
-                (expect_record_seq - 1).into(),
-            )
+            .deframe(&mut wire_bytes, expect_epoch)
             .unwrap()
             .unwrap();
 
@@ -1013,7 +1003,7 @@ fn multiple_fragments_application_data(version: ProtocolVersion) {
         assert_eq!(message.typ, ContentType::ApplicationData);
         assert_eq!(message.version.version(), version);
         assert_eq!(epoch, expect_epoch);
-        check_record_sequence(version, true, expect_record_seq, record_seq);
+        check_record_sequence(version, true, expect_record_seq, record_seq.unwrap());
         assert_eq!(
             message.payload,
             &encoded_record[version.encrypted_header_len()..]
@@ -1122,7 +1112,7 @@ fn multiple_epochs_interleave_application_data_and_handshakes(version: ProtocolV
         wire_bytes.extend(encoded);
     }
 
-    let mut deframer = Deframer::default();
+    let mut deframer = DtlsDeframer::default();
 
     // First pass: we deframe all the records out of the encoded wire bytes, but we only expect to
     // get back the current epoch's handshake messages (reassembled!) and application data. Records
@@ -1132,7 +1122,7 @@ fn multiple_epochs_interleave_application_data_and_handshakes(version: ProtocolV
     for (record_idx, (expect_epoch, expect_record, expect_record_seq)) in
         records.clone().into_iter().enumerate()
     {
-        let deframed = deframer.deframe(&mut wire_bytes, curr_epoch, highest_record_seq.into());
+        let deframed = deframer.deframe(&mut wire_bytes, curr_epoch);
 
         if expect_epoch != curr_epoch {
             assert!(deframed.is_none());
@@ -1147,7 +1137,7 @@ fn multiple_epochs_interleave_application_data_and_handshakes(version: ProtocolV
         } = deframed.unwrap().unwrap();
 
         assert_eq!(deframed_epoch, curr_epoch);
-        check_record_sequence(version, true, expect_record_seq, record_seq);
+        check_record_sequence(version, true, expect_record_seq, record_seq.unwrap());
         if expect_record_seq > highest_record_seq {
             highest_record_seq = expect_record_seq;
         }
@@ -1162,9 +1152,11 @@ fn multiple_epochs_interleave_application_data_and_handshakes(version: ProtocolV
 
         if message.typ == ContentType::Handshake {
             deframer
-                .input_message_dtls(message, bounds)
+                .input_message(message.version.version(), bounds, message.payload)
                 .unwrap();
-            deframer.coalesce_dtls(&mut wire_bytes);
+            deframer
+                .coalesce(&mut wire_bytes)
+                .unwrap();
         }
 
         if let Some(span) = deframer.complete_span() {
@@ -1198,12 +1190,12 @@ fn multiple_epochs_interleave_application_data_and_handshakes(version: ProtocolV
             epoch: deframed_epoch,
             record_seq,
         } = deframer
-            .deframe(&mut wire_bytes, next_epoch, highest_record_seq.into())
+            .deframe(&mut wire_bytes, next_epoch)
             .unwrap()
             .unwrap();
 
         assert_eq!(deframed_epoch, next_epoch);
-        check_record_sequence(version, true, expect_record_seq, record_seq);
+        check_record_sequence(version, true, expect_record_seq, record_seq.unwrap());
         if expect_record_seq > highest_record_seq {
             highest_record_seq = expect_record_seq;
         }
@@ -1218,9 +1210,11 @@ fn multiple_epochs_interleave_application_data_and_handshakes(version: ProtocolV
 
         if message.typ == ContentType::Handshake {
             deframer
-                .input_message_dtls(message, bounds)
+                .input_message(message.version.version(), bounds, message.payload)
                 .unwrap();
-            deframer.coalesce_dtls(&mut wire_bytes);
+            deframer
+                .coalesce(&mut wire_bytes)
+                .unwrap();
         }
 
         while let Some(span) = deframer.complete_span() {
@@ -1242,12 +1236,12 @@ fn multiple_epochs_interleave_application_data_and_handshakes(version: ProtocolV
     // Try to deframe a message from the other two epochs. We should get nothing.
     assert!(
         deframer
-            .deframe(&mut wire_bytes, prev_epoch, 0.into())
+            .deframe(&mut wire_bytes, prev_epoch)
             .is_none()
     );
     assert!(
         deframer
-            .deframe(&mut wire_bytes, future_epoch, 0.into())
+            .deframe(&mut wire_bytes, future_epoch)
             .is_none()
     );
 }
@@ -1333,7 +1327,7 @@ fn check_record_sequence(
     } else {
         assert_eq!(
             got,
-            RecordSequenceNumber::Full(FullRecordSequenceNumber(expected_full)),
+            RecordSequenceNumber::Full(FullRecordSequenceNumber::from(expected_full)),
         );
     }
 }

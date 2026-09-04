@@ -6,10 +6,10 @@ use crate::Protocol;
 use crate::crypto::cipher::EncryptionState;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{ApiMisuse, Error, InvalidMessage, PeerMisbehaved};
-use crate::msgs::{
-    Codec, Epoch, FullRecordSequenceNumber, HEADER_SIZE, MAX_FRAGMENT_LEN, MessageHeader, Reader,
-    UnifiedHeader, hex, read_record_header,
+use crate::msgs::dtls::{
+    DtlsMessageHeader, FullRecordSequenceNumber, UnifiedHeader, read_dtls_record_header,
 };
+use crate::msgs::{Codec, Epoch, HEADER_SIZE, MAX_FRAGMENT_LEN, Reader, hex, read_record_header};
 
 /// A TLS record with encoded (but not necessarily encrypted) payload.
 #[expect(clippy::exhaustive_structs)]
@@ -40,9 +40,23 @@ impl<'a> Record<Payload<'a>> {
     /// `RecordError` allows callers to distinguish between valid prefixes (might
     /// become valid if we read more data) and invalid data.
     pub(crate) fn read(r: &mut Reader<'a>) -> Result<Self, RecordError> {
-        let MessageHeader {
+        let (typ, version, len) = read_record_header(r)?;
+
+        let content = r
+            .take(len as usize)
+            .ok_or(RecordError::TooShortForLength)?;
+
+        Ok(Self {
+            typ,
+            version: EncodableVersion::Legacy(version),
+            payload: Payload::Borrowed(content),
+        })
+    }
+
+    pub(crate) fn read_dtls(r: &mut Reader<'a>) -> Result<Self, RecordError> {
+        let DtlsMessageHeader {
             typ, version, len, ..
-        } = read_record_header(r)?;
+        } = read_dtls_record_header(r)?;
 
         let content = r
             .take(len as usize)
@@ -966,7 +980,11 @@ mod tests {
             }
 
             let encoded = record.clone().to_unencrypted_bytes(cx);
-            let decoded = Record::<Payload<'_>>::read(&mut Reader::new(&encoded)).unwrap();
+            let decoded: Record<Payload<'_>> = if version.is_datagram_tls() {
+                Record::read_dtls(&mut Reader::new(&encoded)).unwrap()
+            } else {
+                Record::read(&mut Reader::new(&encoded)).unwrap()
+            };
             assert_eq!(decoded.version.version(), expect);
         }
     }

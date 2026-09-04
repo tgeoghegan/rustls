@@ -8,9 +8,10 @@ use crate::crypto::cipher::{
 };
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error};
+use crate::msgs::dtls::AckRecordSequenceNumber;
 use crate::msgs::{
-    AckRecordSequenceNumber, AlertLevel, Codec, EncrypterDecrypterPurpose, Fragmenter,
-    HandshakeSequence, HandshakeSequenceNumber, Message, MessagePayload,
+    AlertLevel, Codec, EncrypterDecrypterPurpose, Fragmenter, HandshakeSequence,
+    HandshakeSequenceNumber, Message, MessagePayload,
 };
 use crate::tls13::key_schedule::KeyScheduleTrafficSend;
 use crate::tracing::{debug, error};

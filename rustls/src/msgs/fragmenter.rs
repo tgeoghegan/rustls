@@ -7,11 +7,10 @@ use crate::Error;
 use crate::common_state::Protocol;
 use crate::crypto::cipher::{EncodableVersion, OutboundPlain, Payload, Record};
 use crate::enums::{ContentType, HandshakeType};
-use crate::msgs::{
-    Codec, DTLS_12_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment, HEADER_SIZE,
-    HandshakeSequenceNumber, U24,
-};
+use crate::msgs::dtls::{DTLS_12_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment};
+use crate::msgs::{Codec, HEADER_SIZE, HandshakeSequenceNumber, U24};
 
+mod dtls;
 #[cfg(test)]
 mod dtls_test;
 

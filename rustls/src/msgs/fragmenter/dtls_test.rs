@@ -6,10 +6,8 @@ use crate::common_state::Protocol;
 use crate::crypto::cipher::{EncodableVersion, Payload, Record};
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
 use crate::msgs::codec::Codec;
-use crate::msgs::{
-    DTLS_12_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment,
-    HandshakeMessagePayload, HandshakePayload, Reader, U24,
-};
+use crate::msgs::dtls::{DTLS_12_HEADER_SIZE, DTLS_HANDSHAKE_HEADER_SIZE, DtlsHandshakeFragment};
+use crate::msgs::{HandshakeMessagePayload, HandshakePayload, Reader, U24};
 
 fn handshake_fragments_flush_with_record(version: ProtocolVersion) {
     // Message size and fragment size are chosen so that we'll get 4 fragments. Where r indicates

@@ -7,28 +7,28 @@ use pki_types::{DnsName, FipsStatus};
 
 use crate::client::EchStatus;
 use crate::conn::{Exporter, KeyingMaterialExporter, ReceivePath, SendOutput, SendPath};
-use crate::crypto::cipher::{EncodableVersion, Payload};
+use crate::crypto::cipher::{DecryptionState, EncodableVersion, Payload};
 use crate::crypto::kx::SupportedKxGroup;
 use crate::enums::{ApplicationProtocol, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, ApiMisuse, Error};
 use crate::hash_hs::HandshakeHash;
 use crate::msgs::{
-    AlertLevel, Codec, Delocator, HandshakeMessagePayload, HandshakeSequenceNumber, Locator,
-    Message, MessagePayload,
+    AlertLevel, Codec, DeframerCore, Delocator, HandshakeMessagePayload, HandshakeSequenceNumber,
+    Locator, Message, MessagePayload,
 };
 use crate::quic::{self, QuicOutput};
 use crate::suites::SupportedCipherSuite;
 use crate::verify::VerifiedIdentity;
 
 /// Connection state common to both client and server connections.
-pub struct CommonState {
+pub struct CommonState<Deframe: DeframerCore> {
     pub(crate) outputs: ConnectionOutputs,
     pub(crate) send: SendPath,
-    pub(crate) recv: ReceivePath,
+    pub(crate) recv: ReceivePath<Deframe>,
     pub(crate) fips: FipsStatus,
 }
 
-impl CommonState {
+impl<Deframe: DeframerCore> CommonState<Deframe> {
     pub(crate) fn new(side: Side, fips: FipsStatus, protocol: Protocol) -> Self {
         Self {
             outputs: ConnectionOutputs::default(),
@@ -67,7 +67,7 @@ impl CommonState {
     }
 }
 
-impl Deref for CommonState {
+impl<D: DeframerCore> Deref for CommonState<D> {
     type Target = ConnectionOutputs;
 
     fn deref(&self) -> &Self::Target {
@@ -75,13 +75,13 @@ impl Deref for CommonState {
     }
 }
 
-impl DerefMut for CommonState {
+impl<D: DeframerCore> DerefMut for CommonState<D> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.outputs
     }
 }
 
-impl fmt::Debug for CommonState {
+impl<D: DeframerCore> fmt::Debug for CommonState<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommonState")
             .finish_non_exhaustive()
@@ -293,9 +293,11 @@ pub(crate) trait Output<'m> {
 
     fn start_traffic(&mut self);
 
-    fn receive(&mut self) -> &mut ReceivePath;
+    fn decryption_state(&mut self) -> &mut DecryptionState;
 
     fn send(&mut self) -> &mut dyn SendOutput;
+
+    fn tls13_tickets_received(&mut self) -> &mut u32;
 
     /// Get the next handshake sequence number to be used.
     fn outbound_handshake_seq(&mut self) -> HandshakeSequenceNumber {

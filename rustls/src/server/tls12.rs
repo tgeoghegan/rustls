@@ -838,8 +838,7 @@ impl ExpectCcs {
         };
 
         output
-            .receive()
-            .decrypt_state
+            .decryption_state()
             .set_record_decrypter(
                 decrypter,
                 &proof,

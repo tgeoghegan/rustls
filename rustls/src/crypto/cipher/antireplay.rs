@@ -7,7 +7,7 @@
 //! [1]: https://datatracker.ietf.org/doc/html/draft-ietf-tls-rfc9147bis-02#section-4.5.1
 //! [2]: https://www.rfc-editor.org/info/rfc6347/#section-4.1.2.6
 
-use crate::msgs::FullRecordSequenceNumber;
+use crate::msgs::dtls::FullRecordSequenceNumber;
 
 /// Sliding window of observed sequence numbers.
 ///

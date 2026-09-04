@@ -16,7 +16,8 @@ use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock};
 use crate::enums::ApplicationProtocol;
 use crate::error::{ApiMisuse, Error};
 use crate::msgs::{
-    ClientExtensionsInput, Message, MessagePayload, ServerExtensionsInput, TransportParameters,
+    ClientExtensionsInput, Message, MessagePayload, ServerExtensionsInput, StreamDeframerCore,
+    TransportParameters,
 };
 use crate::server::{
     ChooseConfig, ClientHello, HandshakeVerifyClientIdentity, ServerConfig, ServerSide, ServerState,
@@ -705,7 +706,7 @@ impl<Side: SideData> QuicCommon<Side> {
             .input_quic(input.slice_mut())?;
 
         let mut tls = Vec::new();
-        let mut iter = MessageIter::new(
+        let mut iter = MessageIter::<_, _, StreamDeframerCore>::new(
             input,
             &mut tls,
             Some(&mut self.quic),
@@ -734,7 +735,7 @@ impl<Side: SideData> QuicCommon<Side> {
 }
 
 impl<Side: SideData> Deref for QuicCommon<Side> {
-    type Target = CommonState;
+    type Target = CommonState<StreamDeframerCore>;
 
     fn deref(&self) -> &Self::Target {
         &self.common.common

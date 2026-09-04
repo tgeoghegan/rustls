@@ -17,25 +17,28 @@ use crate::conn::{ConnectionCommon, StateMachine};
 use crate::crypto::cipher::{Decrypted, DecryptionState, EncodableVersion, Payload, Record};
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error, InvalidMessage, PeerMisbehaved};
+use crate::msgs::dtls::{
+    AckPayload, AckRecordSequenceNumber, FullRecordSequenceNumber, RecordSequenceNumber,
+};
 use crate::msgs::{
-    AckPayload, AckRecordSequenceNumber, AlertLevel, AlertLevelName, AlertMessagePayload, Deframed,
-    Deframer, Delocator, Epoch, FullRecordSequenceNumber, HandshakeAlignedProof,
-    HandshakeMessagePayload, HandshakeSequenceNumber, Locator, Message, MessagePayload,
-    RecordSequenceNumber,
+    AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, DeframerCore, Delocator,
+    Epoch, HandshakeAlignedProof, HandshakeMessagePayload, HandshakeSequenceNumber, Locator,
+    Message, MessagePayload, StreamDeframerCore,
 };
 use crate::quic::QuicOutput;
 use crate::tracing::{trace, warn};
 
-pub(crate) struct MessageIter<'a, 'm, Side: SideData, Send: SendOutput + 'a> {
+pub(crate) struct MessageIter<'a, 'm, Side: SideData, Send: SendOutput + 'a, Deframe: DeframerCore>
+{
     pub(super) input: &'m mut dyn TlsInputBuffer,
     pub(super) tls: &'a mut Vec<u8>,
-    pub(super) recv: &'a mut ReceivePath,
+    pub(super) recv: &'a mut ReceivePath<Deframe>,
     pub(super) state: &'a mut Result<Side::State, Error>,
     pub(super) output: JoinOutput<'a, Send>,
     pub(super) advance: bool,
 }
 
-impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side, SendPath> {
+impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side, SendPath, StreamDeframerCore> {
     pub(crate) fn new(
         input: &'m mut dyn TlsInputBuffer,
         tls: &'a mut Vec<u8>,
@@ -59,12 +62,14 @@ impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side, SendPath> {
     }
 }
 
-impl<'a, 'm, 's, Side: SideData> MessageIter<'a, 'm, Side, SendAdapter<'s>> {
+impl<'a, 'm, 's, Side: SideData, Deframe: DeframerCore>
+    MessageIter<'a, 'm, Side, SendAdapter<'s>, Deframe>
+{
     pub(super) fn receive(
         input: &'m mut dyn TlsInputBuffer,
         tls: &'a mut Vec<u8>,
         state: &'a mut Result<Side::State, Error>,
-        recv: &'a mut ReceivePath,
+        recv: &'a mut ReceivePath<Deframe>,
         output: JoinOutput<'a, SendAdapter<'s>>,
         advance: bool,
     ) -> Self {
@@ -79,7 +84,9 @@ impl<'a, 'm, 's, Side: SideData> MessageIter<'a, 'm, Side, SendAdapter<'s>> {
     }
 }
 
-impl<'a, 'm, Side: SideData, Send: SendOutput + 'a> MessageIter<'a, 'm, Side, Send> {
+impl<'a, 'm, Side: SideData, Send: SendOutput + 'a, Deframe: DeframerCore>
+    MessageIter<'a, 'm, Side, Send, Deframe>
+{
     pub(crate) fn next(&mut self) -> Option<Result<UnborrowedPayload, Error>> {
         let mut st = match mem::replace(self.state, Err(Error::HandshakeNotComplete)) {
             Ok(state) => state,
@@ -225,7 +232,7 @@ impl<'a, 'm, Side: SideData, Send: SendOutput + 'a> MessageIter<'a, 'm, Side, Se
     }
 }
 
-pub(crate) struct ReceivePath {
+pub(crate) struct ReceivePath<Deframe> {
     side: Side,
     protocol: Protocol,
     pub(crate) decrypt_state: DecryptionState,
@@ -234,7 +241,7 @@ pub(crate) struct ReceivePath {
     pub(crate) has_received_close_notify: bool,
     temper_counters: TemperCounters,
     pub(crate) negotiated_version: Option<ProtocolVersion>,
-    pub(crate) deframer: Deframer,
+    pub(crate) deframer: Deframer<Deframe>,
 
     /// We limit consecutive empty fragments to avoid a route for the peer to send
     /// us significant but fruitless traffic.  That includes other record types too.
@@ -250,7 +257,7 @@ pub(crate) struct ReceivePath {
     acked_by_peer: Vec<AckRecordSequenceNumber>,
 }
 
-impl ReceivePath {
+impl<Deframe: DeframerCore> ReceivePath<Deframe> {
     pub(crate) fn new(side: Side, protocol: Protocol) -> Self {
         Self {
             side,
@@ -359,18 +366,12 @@ impl ReceivePath {
             }
 
             let record = unborrowed.reborrow(&Delocator::new(buffer));
-            if self.protocol.is_dtls() {
-                let handshake_seqs = self
-                    .deframer
-                    .input_message_dtls(record, bounds)?;
-                self.handshake_acks
-                    .observe_record_seq(epoch, record_seq, handshake_seqs);
-                self.deframer.coalesce_dtls(buffer);
-            } else {
+            let handshake_seqs =
                 self.deframer
-                    .input_message(record.version.version(), bounds, buffer);
-                self.deframer.coalesce(buffer)?;
-            }
+                    .input_message(record.version.version(), bounds, buffer)?;
+            self.handshake_acks
+                .observe_record_seq(epoch, record_seq, handshake_seqs);
+            self.deframer.coalesce(buffer)?;
         }
     }
 
@@ -379,11 +380,10 @@ impl ReceivePath {
         buffer: &'b mut [u8],
         locator: &Locator,
     ) -> Result<DeframeResult<'b>, Error> {
-        let (record, bounds, epoch, record_seq) = match self.deframer.deframe(
-            buffer,
-            self.decrypt_state.epoch(),
-            self.decrypt_state.read_seq(),
-        ) {
+        let (record, bounds, epoch, record_seq) = match self
+            .deframer
+            .deframe(buffer, self.decrypt_state.epoch())
+        {
             Some(Ok(Deframed {
                 record,
                 bounds,
@@ -420,11 +420,12 @@ impl ReceivePath {
 
         if allowed_plaintext && !self.deframer.is_active() {
             let read_seq = if record.version.is_datagram_tls() {
-                self.decrypt_state.increment_sequence()
+                let read_seq = self.decrypt_state.increment_sequence();
+                assert_eq!(Some(RecordSequenceNumber::Full(read_seq)), record_seq);
+                read_seq
             } else {
                 self.decrypt_state.read_seq()
             };
-            assert_eq!(RecordSequenceNumber::Full(read_seq), record_seq);
 
             return Ok(DeframeResult::Decrypted {
                 decrypted: Decrypted {
@@ -433,10 +434,7 @@ impl ReceivePath {
                 },
                 bounds,
                 epoch,
-                record_seq: match record_seq {
-                    RecordSequenceNumber::Full(full) => full,
-                    _ => panic!("plaintext message must contain full sequence number"),
-                },
+                record_seq: read_seq,
             });
         }
 
@@ -662,8 +660,8 @@ enum DeframeResult<'b> {
     None,
 }
 
-struct CaptureAppData<'a, 'j, 'm, Send: SendOutput + 'a> {
-    recv: &'a mut ReceivePath,
+struct CaptureAppData<'a, 'j, 'm, Send: SendOutput + 'a, Deframe: DeframerCore> {
+    recv: &'a mut ReceivePath<Deframe>,
     other: &'a mut JoinOutput<'j, Send>,
     tls: &'a mut Vec<u8>,
     /// Store a [`Locator`] initialized from the current receive buffer
@@ -681,7 +679,9 @@ struct CaptureAppData<'a, 'j, 'm, Send: SendOutput + 'a> {
     _message_lifetime: PhantomData<&'m ()>,
 }
 
-impl<'a, 'm, Send: SendOutput + 'a> Output<'m> for CaptureAppData<'a, '_, 'm, Send> {
+impl<'a, 'm, Send: SendOutput + 'a, Deframe: DeframerCore> Output<'m>
+    for CaptureAppData<'a, '_, 'm, Send, Deframe>
+{
     fn emit(&mut self, ev: Event<'_>) {
         self.other.side.emit(ev)
     }
@@ -731,8 +731,12 @@ impl<'a, 'm, Send: SendOutput + 'a> Output<'m> for CaptureAppData<'a, '_, 'm, Se
         self.other.send.start_traffic();
     }
 
-    fn receive(&mut self) -> &mut ReceivePath {
-        self.recv
+    fn decryption_state(&mut self) -> &mut DecryptionState {
+        &mut self.recv.decrypt_state
+    }
+
+    fn tls13_tickets_received(&mut self) -> &mut u32 {
+        &mut self.recv.tls13_tickets_received
     }
 
     fn send(&mut self) -> &mut dyn SendOutput {
