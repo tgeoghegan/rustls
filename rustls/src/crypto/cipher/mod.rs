@@ -19,13 +19,42 @@ pub use messages::{
 mod record_layer;
 pub(crate) use record_layer::{Decrypted, DecryptionState, EncryptionState, PreEncryptAction};
 
+mod tls12;
+mod tls13;
+pub use tls13::{TLS13_AAD_SIZE, Tls13RecordDecrypter, Tls13RecordEncrypter};
+
 /// Factory trait for building `RecordEncrypter` and `RecordDecrypter` for a TLS1.3 cipher suite.
 pub trait Tls13AeadAlgorithm: Send + Sync {
-    /// Build a `RecordEncrypter` for the given key/iv.
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter>;
+    /// Build a `Tls13RecordEncrypter` for the given key and IV.
+    fn record_encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(Tls13RecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+        ))
+    }
 
-    /// Build a `RecordDecrypter` for the given key/iv.
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter>;
+    /// Build a `RecordEncryptionProvider` for the given key.
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS13_AAD_SIZE>>;
+
+    /// Build a `ContiguousRecordEncryptionProvider` for the given key.
+    ///
+    /// By default, providers do not provide any fast path for contiguous plaintext, and all records
+    /// are encrypted through `Self::record_encrypter`.
+    fn contiguous_encrypter(
+        &self,
+        _key: AeadKey,
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<TLS13_AAD_SIZE>>> {
+        None
+    }
+
+    /// Build a `Tls13RecordDecrypter` for the given key and IV.
+    fn record_decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
+        Box::new(Tls13RecordDecrypter::new(self.decrypter(key), iv))
+    }
+
+    /// Build a `RecordDecryptionProvider` for the given key.
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS13_AAD_SIZE>>;
 
     /// The length of key in bytes required by `encrypter()` and `decrypter()`.
     fn key_len(&self) -> usize;
@@ -368,6 +397,7 @@ const TLS12_AAD_SIZE: usize = 8 + 1 + 2 + 2;
 /// A key for an AEAD algorithm.
 ///
 /// This is a value type for a byte string up to `AeadKey::MAX_LEN` bytes in length.
+#[derive(Clone)]
 pub struct AeadKey {
     buf: [u8; Self::MAX_LEN],
     used: usize,
@@ -454,6 +484,73 @@ impl Tls12AeadAlgorithm for FakeAead {
     fn fips(&self) -> FipsStatus {
         FipsStatus::Unvalidated
     }
+}
+
+/// Encryption primitives for [`RecordEncrypter`].
+///
+/// `RecordEncrypter` implementations are specialized for different TLS protocol versions.
+/// Implementations of this trait specialize behavior for one or another cryptography backend.
+///
+/// Crypto providers must return a value implementing this trait from
+/// [`Tls13AeadAlgorithm::encrypter`] and [`Tls12AeadAlgorithm::encrypter`]. If no
+/// [`ContiguousRecordEncryptionProvider`] implementation is provided via
+/// [`Tls13AeadAlgorithm::contiguous_encrypter`] or [`Tls12AeadAlgorithm::contiguous_encrypter`],
+/// then all records are encrypted by this implementation.
+pub trait RecordEncryptionProvider<const AAD_LEN: usize>: Send + Sync {
+    /// Encrypt `payload` in place using the provided nonce and additional authenticated data.
+    ///
+    /// The calling context will have copied all plaintext into `payload`, meaning this
+    /// implementation may encrypt in place.
+    fn encrypt(
+        &mut self,
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        payload: &mut EncryptBuffer<'_>,
+    ) -> Result<(), Error>;
+
+    /// The length of the authentication tag this encryption primitive uses.
+    fn tag_len(&self) -> usize;
+}
+
+/// Encryption primitives specialized for contiguous plaintext for [`RecordEncrypter`].
+///
+/// `RecordEncrypter` implementations are specialized for different TLS protocol versions.
+/// Implementations of this trait specialize behavior for one or another cryptography backend.
+///
+/// This trait allows crypto backends to provide a fast path when plaintext is already known to be
+/// contiguous, avoiding copies.
+pub trait ContiguousRecordEncryptionProvider<const AAD_LEN: usize>: Send + Sync {
+    /// Encrypt `plaintext` using the provided nonce and additional authenticated data.
+    ///
+    /// Extra plaintext (e.g., the trailing content type byte in TLS 1.3) is provided via
+    /// `extra_plaintext`. Otherwise pass an empty slice. Ciphertext is written into `ciphertext`,
+    /// including encrypted extra plaintext and authentication tags (if either exists).
+    fn encrypt_contiguous<'a>(
+        &mut self,
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        plaintext: &[u8],
+        extra_plaintext: &[u8],
+        ciphertext: &'a mut [u8],
+        encrypted_len: usize,
+    ) -> Result<&'a [u8], Error>;
+}
+
+/// Decryption primitives for [`RecordDecrypter`].
+///
+/// `RecordDecrypter` implementations are specialized for different TLS protocol versions.
+/// Implementations of this trait specialize behavior for one or another cryptography backend.
+pub trait RecordDecryptionProvider<const AAD_LEN: usize>: Send + Sync {
+    /// Decrypt `payload` in place using the provided nonce and additional authenticated data.
+    fn decrypt(
+        &mut self,
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        payload: &mut [u8],
+    ) -> Result<usize, Error>;
+
+    /// The length of the authentication tag this decryption primitive uses.
+    fn tag_len(&self) -> usize;
 }
 
 #[cfg(test)]

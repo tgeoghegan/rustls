@@ -1490,7 +1490,7 @@ impl RawTls {
                 | ConnectionTrafficSecrets::Aes256Gcm { key, iv }
                 | ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv },
                 SupportedCipherSuite::Tls13(tls13),
-            ) => tls13.aead_alg.encrypter(key, iv),
+            ) => tls13.aead_alg.record_encrypter(key, iv),
 
             (
                 ConnectionTrafficSecrets::Aes128Gcm { key, iv }
@@ -1510,7 +1510,7 @@ impl RawTls {
                 | ConnectionTrafficSecrets::Aes256Gcm { key, iv }
                 | ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv },
                 SupportedCipherSuite::Tls13(tls13),
-            ) => tls13.aead_alg.decrypter(key, iv),
+            ) => tls13.aead_alg.record_decrypter(key, iv),
 
             (
                 ConnectionTrafficSecrets::Aes128Gcm { key, iv }
@@ -1977,8 +1977,8 @@ pub fn certificate_error_expecting_name(expected: &str) -> CertificateError {
 mod plaintext {
     use rustls::ConnectionTrafficSecrets;
     use rustls::crypto::cipher::{
-        AeadKey, EncryptBuffer, InboundOpaque, Iv, OutboundPlain, RecordDecrypter, RecordEncrypter,
-        Tls13AeadAlgorithm, UnsupportedOperationError,
+        AeadKey, EncryptBuffer, Iv, OutboundPlain, RecordDecryptionProvider,
+        RecordEncryptionProvider, Tls13AeadAlgorithm, UnsupportedOperationError,
     };
 
     use super::*;
@@ -1986,12 +1986,20 @@ mod plaintext {
     pub(super) struct Aead;
 
     impl Tls13AeadAlgorithm for Aead {
-        fn encrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn RecordEncrypter> {
+        fn record_encrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn RecordEncrypter> {
             Box::new(Encrypter)
         }
 
-        fn decrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn RecordDecrypter> {
+        fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+            unreachable!()
+        }
+
+        fn record_decrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn RecordDecrypter> {
             Box::new(Decrypter)
+        }
+
+        fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+            unreachable!()
         }
 
         fn key_len(&self) -> usize {

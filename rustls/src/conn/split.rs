@@ -573,6 +573,7 @@ impl SendOutput for SendAdapter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::cipher::{Iv, Tls13RecordEncrypter};
     use crate::crypto::test_provider::Tls13Cipher;
 
     #[test]
@@ -583,9 +584,14 @@ mod tests {
         ));
         assert!(send_flag_for(|adapter| adapter.queue_requested_key_update()));
         assert!(!send_flag_for(|adapter| adapter.note_key_update_response()));
-        assert!(!send_flag_for(
-            |adapter| adapter.set_encrypter(Box::new(Tls13Cipher), 1234)
-        ));
+        assert!(!send_flag_for(|adapter| adapter.set_encrypter(
+            Box::new(Tls13RecordEncrypter::new(
+                Box::new(Tls13Cipher),
+                None,
+                Iv::new(b"InitVect").unwrap(),
+            )),
+            1234
+        )));
         // update_key_schedule too hard
         assert!(send_flag_for(|adapter| adapter.send_alert(
             AlertLevel::Fatal,
@@ -603,7 +609,14 @@ mod tests {
     #[test]
     fn pending_send_data() {
         let mut send = SendPath::default();
-        send.set_encrypter(Box::new(Tls13Cipher), 1234);
+        send.set_encrypter(
+            Box::new(Tls13RecordEncrypter::new(
+                Box::new(Tls13Cipher),
+                None,
+                Iv::new(b"InitVect").unwrap(),
+            )),
+            1234,
+        );
 
         let mut inner = SendInner {
             send,
@@ -633,7 +646,14 @@ mod tests {
 
     fn send_flag_for(f: impl FnOnce(&mut SendAdapter<'_>)) -> bool {
         let mut send = SendPath::default();
-        send.set_encrypter(Box::new(Tls13Cipher), 1234);
+        send.set_encrypter(
+            Box::new(Tls13RecordEncrypter::new(
+                Box::new(Tls13Cipher),
+                None,
+                Iv::new(b"InitVect").unwrap(),
+            )),
+            1234,
+        );
 
         let send = Mutex::new(SendInner {
             send,

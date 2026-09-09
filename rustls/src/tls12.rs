@@ -247,10 +247,10 @@ impl ConnectionSecrets {
         (
             self.suite
                 .aead_alg
-                .decrypter(AeadKey::new(read_key), read_iv),
+                .record_decrypter(AeadKey::new(read_key), read_iv),
             self.suite
                 .aead_alg
-                .encrypter(AeadKey::new(write_key), write_iv, extra),
+                .record_encrypter(AeadKey::new(write_key), write_iv, extra),
         )
     }
 

@@ -921,7 +921,7 @@ impl KeyScheduleSuite {
         let iv = derive_traffic_iv(expander.as_ref(), suite.aead_alg.iv_len());
 
         send.set_encrypter(
-            suite.aead_alg.encrypter(key, iv),
+            suite.aead_alg.record_encrypter(key, iv),
             suite.common.confidentiality_limit,
         );
     }
@@ -944,7 +944,7 @@ impl KeyScheduleSuite {
             .expander_for_okm(secret);
         let key = derive_traffic_key(expander.as_ref(), suite.aead_alg);
         let iv = derive_traffic_iv(expander.as_ref(), suite.aead_alg.iv_len());
-        suite.aead_alg.decrypter(key, iv)
+        suite.aead_alg.record_decrypter(key, iv)
     }
 
     /// Sign the finished message consisting of `hs_hash` using a current

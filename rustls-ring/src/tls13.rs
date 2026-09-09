@@ -5,11 +5,10 @@ use ring::hkdf::{self, KeyType};
 use ring::{aead, hmac};
 use rustls::crypto::CipherSuite;
 use rustls::crypto::cipher::{
-    AeadKey, EncryptBuffer, InboundOpaque, Iv, Nonce, OutboundPlain, Record, RecordDecrypter,
-    RecordEncrypter, Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
+    AeadKey, EncryptBuffer, Iv, Nonce, RecordDecryptionProvider, RecordEncryptionProvider,
+    Tls13AeadAlgorithm, UnsupportedOperationError,
 };
 use rustls::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
-use rustls::enums::ContentType;
 use rustls::error::Error;
 use rustls::version::TLS13_VERSION;
 use rustls::{CipherSuiteCommon, ConnectionTrafficSecrets, Tls13CipherSuite, crypto};
@@ -91,12 +90,12 @@ pub static TLS13_AES_128_GCM_SHA256: &Tls13CipherSuite = &Tls13CipherSuite {
 struct Chacha20Poly1305Aead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
-        self.0.encrypter(key, iv)
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+        self.0.encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
-        self.0.decrypter(key, iv)
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+        self.0.decrypter(key)
     }
 
     fn key_len(&self) -> usize {
@@ -119,12 +118,12 @@ impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
 struct Aes256GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes256GcmAead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
-        self.0.encrypter(key, iv)
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+        self.0.encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
-        self.0.decrypter(key, iv)
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+        self.0.decrypter(key)
     }
 
     fn key_len(&self) -> usize {
@@ -147,12 +146,12 @@ impl Tls13AeadAlgorithm for Aes256GcmAead {
 struct Aes128GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes128GcmAead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
-        self.0.encrypter(key, iv)
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+        self.0.encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
-        self.0.decrypter(key, iv)
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+        self.0.decrypter(key)
     }
 
     fn key_len(&self) -> usize {
@@ -176,19 +175,17 @@ impl Tls13AeadAlgorithm for Aes128GcmAead {
 struct AeadAlgorithm(&'static aead::Algorithm);
 
 impl AeadAlgorithm {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
         // safety: the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
         Box::new(Tls13RecordEncrypter {
             enc_key: aead::LessSafeKey::new(aead::UnboundKey::new(self.0, key.as_ref()).unwrap()),
-            iv,
         })
     }
 
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
         // safety: the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
         Box::new(Tls13RecordDecrypter {
             dec_key: aead::LessSafeKey::new(aead::UnboundKey::new(self.0, key.as_ref()).unwrap()),
-            iv,
         })
     }
 
@@ -199,75 +196,58 @@ impl AeadAlgorithm {
 
 struct Tls13RecordEncrypter {
     enc_key: aead::LessSafeKey,
-    iv: Iv,
 }
 
 struct Tls13RecordDecrypter {
     dec_key: aead::LessSafeKey,
-    iv: Iv,
 }
 
-impl RecordEncrypter for Tls13RecordEncrypter {
-    fn encrypt<'a>(
+impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for Tls13RecordEncrypter {
+    fn encrypt(
         &mut self,
-        record: Record<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(record.payload.len());
-        let mut payload = EncryptBuffer::new(out, total_len)?;
-
-        let typ = ContentType::ApplicationData;
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(typ, record.version.encode(), total_len));
-        payload.extend_from_chunks(&record.payload);
-        payload.extend_from_slice(&record.typ.to_array());
-
-        match self
-            .enc_key
-            .seal_in_place_separate_tag(nonce, aad, payload.as_mut())
-        {
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        payload: &mut EncryptBuffer<'_>,
+    ) -> Result<(), Error> {
+        match self.enc_key.seal_in_place_separate_tag(
+            aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+            aead::Aad::from(aad),
+            payload.as_mut(),
+        ) {
             Ok(tag) => payload.extend_from_slice(tag.as_ref()),
             Err(_) => return Err(Error::EncryptError),
         }
 
-        Ok(Record {
-            typ,
-            version: record.version,
-            payload: payload.into_written(),
-        })
+        Ok(())
     }
 
-    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
-        payload_len + 1 + self.enc_key.algorithm().tag_len()
+    fn tag_len(&self) -> usize {
+        self.enc_key.algorithm().tag_len()
     }
 }
 
-impl RecordDecrypter for Tls13RecordDecrypter {
-    fn decrypt<'a>(
+impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13RecordDecrypter {
+    fn decrypt(
         &mut self,
-        mut record: Record<InboundOpaque<'a>>,
-        seq: u64,
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let payload = &mut record.payload;
-        if payload.len() < self.dec_key.algorithm().tag_len() {
-            return Err(Error::DecryptError);
-        }
-
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(
-            record.typ,
-            record.version.version(),
-            payload.len(),
-        ));
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        payload: &mut [u8],
+    ) -> Result<usize, Error> {
         let plain_len = self
             .dec_key
-            .open_in_place(nonce, aad, payload)
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload,
+            )
             .map_err(|_| Error::DecryptError)?
             .len();
 
-        payload.truncate(plain_len);
-        record.into_tls13_unpadded_record()
+        Ok(plain_len)
+    }
+
+    fn tag_len(&self) -> usize {
+        self.dec_key.algorithm().tag_len()
     }
 }
 

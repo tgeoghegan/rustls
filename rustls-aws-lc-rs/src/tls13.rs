@@ -4,12 +4,12 @@ use aws_lc_rs::hkdf::KeyType;
 use aws_lc_rs::{aead, hkdf, hmac};
 use pki_types::FipsStatus;
 use rustls::crypto::cipher::{
-    AeadKey, EncryptBuffer, InboundOpaque, Iv, Nonce, OutboundPlain, Record, RecordDecrypter,
-    RecordEncrypter, Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
+    AeadKey, ContiguousRecordEncryptionProvider, EncryptBuffer, Iv, Nonce,
+    RecordDecryptionProvider, RecordEncryptionProvider, Tls13AeadAlgorithm,
+    UnsupportedOperationError,
 };
 use rustls::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use rustls::crypto::{self, CipherSuite};
-use rustls::enums::ContentType;
 use rustls::error::Error;
 use rustls::version::TLS13_VERSION;
 use rustls::{CipherSuiteCommon, ConnectionTrafficSecrets, Tls13CipherSuite};
@@ -97,20 +97,32 @@ pub static TLS13_AES_128_GCM_SHA256: &Tls13CipherSuite = &Tls13CipherSuite {
 
 struct Chacha20Poly1305Aead(AeadAlgorithm);
 
-impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+impl Chacha20Poly1305Aead {
+    fn less_safe_key(&self, key: AeadKey) -> aead::LessSafeKey {
         // safety: the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
-        Box::new(AeadRecordEncrypter {
-            enc_key: aead::LessSafeKey::new(aead::UnboundKey::new(self.0.0, key.as_ref()).unwrap()),
-            iv,
+        aead::LessSafeKey::new(aead::UnboundKey::new(self.0.0, key.as_ref()).unwrap())
+    }
+}
+
+impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+        Box::new(AeadRecordEncryptionProvider {
+            enc_key: self.less_safe_key(key),
         })
     }
 
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
-        // safety: the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
+    fn contiguous_encrypter(
+        &self,
+        key: AeadKey,
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<5>>> {
+        Some(Box::new(AeadRecordEncryptionProvider {
+            enc_key: self.less_safe_key(key),
+        }))
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
         Box::new(AeadRecordDecrypter {
-            dec_key: aead::LessSafeKey::new(aead::UnboundKey::new(self.0.0, key.as_ref()).unwrap()),
-            iv,
+            dec_key: self.less_safe_key(key),
         })
     }
 
@@ -134,12 +146,19 @@ impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
 struct Aes256GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes256GcmAead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
-        self.0.encrypter(key, iv)
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+        self.0.encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
-        self.0.decrypter(key, iv)
+    fn contiguous_encrypter(
+        &self,
+        key: AeadKey,
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<5>>> {
+        self.0.contiguous_encrypter(key)
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+        self.0.decrypter(key)
     }
 
     fn key_len(&self) -> usize {
@@ -162,12 +181,19 @@ impl Tls13AeadAlgorithm for Aes256GcmAead {
 struct Aes128GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes128GcmAead {
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
-        self.0.encrypter(key, iv)
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+        self.0.encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
-        self.0.decrypter(key, iv)
+    fn contiguous_encrypter(
+        &self,
+        key: AeadKey,
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<5>>> {
+        self.0.contiguous_encrypter(key)
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+        self.0.decrypter(key)
     }
 
     fn key_len(&self) -> usize {
@@ -191,24 +217,31 @@ impl Tls13AeadAlgorithm for Aes128GcmAead {
 struct AeadAlgorithm(&'static aead::Algorithm);
 
 impl AeadAlgorithm {
-    // using aead::TlsRecordSealingKey
-    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+    fn sealing_key(&self, key: AeadKey) -> aead::TlsRecordSealingKey {
         // safety:
         // - the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
-        // - this function should only be used for `Algorithm::AES_128_GCM` or `Algorithm::AES_256_GCM`
-        Box::new(GcmRecordEncrypter {
-            enc_key: aead::TlsRecordSealingKey::new(
-                self.0,
-                aead::TlsProtocolId::TLS13,
-                key.as_ref(),
-            )
-            .unwrap(),
-            iv,
+        // - this function should only be used for `Algorithm::AES_128_GCM` or
+        //   `Algorithm::AES_256_GCM`
+        aead::TlsRecordSealingKey::new(self.0, aead::TlsProtocolId::TLS13, key.as_ref()).unwrap()
+    }
+
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+        Box::new(GcmRecordEncyptionProvider {
+            enc_key: self.sealing_key(key),
         })
     }
 
+    fn contiguous_encrypter(
+        &self,
+        key: AeadKey,
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<5>>> {
+        Some(Box::new(GcmRecordEncyptionProvider {
+            enc_key: self.sealing_key(key),
+        }))
+    }
+
     // using aead::TlsRecordOpeningKey
-    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
         // safety:
         // - the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
         // - this function should only be used for `Algorithm::AES_128_GCM` or `Algorithm::AES_256_GCM`
@@ -219,7 +252,6 @@ impl AeadAlgorithm {
                 key.as_ref(),
             )
             .unwrap(),
-            iv,
         })
     }
 
@@ -228,203 +260,183 @@ impl AeadAlgorithm {
     }
 }
 
-struct AeadRecordEncrypter {
+struct AeadRecordEncryptionProvider {
     enc_key: aead::LessSafeKey,
-    iv: Iv,
+}
+
+impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for AeadRecordEncryptionProvider {
+    fn encrypt(
+        &mut self,
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        payload: &mut EncryptBuffer<'_>,
+    ) -> Result<(), Error> {
+        // Fragmented plaintext is gathered into `out` and then sealed in place.
+        // We can't use the out-of-place seal as it requires contiguous input.
+        match self.enc_key.seal_in_place_separate_tag(
+            aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+            aead::Aad::from(aad),
+            payload.as_mut(),
+        ) {
+            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
+            Err(_) => return Err(Error::EncryptError),
+        }
+
+        Ok(())
+    }
+
+    fn tag_len(&self) -> usize {
+        self.enc_key.algorithm().tag_len()
+    }
+}
+
+impl<const AAD_LEN: usize> ContiguousRecordEncryptionProvider<AAD_LEN>
+    for AeadRecordEncryptionProvider
+{
+    fn encrypt_contiguous<'a>(
+        &mut self,
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        plaintext: &[u8],
+        extra_plaintext: &[u8],
+        ciphertext: &'a mut [u8],
+        encrypted_len: usize,
+    ) -> Result<&'a [u8], Error> {
+        // Contiguous plaintext is sealed out-of-place, straight from the borrowed
+        // input and the inner content type byte is specified as `extra_in`.
+        let record = record_region(ciphertext, encrypted_len)?;
+        let (ciphertext, typ_and_tag) = record.split_at_mut(plaintext.len());
+        self.enc_key
+            .seal_out_of_place_scatter(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                plaintext,
+                ciphertext,
+                extra_plaintext,
+                typ_and_tag,
+            )
+            .map_err(|_| Error::EncryptError)?;
+
+        Ok(&*record)
+    }
 }
 
 struct AeadRecordDecrypter {
     dec_key: aead::LessSafeKey,
-    iv: Iv,
 }
 
-impl RecordEncrypter for AeadRecordEncrypter {
-    fn encrypt<'a>(
+impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for AeadRecordDecrypter {
+    fn decrypt(
         &mut self,
-        msg: Record<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-
-        let typ = ContentType::ApplicationData;
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(typ, msg.version.encode(), total_len));
-
-        let payload = match msg.payload.single_chunk() {
-            // Contiguous plaintext is sealed out-of-place, straight from the borrowed
-            // input and the inner content type byte is specified as `extra_in`.
-            Some(plain) => {
-                let record = record_region(out, total_len)?;
-                let (ciphertext, typ_and_tag) = record.split_at_mut(plain.len());
-                self.enc_key
-                    .seal_out_of_place_scatter(
-                        nonce,
-                        aad,
-                        plain,
-                        ciphertext,
-                        &msg.typ.to_array(),
-                        typ_and_tag,
-                    )
-                    .map_err(|_| Error::EncryptError)?;
-                &*record
-            }
-            // Fragmented plaintext is gathered into `out` and then sealed in place.
-            // We can't use the out-of-place seal as it requires contiguous input.
-            None => {
-                let mut payload = EncryptBuffer::new(out, total_len)?;
-                payload.extend_from_chunks(&msg.payload);
-                payload.extend_from_slice(&msg.typ.to_array());
-
-                match self
-                    .enc_key
-                    .seal_in_place_separate_tag(nonce, aad, payload.as_mut())
-                {
-                    Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-                    Err(_) => return Err(Error::EncryptError),
-                }
-
-                payload.into_written()
-            }
-        };
-
-        Ok(Record {
-            typ,
-            version: msg.version,
-            payload,
-        })
-    }
-
-    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
-        payload_len + 1 + self.enc_key.algorithm().tag_len()
-    }
-}
-
-impl RecordDecrypter for AeadRecordDecrypter {
-    fn decrypt<'a>(
-        &mut self,
-        mut record: Record<InboundOpaque<'a>>,
-        seq: u64,
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let payload = &mut record.payload;
-        if payload.len() < self.dec_key.algorithm().tag_len() {
-            return Err(Error::DecryptError);
-        }
-
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(
-            record.typ,
-            record.version.version(),
-            payload.len(),
-        ));
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        payload: &mut [u8],
+    ) -> Result<usize, Error> {
         let plain_len = self
             .dec_key
-            .open_in_place(nonce, aad, payload)
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload,
+            )
             .map_err(|_| Error::DecryptError)?
             .len();
 
-        payload.truncate(plain_len);
-        record.into_tls13_unpadded_record()
+        Ok(plain_len)
+    }
+
+    fn tag_len(&self) -> usize {
+        self.dec_key.algorithm().tag_len()
     }
 }
 
-struct GcmRecordEncrypter {
+struct GcmRecordEncyptionProvider {
     enc_key: aead::TlsRecordSealingKey,
-    iv: Iv,
 }
 
-impl RecordEncrypter for GcmRecordEncrypter {
-    fn encrypt<'a>(
+impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for GcmRecordEncyptionProvider {
+    fn encrypt(
         &mut self,
-        msg: Record<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        payload: &mut EncryptBuffer<'_>,
+    ) -> Result<(), Error> {
+        // Fragmented plaintext is gathered into `out` and then sealed in place.
+        // We can't use the out-of-place seal as it requires contiguous input.
+        match self.enc_key.seal_in_place_separate_tag(
+            aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+            aead::Aad::from(aad),
+            payload.as_mut(),
+        ) {
+            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
+            Err(_) => return Err(Error::EncryptError),
+        }
 
-        let typ = ContentType::ApplicationData;
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(typ, msg.version.encode(), total_len));
-
-        let payload = match msg.payload.single_chunk() {
-            // Contiguous plaintext is sealed out-of-place, straight from the borrowed
-            // input and the inner content type byte is specified as `extra_in`.
-            Some(plain) => {
-                let record = record_region(out, total_len)?;
-                let (ciphertext, typ_and_tag) = record.split_at_mut(plain.len());
-                self.enc_key
-                    .seal_out_of_place_scatter(
-                        nonce,
-                        aad,
-                        plain,
-                        ciphertext,
-                        &msg.typ.to_array(),
-                        typ_and_tag,
-                    )
-                    .map_err(|_| Error::EncryptError)?;
-                &*record
-            }
-            // Fragmented plaintext is gathered into `out` and then sealed in place.
-            // We can't use the out-of-place seal as it requires contiguous input.
-            None => {
-                let mut payload = EncryptBuffer::new(out, total_len)?;
-                payload.extend_from_chunks(&msg.payload);
-                payload.extend_from_slice(&msg.typ.to_array());
-
-                match self
-                    .enc_key
-                    .seal_in_place_separate_tag(nonce, aad, payload.as_mut())
-                {
-                    Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-                    Err(_) => return Err(Error::EncryptError),
-                }
-
-                payload.into_written()
-            }
-        };
-
-        Ok(Record {
-            typ,
-            version: msg.version,
-            payload,
-        })
+        Ok(())
     }
 
-    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
-        payload_len + 1 + self.enc_key.algorithm().tag_len()
+    fn tag_len(&self) -> usize {
+        self.enc_key.algorithm().tag_len()
+    }
+}
+
+impl<const AAD_LEN: usize> ContiguousRecordEncryptionProvider<AAD_LEN>
+    for GcmRecordEncyptionProvider
+{
+    fn encrypt_contiguous<'a>(
+        &mut self,
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        plaintext: &[u8],
+        extra_plaintext: &[u8],
+        ciphertext: &'a mut [u8],
+        encrypted_len: usize,
+    ) -> Result<&'a [u8], Error> {
+        // Contiguous plaintext is sealed out-of-place, straight from the borrowed
+        // input and the inner content type byte is specified as `extra_in`.
+        let record = record_region(ciphertext, encrypted_len)?;
+        let (ciphertext, typ_and_tag) = record.split_at_mut(plaintext.len());
+        self.enc_key
+            .seal_out_of_place_scatter(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                plaintext,
+                ciphertext,
+                extra_plaintext,
+                typ_and_tag,
+            )
+            .map_err(|_| Error::EncryptError)?;
+
+        Ok(&*record)
     }
 }
 
 struct GcmRecordDecrypter {
     dec_key: aead::TlsRecordOpeningKey,
-    iv: Iv,
 }
 
-impl RecordDecrypter for GcmRecordDecrypter {
-    fn decrypt<'a>(
+impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for GcmRecordDecrypter {
+    fn decrypt(
         &mut self,
-        mut record: Record<InboundOpaque<'a>>,
-        seq: u64,
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let payload = &mut record.payload;
-        if payload.len() < self.dec_key.algorithm().tag_len() {
-            return Err(Error::DecryptError);
-        }
-
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls13_aad(
-            record.typ,
-            record.version.version(),
-            payload.len(),
-        ));
+        nonce: Nonce,
+        aad: [u8; AAD_LEN],
+        payload: &mut [u8],
+    ) -> Result<usize, Error> {
         let plain_len = self
             .dec_key
-            .open_in_place(nonce, aad, payload)
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload,
+            )
             .map_err(|_| Error::DecryptError)?
             .len();
 
-        payload.truncate(plain_len);
-        record.into_tls13_unpadded_record()
+        Ok(plain_len)
+    }
+
+    fn tag_len(&self) -> usize {
+        self.dec_key.algorithm().tag_len()
     }
 }
 
@@ -512,8 +524,8 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use rustls::crypto::cipher::{EncodableVersion, InboundOpaque};
-    use rustls::enums::ProtocolVersion;
+    use rustls::crypto::cipher::{EncodableVersion, InboundOpaque, OutboundPlain, Record};
+    use rustls::enums::{ContentType, ProtocolVersion};
 
     use super::*;
 
@@ -544,7 +556,7 @@ mod tests {
                 );
                 let mut decrypter = suite
                     .aead_alg
-                    .decrypter(test_key(suite.aead_alg.key_len()), Iv::from(TEST_IV));
+                    .record_decrypter(test_key(suite.aead_alg.key_len()), Iv::from(TEST_IV));
                 let opened = decrypter
                     .decrypt(record, TEST_SEQ)
                     .unwrap();
@@ -557,7 +569,7 @@ mod tests {
     fn seal(suite: &Tls13CipherSuite, payload: OutboundPlain<'_>, fill: u8) -> Vec<u8> {
         let mut encrypter = suite
             .aead_alg
-            .encrypter(test_key(suite.aead_alg.key_len()), Iv::from(TEST_IV));
+            .record_encrypter(test_key(suite.aead_alg.key_len()), Iv::from(TEST_IV));
         let record = Record::new(
             ContentType::ApplicationData,
             EncodableVersion::Legacy(ProtocolVersion::TLSv1_3),
