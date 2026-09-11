@@ -62,10 +62,10 @@ pub(crate) use codec::{
 mod deframer;
 #[cfg(test)]
 pub(crate) use deframer::StreamDeframer;
-pub use deframer::StreamDeframerCore;
 pub(crate) use deframer::{
     Deframed, Deframer, DeframerCore, Delocator, HandshakeAlignedProof, Locator,
 };
+pub use deframer::{DtlsDeframerCore, StreamDeframerCore};
 
 pub(crate) mod dtls;
 

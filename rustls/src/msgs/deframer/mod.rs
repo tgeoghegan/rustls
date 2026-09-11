@@ -12,6 +12,7 @@ use crate::msgs::{Epoch, HEADER_SIZE, HandshakeSequenceNumber, read_record_heade
 
 mod buffers;
 mod dtls;
+pub use dtls::DtlsDeframerCore;
 #[cfg(test)]
 mod dtls_test;
 use buffers::Coalescer;

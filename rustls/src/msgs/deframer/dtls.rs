@@ -17,7 +17,7 @@ use crate::msgs::{Deframed, DeframerCore, Epoch, HEADER_SIZE, HandshakeSequenceN
 pub(crate) type DtlsDeframer = Deframer<DtlsDeframerCore>;
 
 #[derive(Clone, Debug)]
-pub(crate) struct DtlsDeframerCore {
+pub struct DtlsDeframerCore {
     /// Deframed messages that are for future epochs
     future_epoch_records: VecDeque<FutureEpochDeframed>,
 }

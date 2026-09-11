@@ -21,6 +21,8 @@ use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 use crate::sync::Arc;
 use crate::tls13::key_schedule::KeyScheduleTrafficSend;
 
+pub mod datagram;
+
 // pub so that it can be re-exported from the crate root
 pub mod kernel;
 
