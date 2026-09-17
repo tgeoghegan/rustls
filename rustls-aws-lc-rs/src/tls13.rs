@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use core::ops::RangeFrom;
 
 use aws_lc_rs::hkdf::KeyType;
 use aws_lc_rs::{aead, hkdf, hmac};
@@ -271,16 +272,15 @@ impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for AeadRecordEncry
         aad: [u8; AAD_LEN],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
-        // Fragmented plaintext is gathered into `out` and then sealed in place.
-        // We can't use the out-of-place seal as it requires contiguous input.
-        match self.enc_key.seal_in_place_separate_tag(
-            aead::Nonce::assume_unique_for_key(nonce.to_array()?),
-            aead::Aad::from(aad),
-            payload.as_mut(),
-        ) {
-            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-            Err(_) => return Err(Error::EncryptError),
-        }
+        let tag = self
+            .enc_key
+            .seal_in_place_separate_tag(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload.as_mut(),
+            )
+            .map_err(|_| Error::EncryptError)?;
+        payload.extend_from_slice(tag.as_ref());
 
         Ok(())
     }
@@ -331,6 +331,7 @@ impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for AeadRecordDecry
         nonce: Nonce,
         aad: [u8; AAD_LEN],
         payload: &mut [u8],
+        _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {
         let plain_len = self
             .dec_key
@@ -361,16 +362,15 @@ impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for GcmRecordEncypt
         aad: [u8; AAD_LEN],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
-        // Fragmented plaintext is gathered into `out` and then sealed in place.
-        // We can't use the out-of-place seal as it requires contiguous input.
-        match self.enc_key.seal_in_place_separate_tag(
-            aead::Nonce::assume_unique_for_key(nonce.to_array()?),
-            aead::Aad::from(aad),
-            payload.as_mut(),
-        ) {
-            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-            Err(_) => return Err(Error::EncryptError),
-        }
+        let tag = self
+            .enc_key
+            .seal_in_place_separate_tag(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload.as_mut(),
+            )
+            .map_err(|_| Error::EncryptError)?;
+        payload.extend_from_slice(tag.as_ref());
 
         Ok(())
     }
@@ -421,6 +421,7 @@ impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for GcmRecordDecryp
         nonce: Nonce,
         aad: [u8; AAD_LEN],
         payload: &mut [u8],
+        _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {
         let plain_len = self
             .dec_key

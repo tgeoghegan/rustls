@@ -1499,7 +1499,7 @@ impl RawTls {
                 SupportedCipherSuite::Tls12(tls12),
             ) => tls12
                 .aead_alg
-                .encrypter(key, &iv.as_ref()[..4], &iv.as_ref()[4..]),
+                .record_encrypter(key, &iv.as_ref()[..4], &iv.as_ref()[4..]),
 
             _ => todo!(),
         };
@@ -1519,7 +1519,7 @@ impl RawTls {
                 SupportedCipherSuite::Tls12(tls12),
             ) => tls12
                 .aead_alg
-                .decrypter(key, &iv.as_ref()[..4]),
+                .record_decrypter(key, &iv.as_ref()[..4]),
 
             _ => todo!(),
         };

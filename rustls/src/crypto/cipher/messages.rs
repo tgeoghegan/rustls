@@ -405,11 +405,13 @@ impl<'a> EncryptBuffer<'a> {
         let provided = out.len();
         match out.get_mut(..len) {
             Some(buf) => Ok(Self { buf, used: 0 }),
-            None => Err(ApiMisuse::EncryptBufferTooSmall {
-                required: len,
-                provided,
+            None => {
+                Err(ApiMisuse::EncryptBufferTooSmall {
+                    required: len,
+                    provided,
+                }
+                .into())
             }
-            .into()),
         }
     }
 

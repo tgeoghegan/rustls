@@ -1,13 +1,13 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
+use core::ops::RangeFrom;
 use core::{array, fmt};
 
 use pki_types::FipsStatus;
 use zeroize::Zeroize;
 
-use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{ApiMisuse, Error};
-use crate::msgs::{put_u16, put_u64};
+use crate::msgs::put_u64;
 use crate::suites::ConnectionTrafficSecrets;
 
 mod messages;
@@ -20,6 +20,10 @@ mod record_layer;
 pub(crate) use record_layer::{Decrypted, DecryptionState, EncryptionState, PreEncryptAction};
 
 mod tls12;
+pub use tls12::{
+    TLS12_AAD_SIZE, Tls12ChaCha20Poly1305RecordDecrypter, Tls12ChaCha20Poly1305RecordEncrypter,
+    Tls12GcmRecordDecrypter, Tls12GcmRecordEncrypter,
+};
 mod tls13;
 pub use tls13::{TLS13_AAD_SIZE, Tls13RecordDecrypter, Tls13RecordEncrypter};
 
@@ -82,22 +86,45 @@ pub trait Tls13AeadAlgorithm: Send + Sync {
 
 /// Factory trait for building `RecordEncrypter` and `RecordDecrypter` for a TLS1.2 cipher suite.
 pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
-    /// Build a `RecordEncrypter` for the given key/iv and extra key block (which can be used for
-    /// improving explicit nonce size security, if needed).
+    /// Build a [`Tls12RecordEncrypter`] for the given key/iv and extra key block (which can be used
+    /// for improving explicit nonce size security, if needed).
     ///
     /// The length of `key` is set by [`KeyBlockShape::enc_key_len`].
     ///
     /// The length of `iv` is set by [`KeyBlockShape::fixed_iv_len`].
     ///
     /// The length of `extra` is set by [`KeyBlockShape::explicit_nonce_len`].
-    fn encrypter(&self, key: AeadKey, iv: &[u8], extra: &[u8]) -> Box<dyn RecordEncrypter>;
+    fn record_encrypter(&self, key: AeadKey, iv: &[u8], extra: &[u8]) -> Box<dyn RecordEncrypter>;
 
-    /// Build a `RecordDecrypter` for the given key/iv.
+    /// Build a `RecordEncryptionProvider` for the given key.
+    ///
+    /// The length of `key` is set by [`KeyBlockShape::enc_key_len`].
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>>;
+
+    /// Build a `ContiguousRecordEncryptionProvider` for the given key.
+    ///
+    /// The length of `key` is set by [`KeyBlockShape::enc_key_len`].
+    ///
+    /// By default, providers do not provide any fast path for contiguous plaintext, and all records
+    /// are encrypted through `Self::record_encrypter`.
+    fn contiguous_encrypter(
+        &self,
+        _key: AeadKey,
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<TLS12_AAD_SIZE>>> {
+        None
+    }
+
+    /// Build a [`Tls12RecordDecrypter`] for the given key/iv.
     ///
     /// The length of `key` is set by [`KeyBlockShape::enc_key_len`].
     ///
     /// The length of `iv` is set by [`KeyBlockShape::fixed_iv_len`].
-    fn decrypter(&self, key: AeadKey, iv: &[u8]) -> Box<dyn RecordDecrypter>;
+    fn record_decrypter(&self, key: AeadKey, iv: &[u8]) -> Box<dyn RecordDecrypter>;
+
+    /// Build a `RecordDecryptionProvider` for the given key/iv.
+    ///
+    /// The length of `key` is set by [`KeyBlockShape::enc_key_len`].
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>>;
 
     /// Return a `KeyBlockShape` that defines how large the `key_block` is and how it
     /// is split up prior to calling `encrypter()`, `decrypter()` and/or `extract_keys()`.
@@ -352,47 +379,20 @@ impl AsRef<[u8]> for Nonce {
     }
 }
 
+impl From<[u8; NONCE_LEN]> for Nonce {
+    fn from(value: [u8; NONCE_LEN]) -> Self {
+        let mut buf = [0u8; Iv::MAX_LEN];
+        buf[..NONCE_LEN].copy_from_slice(&value);
+        Self {
+            buf,
+            len: NONCE_LEN,
+        }
+    }
+}
+
 /// Size of TLS nonces (incorrectly termed "IV" in standard) for all supported ciphersuites
 /// (AES-GCM, Chacha20Poly1305)
 pub const NONCE_LEN: usize = 12;
-
-/// Returns a TLS1.3 `additional_data` encoding.
-///
-/// For decryption, the parameters should be those that were received on the wire.
-/// For encryption, the parameters should be those that will be put on the wire.
-///
-/// See RFC 9846 s5.2 for the `additional_data` definition.
-#[inline]
-pub fn make_tls13_aad(typ: ContentType, version: ProtocolVersion, payload_len: usize) -> [u8; 5] {
-    let version = version.to_array();
-    [
-        typ.into(),
-        version[0],
-        version[1],
-        (payload_len >> 8) as u8,
-        (payload_len & 0xff) as u8,
-    ]
-}
-
-/// Returns a TLS1.2 `additional_data` encoding.
-///
-/// See RFC 5246 s6.2.3.3 for the `additional_data` definition.
-#[inline]
-pub fn make_tls12_aad(
-    seq: u64,
-    typ: ContentType,
-    vers: ProtocolVersion,
-    len: usize,
-) -> [u8; TLS12_AAD_SIZE] {
-    let mut out = [0; TLS12_AAD_SIZE];
-    put_u64(seq, &mut out[0..]);
-    out[8] = typ.into();
-    put_u16(vers.into(), &mut out[9..]);
-    put_u16(len as u16, &mut out[11..]);
-    out
-}
-
-const TLS12_AAD_SIZE: usize = 8 + 1 + 2 + 2;
 
 /// A key for an AEAD algorithm.
 ///
@@ -460,11 +460,19 @@ pub(crate) struct FakeAead;
 
 #[cfg(test)]
 impl Tls12AeadAlgorithm for FakeAead {
-    fn encrypter(&self, _: AeadKey, _: &[u8], _: &[u8]) -> Box<dyn RecordEncrypter> {
+    fn record_encrypter(&self, _: AeadKey, _: &[u8], _: &[u8]) -> Box<dyn RecordEncrypter> {
         todo!()
     }
 
-    fn decrypter(&self, _: AeadKey, _: &[u8]) -> Box<dyn RecordDecrypter> {
+    fn encrypter(&self, _: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>> {
+        todo!()
+    }
+
+    fn record_decrypter(&self, _: AeadKey, _: &[u8]) -> Box<dyn RecordDecrypter> {
+        todo!()
+    }
+
+    fn decrypter(&self, _: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>> {
         todo!()
     }
 
@@ -508,7 +516,7 @@ pub trait RecordEncryptionProvider<const AAD_LEN: usize>: Send + Sync {
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error>;
 
-    /// The length of the authentication tag this encryption primitive uses.
+    /// Length in bytes of a tag in this encryption scheme.
     fn tag_len(&self) -> usize;
 }
 
@@ -547,9 +555,10 @@ pub trait RecordDecryptionProvider<const AAD_LEN: usize>: Send + Sync {
         nonce: Nonce,
         aad: [u8; AAD_LEN],
         payload: &mut [u8],
+        ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error>;
 
-    /// The length of the authentication tag this decryption primitive uses.
+    /// Length in bytes of a tag in this encryption scheme.
     fn tag_len(&self) -> usize;
 }
 

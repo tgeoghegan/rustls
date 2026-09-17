@@ -120,7 +120,7 @@ impl RecordDecrypter for Tls13RecordDecrypter {
 
         let plain_len = self
             .provider
-            .decrypt(nonce, aad, payload.as_mut())?;
+            .decrypt(nonce, aad, payload.as_mut(), 0..)?;
 
         payload.truncate(plain_len);
         record.into_tls13_unpadded_record()

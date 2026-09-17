@@ -5,9 +5,10 @@ use core::time::Duration;
 use std::borrow::Cow;
 
 use crate::crypto::cipher::{
-    AeadKey, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, Nonce, OutboundPlain, Record,
+    AeadKey, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, OutboundPlain, Record,
     RecordDecrypter, RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider,
-    TLS13_AAD_SIZE, Tls12AeadAlgorithm, Tls13AeadAlgorithm, UnsupportedOperationError,
+    TLS12_AAD_SIZE, TLS13_AAD_SIZE, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
+    UnsupportedOperationError,
 };
 use crate::crypto::kx::{
     KeyExchangeAlgorithm, NamedGroup, SharedSecret, StartedKeyExchange, SupportedKxGroup,
@@ -16,6 +17,7 @@ use crate::crypto::{
     self, CipherSuite, CipherSuiteCommon, GetRandomFailed, HashAlgorithm, SignatureScheme,
     TicketProducer, WebPkiSupportedAlgorithms, hash, hmac, tls12, tls13,
 };
+use crate::enums::ContentType;
 use crate::error::PeerMisbehaved;
 use crate::pki_types::{
     AlgorithmIdentifier, InvalidSignature, PrivateKeyDer, SignatureVerificationAlgorithm,
@@ -315,12 +317,20 @@ const KX_SHARED_SECRET: &[u8] = b"KxSharedSecretKxSharedSecret";
 struct Aead;
 
 impl Tls13AeadAlgorithm for Aead {
+    fn record_encrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(Tls13Cipher)
+    }
+
     fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS13_AAD_SIZE>> {
+        unreachable!()
+    }
+
+    fn record_decrypter(&self, _key: AeadKey, _iv: Iv) -> Box<dyn RecordDecrypter> {
         Box::new(Tls13Cipher)
     }
 
     fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS13_AAD_SIZE>> {
-        Box::new(Tls13Cipher)
+        unreachable!()
     }
 
     fn key_len(&self) -> usize {
@@ -337,12 +347,25 @@ impl Tls13AeadAlgorithm for Aead {
 }
 
 impl Tls12AeadAlgorithm for Aead {
-    fn encrypter(&self, _key: AeadKey, _iv: &[u8], _: &[u8]) -> Box<dyn RecordEncrypter> {
+    fn record_encrypter(
+        &self,
+        _key: AeadKey,
+        _iv: &[u8],
+        _extra: &[u8],
+    ) -> Box<dyn RecordEncrypter> {
         Box::new(Tls12Cipher)
     }
 
-    fn decrypter(&self, _key: AeadKey, _iv: &[u8]) -> Box<dyn RecordDecrypter> {
+    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>> {
+        unreachable!()
+    }
+
+    fn record_decrypter(&self, _key: AeadKey, _iv: &[u8]) -> Box<dyn RecordDecrypter> {
         Box::new(Tls12Cipher)
+    }
+
+    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>> {
+        unreachable!()
     }
 
     fn key_block_shape(&self) -> KeyBlockShape {
@@ -365,13 +388,19 @@ impl Tls12AeadAlgorithm for Aead {
 
 pub(crate) struct Tls13Cipher;
 
-impl RecordEncryptionProvider<TLS13_AAD_SIZE> for Tls13Cipher {
-    fn encrypt(
+impl RecordEncrypter for Tls13Cipher {
+    fn encrypt<'a>(
         &mut self,
-        nonce: Nonce,
-        _aad: [u8; 5],
-        payload: &mut EncryptBuffer<'_>,
-    ) -> Result<(), Error> {
+        record: Record<OutboundPlain<'_>>,
+        seq: u64,
+        out: &'a mut [u8],
+    ) -> Result<Record<&'a [u8]>, Error> {
+        let total_len = self.encrypted_payload_len(record.payload.len());
+        let mut payload = EncryptBuffer::new(out, total_len)?;
+
+        payload.extend_from_chunks(&record.payload);
+        payload.extend_from_slice(&record.typ.to_array());
+
         for (p, mask) in payload
             .as_mut()
             .iter_mut()
@@ -380,26 +409,31 @@ impl RecordEncryptionProvider<TLS13_AAD_SIZE> for Tls13Cipher {
             *p ^= *mask;
         }
 
-        payload.extend_from_slice(&nonce.as_bytes()[..8]);
+        payload.extend_from_slice(&seq.to_be_bytes());
         payload.extend_from_slice(AEAD_TAG);
 
-        Ok(())
+        Ok(Record {
+            typ: ContentType::ApplicationData,
+            version: record.version,
+            payload: payload.into_written(),
+        })
     }
 
-    fn tag_len(&self) -> usize {
-        AEAD_OVERHEAD
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        payload_len + 1 + AEAD_OVERHEAD
     }
 }
 
-impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13Cipher {
-    fn decrypt(
+impl RecordDecrypter for Tls13Cipher {
+    fn decrypt<'a>(
         &mut self,
-        nonce: Nonce,
-        _aad: [u8; AAD_LEN],
-        payload: &mut [u8],
-    ) -> Result<usize, Error> {
+        mut record: Record<InboundOpaque<'a>>,
+        seq: u64,
+    ) -> Result<Record<&'a [u8]>, Error> {
+        let payload = &mut record.payload;
+
         let mut expected_tag = vec![];
-        expected_tag.extend_from_slice(&nonce.as_bytes()[..8]);
+        expected_tag.extend_from_slice(&seq.to_be_bytes());
         expected_tag.extend_from_slice(AEAD_TAG);
 
         if payload.len() < AEAD_OVERHEAD
@@ -408,6 +442,8 @@ impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13Cipher {
             return Err(Error::DecryptError);
         }
 
+        payload.truncate(payload.len() - AEAD_OVERHEAD);
+
         for (p, mask) in payload
             .as_mut()
             .iter_mut()
@@ -416,11 +452,7 @@ impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13Cipher {
             *p ^= *mask;
         }
 
-        Ok(payload.len() - AEAD_OVERHEAD)
-    }
-
-    fn tag_len(&self) -> usize {
-        AEAD_OVERHEAD
+        record.into_tls13_unpadded_record()
     }
 }
 

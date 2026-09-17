@@ -1,11 +1,14 @@
+use core::ops::RangeFrom;
+
 use alloc::boxed::Box;
 
 use pki_types::FipsStatus;
 use ring::aead;
 use rustls::crypto::cipher::{
-    AeadKey, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, NONCE_LEN, Nonce, OutboundPlain,
-    Record, RecordDecrypter, RecordEncrypter, Tls12AeadAlgorithm, UnsupportedOperationError,
-    make_tls12_aad,
+    AeadKey, EncryptBuffer, Iv, KeyBlockShape, NONCE_LEN, Nonce, RecordDecrypter,
+    RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider, TLS12_AAD_SIZE,
+    Tls12AeadAlgorithm, Tls12ChaCha20Poly1305RecordDecrypter, Tls12ChaCha20Poly1305RecordEncrypter,
+    Tls12GcmRecordDecrypter, Tls12GcmRecordEncrypter, UnsupportedOperationError,
 };
 use rustls::crypto::kx::KeyExchangeAlgorithm;
 use rustls::crypto::tls12::PrfUsingHmac;
@@ -136,30 +139,30 @@ pub(crate) static AES256_GCM: GcmAlgorithm = GcmAlgorithm(&aead::AES_256_GCM);
 pub(crate) struct GcmAlgorithm(&'static aead::Algorithm);
 
 impl Tls12AeadAlgorithm for GcmAlgorithm {
-    fn decrypter(&self, dec_key: AeadKey, dec_iv: &[u8]) -> Box<dyn RecordDecrypter> {
+    fn record_decrypter(&self, key: AeadKey, iv: &[u8]) -> Box<dyn RecordDecrypter> {
+        Box::new(Tls12GcmRecordDecrypter::new(self.decrypter(key), iv))
+    }
+
+    fn decrypter(&self, dec_key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>> {
         let dec_key =
             aead::LessSafeKey::new(aead::UnboundKey::new(self.0, dec_key.as_ref()).unwrap());
 
-        let mut ret = GcmRecordDecrypter {
-            dec_key,
-            dec_salt: [0u8; 4],
-        };
-
-        debug_assert_eq!(dec_iv.len(), 4);
-        ret.dec_salt.copy_from_slice(dec_iv);
-        Box::new(ret)
+        Box::new(GcmRecordDecrypter { dec_key })
     }
 
-    fn encrypter(
-        &self,
-        enc_key: AeadKey,
-        write_iv: &[u8],
-        explicit: &[u8],
-    ) -> Box<dyn RecordEncrypter> {
+    fn record_encrypter(&self, key: AeadKey, iv: &[u8], extra: &[u8]) -> Box<dyn RecordEncrypter> {
+        Box::new(Tls12GcmRecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+            extra,
+        ))
+    }
+
+    fn encrypter(&self, enc_key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>> {
         let enc_key =
             aead::LessSafeKey::new(aead::UnboundKey::new(self.0, enc_key.as_ref()).unwrap());
-        let iv = gcm_iv(write_iv, explicit);
-        Box::new(GcmRecordEncrypter { enc_key, iv })
+        Box::new(GcmRecordEncrypter { enc_key })
     }
 
     fn key_block_shape(&self) -> KeyBlockShape {
@@ -192,24 +195,33 @@ impl Tls12AeadAlgorithm for GcmAlgorithm {
 pub(crate) struct ChaCha20Poly1305;
 
 impl Tls12AeadAlgorithm for ChaCha20Poly1305 {
-    fn decrypter(&self, dec_key: AeadKey, iv: &[u8]) -> Box<dyn RecordDecrypter> {
+    fn record_decrypter(&self, key: AeadKey, iv: &[u8]) -> Box<dyn RecordDecrypter> {
+        Box::new(Tls12ChaCha20Poly1305RecordDecrypter::new(
+            self.decrypter(key),
+            iv,
+        ))
+    }
+
+    fn decrypter(&self, dec_key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>> {
         let dec_key = aead::LessSafeKey::new(
             aead::UnboundKey::new(&aead::CHACHA20_POLY1305, dec_key.as_ref()).unwrap(),
         );
-        Box::new(ChaCha20Poly1305RecordDecrypter {
-            dec_key,
-            dec_offset: Iv::new(iv).expect("IV length validated by key_block_shape"),
-        })
+        Box::new(ChaCha20Poly1305RecordDecrypter { dec_key })
     }
 
-    fn encrypter(&self, enc_key: AeadKey, enc_iv: &[u8], _: &[u8]) -> Box<dyn RecordEncrypter> {
+    fn record_encrypter(&self, key: AeadKey, iv: &[u8], _: &[u8]) -> Box<dyn RecordEncrypter> {
+        Box::new(Tls12ChaCha20Poly1305RecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+        ))
+    }
+
+    fn encrypter(&self, enc_key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>> {
         let enc_key = aead::LessSafeKey::new(
             aead::UnboundKey::new(&aead::CHACHA20_POLY1305, enc_key.as_ref()).unwrap(),
         );
-        Box::new(ChaCha20Poly1305RecordEncrypter {
-            enc_key,
-            enc_offset: Iv::new(enc_iv).expect("IV length validated by key_block_shape"),
-        })
+        Box::new(ChaCha20Poly1305RecordEncrypter { enc_key })
     }
 
     fn key_block_shape(&self) -> KeyBlockShape {
@@ -242,97 +254,61 @@ impl Tls12AeadAlgorithm for ChaCha20Poly1305 {
 /// A `RecordEncrypter` for AES-GCM AEAD ciphersuites. TLS 1.2 only.
 struct GcmRecordEncrypter {
     enc_key: aead::LessSafeKey,
-    iv: Iv,
 }
 
 /// A `RecordDecrypter` for AES-GCM AEAD ciphersuites.  TLS1.2 only.
 struct GcmRecordDecrypter {
     dec_key: aead::LessSafeKey,
-    dec_salt: [u8; 4],
 }
 
-const GCM_EXPLICIT_NONCE_LEN: usize = 8;
-const GCM_OVERHEAD: usize = GCM_EXPLICIT_NONCE_LEN + 16;
-
-impl RecordDecrypter for GcmRecordDecrypter {
-    fn decrypt<'a>(
+impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for GcmRecordDecrypter {
+    fn decrypt(
         &mut self,
-        mut record: Record<InboundOpaque<'a>>,
-        seq: u64,
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let payload = &record.payload;
-        if payload.len() < GCM_OVERHEAD {
-            return Err(Error::DecryptError);
-        }
-
-        let nonce = {
-            let mut nonce = [0u8; 12];
-            nonce[..4].copy_from_slice(&self.dec_salt);
-            nonce[4..].copy_from_slice(&payload[..8]);
-            aead::Nonce::assume_unique_for_key(nonce)
-        };
-
-        let aad = aead::Aad::from(make_tls12_aad(
-            seq,
-            record.typ,
-            record.version.version(),
-            payload.len() - GCM_OVERHEAD,
-        ));
-
-        let payload = &mut record.payload;
+        nonce: Nonce,
+        aad: [u8; AAD_SIZE],
+        payload: &mut [u8],
+        ciphertext_and_tag: RangeFrom<usize>,
+    ) -> Result<usize, Error> {
         let plain_len = self
             .dec_key
-            .open_within(nonce, aad, payload, GCM_EXPLICIT_NONCE_LEN..)
+            .open_within(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload,
+                ciphertext_and_tag,
+            )
             .map_err(|_| Error::DecryptError)?
             .len();
 
-        if plain_len > MAX_FRAGMENT_LEN {
-            return Err(Error::PeerSentOversizedRecord);
-        }
+        Ok(plain_len)
+    }
 
-        payload.truncate(plain_len);
-        Ok(record.into_plain_record())
+    fn tag_len(&self) -> usize {
+        self.dec_key.algorithm().tag_len()
     }
 }
-
-impl RecordEncrypter for GcmRecordEncrypter {
-    fn encrypt<'a>(
+impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for GcmRecordEncrypter {
+    fn encrypt(
         &mut self,
-        record: Record<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(record.payload.len());
-        let mut payload = EncryptBuffer::new(out, total_len)?;
+        nonce: Nonce,
+        aad: [u8; AAD_SIZE],
+        payload: &mut EncryptBuffer<'_>,
+    ) -> Result<(), Error> {
+        let tag = self
+            .enc_key
+            .seal_in_place_separate_tag(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload.as_mut(),
+            )
+            .map_err(|_| Error::EncryptError)?;
+        payload.extend_from_slice(tag.as_ref());
 
-        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls12_aad(
-            seq,
-            record.typ,
-            record.version.encode(),
-            record.payload.len(),
-        ));
-        payload.extend_from_slice(&nonce.as_ref()[4..]);
-        payload.extend_from_chunks(&record.payload);
-
-        match self.enc_key.seal_in_place_separate_tag(
-            nonce,
-            aad,
-            &mut payload.as_mut()[GCM_EXPLICIT_NONCE_LEN..],
-        ) {
-            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-            Err(_) => return Err(Error::EncryptError),
-        }
-
-        Ok(Record {
-            typ: record.typ,
-            version: record.version,
-            payload: payload.into_written(),
-        })
+        Ok(())
     }
 
-    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
-        payload_len + GCM_EXPLICIT_NONCE_LEN + self.enc_key.algorithm().tag_len()
+    fn tag_len(&self) -> usize {
+        self.enc_key.algorithm().tag_len()
     }
 }
 
@@ -341,7 +317,6 @@ impl RecordEncrypter for GcmRecordEncrypter {
 /// TLS1.3 uses `Tls13RecordEncrypter`.
 struct ChaCha20Poly1305RecordEncrypter {
     enc_key: aead::LessSafeKey,
-    enc_offset: Iv,
 }
 
 /// The RFC 7905/RFC 7539 ChaCha20Poly1305 construction.
@@ -349,85 +324,56 @@ struct ChaCha20Poly1305RecordEncrypter {
 /// TLS1.3 uses `Tls13RecordDecrypter`.
 struct ChaCha20Poly1305RecordDecrypter {
     dec_key: aead::LessSafeKey,
-    dec_offset: Iv,
 }
 
-const CHACHAPOLY1305_OVERHEAD: usize = 16;
-
-impl RecordDecrypter for ChaCha20Poly1305RecordDecrypter {
-    fn decrypt<'a>(
+impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for ChaCha20Poly1305RecordDecrypter {
+    fn decrypt(
         &mut self,
-        mut record: Record<InboundOpaque<'a>>,
-        seq: u64,
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let payload = &record.payload;
-
-        if payload.len() < CHACHAPOLY1305_OVERHEAD {
-            return Err(Error::DecryptError);
-        }
-
-        let nonce =
-            aead::Nonce::assume_unique_for_key(Nonce::new(&self.dec_offset, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls12_aad(
-            seq,
-            record.typ,
-            record.version.version(),
-            payload.len() - CHACHAPOLY1305_OVERHEAD,
-        ));
-
-        let payload = &mut record.payload;
+        nonce: Nonce,
+        aad: [u8; AAD_SIZE],
+        payload: &mut [u8],
+        _ciphertext_and_tag: RangeFrom<usize>,
+    ) -> Result<usize, Error> {
         let plain_len = self
             .dec_key
-            .open_in_place(nonce, aad, payload)
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload,
+            )
             .map_err(|_| Error::DecryptError)?
             .len();
 
-        if plain_len > MAX_FRAGMENT_LEN {
-            return Err(Error::PeerSentOversizedRecord);
-        }
+        Ok(plain_len)
+    }
 
-        payload.truncate(plain_len);
-        Ok(record.into_plain_record())
+    fn tag_len(&self) -> usize {
+        self.dec_key.algorithm().tag_len()
     }
 }
 
-impl RecordEncrypter for ChaCha20Poly1305RecordEncrypter {
-    fn encrypt<'a>(
+impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for ChaCha20Poly1305RecordEncrypter {
+    fn encrypt(
         &mut self,
-        record: Record<OutboundPlain<'_>>,
-        seq: u64,
-        out: &'a mut [u8],
-    ) -> Result<Record<&'a [u8]>, Error> {
-        let total_len = self.encrypted_payload_len(record.payload.len());
-        let mut payload = EncryptBuffer::new(out, total_len)?;
-
-        let nonce =
-            aead::Nonce::assume_unique_for_key(Nonce::new(&self.enc_offset, seq).to_array()?);
-        let aad = aead::Aad::from(make_tls12_aad(
-            seq,
-            record.typ,
-            record.version.encode(),
-            record.payload.len(),
-        ));
-        payload.extend_from_chunks(&record.payload);
-
-        match self
+        nonce: Nonce,
+        aad: [u8; AAD_SIZE],
+        payload: &mut EncryptBuffer<'_>,
+    ) -> Result<(), Error> {
+        let tag = self
             .enc_key
-            .seal_in_place_separate_tag(nonce, aad, payload.as_mut())
-        {
-            Ok(tag) => payload.extend_from_slice(tag.as_ref()),
-            Err(_) => return Err(Error::EncryptError),
-        }
+            .seal_in_place_separate_tag(
+                aead::Nonce::assume_unique_for_key(nonce.to_array()?),
+                aead::Aad::from(aad),
+                payload.as_mut(),
+            )
+            .map_err(|_| Error::EncryptError)?;
+        payload.extend_from_slice(tag.as_ref());
 
-        Ok(Record {
-            typ: record.typ,
-            version: record.version,
-            payload: payload.into_written(),
-        })
+        Ok(())
     }
 
-    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
-        payload_len + self.enc_key.algorithm().tag_len()
+    fn tag_len(&self) -> usize {
+        self.enc_key.algorithm().tag_len()
     }
 }
 
@@ -448,8 +394,6 @@ fn gcm_iv(write_iv: &[u8], explicit: &[u8]) -> Iv {
 
     Iv::new(&iv).expect("IV length is NONCE_LEN, which is within MAX_LEN")
 }
-
-const MAX_FRAGMENT_LEN: usize = 16384;
 
 #[cfg(test)]
 mod tests {

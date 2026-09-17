@@ -1,3 +1,5 @@
+use core::ops::RangeFrom;
+
 use alloc::boxed::Box;
 
 use pki_types::FipsStatus;
@@ -232,6 +234,7 @@ impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13RecordDecr
         nonce: Nonce,
         aad: [u8; AAD_LEN],
         payload: &mut [u8],
+        _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {
         let plain_len = self
             .dec_key
