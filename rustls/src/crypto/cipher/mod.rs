@@ -30,6 +30,8 @@ pub use tls12::{
 };
 mod tls13;
 pub use tls13::{TLS13_AAD_SIZE, Tls13RecordDecrypter, Tls13RecordEncrypter};
+mod dtls13;
+pub use dtls13::{Dtls13RecordDecrypter, Dtls13RecordEncrypter};
 
 /// Factory trait for building `RecordEncrypter` and `RecordDecrypter` for a TLS1.3 cipher suite.
 pub trait Tls13AeadAlgorithm: Send + Sync {
