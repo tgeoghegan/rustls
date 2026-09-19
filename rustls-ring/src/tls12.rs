@@ -6,8 +6,8 @@ use pki_types::FipsStatus;
 use ring::aead;
 use rustls::crypto::cipher::{
     AeadKey, EncryptBuffer, Iv, KeyBlockShape, NONCE_LEN, Nonce, RecordDecrypter,
-    RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider, TLS12_AAD_SIZE,
-    Tls12AeadAlgorithm, Tls12ChaCha20Poly1305RecordDecrypter, Tls12ChaCha20Poly1305RecordEncrypter,
+    RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider, Tls12AeadAlgorithm,
+    Tls12ChaCha20Poly1305RecordDecrypter, Tls12ChaCha20Poly1305RecordEncrypter,
     Tls12GcmRecordDecrypter, Tls12GcmRecordEncrypter, UnsupportedOperationError,
 };
 use rustls::crypto::kx::KeyExchangeAlgorithm;
@@ -143,7 +143,7 @@ impl Tls12AeadAlgorithm for GcmAlgorithm {
         Box::new(Tls12GcmRecordDecrypter::new(self.decrypter(key), iv))
     }
 
-    fn decrypter(&self, dec_key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>> {
+    fn decrypter(&self, dec_key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         let dec_key =
             aead::LessSafeKey::new(aead::UnboundKey::new(self.0, dec_key.as_ref()).unwrap());
 
@@ -159,7 +159,7 @@ impl Tls12AeadAlgorithm for GcmAlgorithm {
         ))
     }
 
-    fn encrypter(&self, enc_key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>> {
+    fn encrypter(&self, enc_key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         let enc_key =
             aead::LessSafeKey::new(aead::UnboundKey::new(self.0, enc_key.as_ref()).unwrap());
         Box::new(GcmRecordEncrypter { enc_key })
@@ -202,7 +202,7 @@ impl Tls12AeadAlgorithm for ChaCha20Poly1305 {
         ))
     }
 
-    fn decrypter(&self, dec_key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>> {
+    fn decrypter(&self, dec_key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         let dec_key = aead::LessSafeKey::new(
             aead::UnboundKey::new(&aead::CHACHA20_POLY1305, dec_key.as_ref()).unwrap(),
         );
@@ -217,7 +217,7 @@ impl Tls12AeadAlgorithm for ChaCha20Poly1305 {
         ))
     }
 
-    fn encrypter(&self, enc_key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>> {
+    fn encrypter(&self, enc_key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         let enc_key = aead::LessSafeKey::new(
             aead::UnboundKey::new(&aead::CHACHA20_POLY1305, enc_key.as_ref()).unwrap(),
         );
@@ -261,11 +261,11 @@ struct GcmRecordDecrypter {
     dec_key: aead::LessSafeKey,
 }
 
-impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for GcmRecordDecrypter {
+impl RecordDecryptionProvider for GcmRecordDecrypter {
     fn decrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_SIZE],
+        aad: &[u8],
         payload: &mut [u8],
         ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {
@@ -287,11 +287,11 @@ impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for GcmRecordDecr
         self.dec_key.algorithm().tag_len()
     }
 }
-impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for GcmRecordEncrypter {
+impl RecordEncryptionProvider for GcmRecordEncrypter {
     fn encrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_SIZE],
+        aad: &[u8],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
         let tag = self
@@ -326,11 +326,11 @@ struct ChaCha20Poly1305RecordDecrypter {
     dec_key: aead::LessSafeKey,
 }
 
-impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for ChaCha20Poly1305RecordDecrypter {
+impl RecordDecryptionProvider for ChaCha20Poly1305RecordDecrypter {
     fn decrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_SIZE],
+        aad: &[u8],
         payload: &mut [u8],
         _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {
@@ -352,11 +352,11 @@ impl<const AAD_SIZE: usize> RecordDecryptionProvider<AAD_SIZE> for ChaCha20Poly1
     }
 }
 
-impl<const AAD_SIZE: usize> RecordEncryptionProvider<AAD_SIZE> for ChaCha20Poly1305RecordEncrypter {
+impl RecordEncryptionProvider for ChaCha20Poly1305RecordEncrypter {
     fn encrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_SIZE],
+        aad: &[u8],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
         let tag = self

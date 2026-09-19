@@ -14,8 +14,8 @@ use crate::msgs::{MAX_FRAGMENT_LEN, put_u16, put_u64};
 /// This struct implements TLS 1.2 protocol-level details but relies on implementations of
 /// [`RecordEncryptionProvider`] and [`ContiguousRecordEncryptionprovider`] for crypto primitives.
 pub struct Tls12GcmRecordEncrypter {
-    provider: Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>>,
-    contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider<TLS12_AAD_SIZE>>>,
+    provider: Box<dyn RecordEncryptionProvider>,
+    contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider>>,
     iv: Iv,
 }
 
@@ -25,8 +25,8 @@ impl Tls12GcmRecordEncrypter {
     /// Values should be created using [`Tls12AeadAlgorithm::record_encrypter`] instead of calling
     /// this directly.
     pub fn new(
-        provider: Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>>,
-        contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider<TLS12_AAD_SIZE>>>,
+        provider: Box<dyn RecordEncryptionProvider>,
+        contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider>>,
         write_iv: &[u8],
         explicit: &[u8],
     ) -> Self {
@@ -46,7 +46,6 @@ impl RecordEncrypter for Tls12GcmRecordEncrypter {
         out: &'a mut [u8],
     ) -> Result<Record<&'a [u8]>, Error> {
         let total_len = self.encrypted_payload_len(record.payload.len());
-        std::println!("total len: {total_len}");
 
         let nonce = Nonce::new(&self.iv, seq);
         let aad = make_tls12_aad(
@@ -68,7 +67,7 @@ impl RecordEncrypter for Tls12GcmRecordEncrypter {
                     explicit_nonce.copy_from_slice(&nonce.as_ref()[4..]);
                     fast_path.encrypt_contiguous(
                         nonce,
-                        aad,
+                        &aad,
                         contiguous_plain,
                         // no extra plaintext for TLS 1.2
                         &[],
@@ -94,7 +93,7 @@ impl RecordEncrypter for Tls12GcmRecordEncrypter {
                     )?;
                     payload.extend_from_chunks(&record.payload);
                     self.provider
-                        .encrypt(nonce, aad, &mut payload)?;
+                        .encrypt(nonce, &aad, &mut payload)?;
                 }
 
                 out
@@ -118,7 +117,7 @@ impl RecordEncrypter for Tls12GcmRecordEncrypter {
 /// This struct implements TLS 1.2 protocol-level details but relies on implementations of
 /// [`RecordDecryptionProvider`] for crypto primitives.
 pub struct Tls12GcmRecordDecrypter {
-    provider: Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>>,
+    provider: Box<dyn RecordDecryptionProvider>,
     dec_salt: [u8; 4],
 }
 
@@ -127,7 +126,7 @@ impl Tls12GcmRecordDecrypter {
     ///
     /// Values should be created via [`Tls12AeadAlgorithm::decrypter`] instead of call this
     /// directly.
-    pub fn new(provider: Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>>, dec_iv: &[u8]) -> Self {
+    pub fn new(provider: Box<dyn RecordDecryptionProvider>, dec_iv: &[u8]) -> Self {
         let mut ret = Self {
             provider,
             dec_salt: [0u8; 4],
@@ -165,14 +164,9 @@ impl RecordDecrypter for Tls12GcmRecordDecrypter {
             payload.len() - GCM_OVERHEAD,
         );
 
-        std::println!(
-            "sending slice {:?} into decrypter",
-            &mut payload.as_mut()[GCM_EXPLICIT_NONCE_LEN..]
-        );
         let plain_len =
             self.provider
-                .decrypt(nonce, aad, &mut payload.as_mut(), GCM_EXPLICIT_NONCE_LEN..)?;
-        std::println!("decrypted: {:?}", payload.as_ref());
+                .decrypt(nonce, &aad, &mut payload.as_mut(), GCM_EXPLICIT_NONCE_LEN..)?;
 
         if plain_len > MAX_FRAGMENT_LEN.get() {
             return Err(Error::PeerSentOversizedRecord);
@@ -188,8 +182,8 @@ impl RecordDecrypter for Tls12GcmRecordDecrypter {
 /// This struct implements TLS 1.2 protocol-level details but relies on implementations of
 /// [`RecordEncryptionProvider`] and [`ContiguousRecordEncryptionprovider`] for crypto primitives.
 pub struct Tls12ChaCha20Poly1305RecordEncrypter {
-    provider: Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>>,
-    contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider<TLS12_AAD_SIZE>>>,
+    provider: Box<dyn RecordEncryptionProvider>,
+    contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider>>,
     iv: Iv,
 }
 
@@ -199,8 +193,8 @@ impl Tls12ChaCha20Poly1305RecordEncrypter {
     /// Values should be created using [`Tls12AeadAlgorithm::record_encrypter`] instead of calling
     /// this directly.
     pub fn new(
-        provider: Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>>,
-        contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider<TLS12_AAD_SIZE>>>,
+        provider: Box<dyn RecordEncryptionProvider>,
+        contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider>>,
         write_iv: &[u8],
     ) -> Self {
         Self {
@@ -236,7 +230,7 @@ impl RecordEncrypter for Tls12ChaCha20Poly1305RecordEncrypter {
             (Some(contiguous_plain), Some(fast_path)) => {
                 fast_path.encrypt_contiguous(
                     nonce,
-                    aad,
+                    &aad,
                     contiguous_plain,
                     // no extra plaintext for TLS 1.2
                     &[],
@@ -250,7 +244,7 @@ impl RecordEncrypter for Tls12ChaCha20Poly1305RecordEncrypter {
                 let mut payload = EncryptBuffer::new(out, total_len)?;
                 payload.extend_from_chunks(&record.payload);
                 self.provider
-                    .encrypt(nonce, aad, &mut payload)?;
+                    .encrypt(nonce, &aad, &mut payload)?;
                 payload.into_written()
             }
         };
@@ -272,7 +266,7 @@ impl RecordEncrypter for Tls12ChaCha20Poly1305RecordEncrypter {
 /// This struct implements TLS 1.2 protocol-level details but relies on implementations of
 /// [`RecordDecryptionProvider`] for crypto primitives.
 pub struct Tls12ChaCha20Poly1305RecordDecrypter {
-    provider: Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>>,
+    provider: Box<dyn RecordDecryptionProvider>,
     dec_offset: Iv,
 }
 
@@ -281,7 +275,7 @@ impl Tls12ChaCha20Poly1305RecordDecrypter {
     ///
     /// Values should be created via [`Tls13AeadAlgorithm::decrypter`] instead of call this
     /// directly.
-    pub fn new(provider: Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>>, iv: &[u8]) -> Self {
+    pub fn new(provider: Box<dyn RecordDecryptionProvider>, iv: &[u8]) -> Self {
         Self {
             provider,
             dec_offset: Iv::new(iv).expect("IV length validated by key_block_shape"),
@@ -310,7 +304,7 @@ impl RecordDecrypter for Tls12ChaCha20Poly1305RecordDecrypter {
 
         let plain_len = self
             .provider
-            .decrypt(nonce, aad, payload.as_mut(), 0..)?;
+            .decrypt(nonce, &aad, payload.as_mut(), 0..)?;
 
         if plain_len > MAX_FRAGMENT_LEN.get() {
             return Err(Error::PeerSentOversizedRecord);
@@ -372,7 +366,11 @@ fn record_region(out: &mut [u8], len: usize) -> Result<&mut [u8], Error> {
     }
 }
 
-pub const TLS12_AAD_SIZE: usize = 8 + 1 + 2 + 2;
+/// Length of the AAD for TLS 1.2.
+///
+/// 8 bytes of sequence number, 1 byte of content type, 2 bytes of protocol version and 2 bytes of
+/// payload length.
+const TLS12_AAD_SIZE: usize = 8 + 1 + 2 + 2;
 
 /// Length of `explicit_nonce` for GCM suites
 ///

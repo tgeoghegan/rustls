@@ -12,19 +12,16 @@ use crate::error::Error;
 /// This struct implements TLS 1.3 protocol-level details but relies on implementations of
 /// [`RecordEncryptionProvider`] and [`ContiguousRecordEncryptionprovider`] for crypto primitives.
 pub struct Tls13RecordEncrypter {
-    provider: Box<dyn RecordEncryptionProvider<TLS13_AAD_SIZE>>,
-    contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider<TLS13_AAD_SIZE>>>,
+    provider: Box<dyn RecordEncryptionProvider>,
+    contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider>>,
     iv: Iv,
 }
 
 impl Tls13RecordEncrypter {
-    /// Create a new [`TlsRecordEncrypter`] from the providers and IV.
-    ///
-    /// Values should be created using [`Tls13AeadAlgorithm::record_encrypter`] instead of calling
-    /// this directly.
-    pub(crate) fn new(
-        provider: Box<dyn RecordEncryptionProvider<TLS13_AAD_SIZE>>,
-        contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider<TLS13_AAD_SIZE>>>,
+    /// Create a new [`TlsRecordEncrypter`].
+    pub fn new(
+        provider: Box<dyn RecordEncryptionProvider>,
+        contiguous_provider: Option<Box<dyn ContiguousRecordEncryptionProvider>>,
         iv: Iv,
     ) -> Self {
         Self {
@@ -55,7 +52,7 @@ impl RecordEncrypter for Tls13RecordEncrypter {
             // Fast path: plaintext is contiguous and the provider has a special case for it.
             (Some(contiguous_plain), Some(fast_path)) => fast_path.encrypt_contiguous(
                 nonce,
-                aad,
+                &aad,
                 contiguous_plain,
                 &record.typ.to_array(),
                 out,
@@ -68,7 +65,7 @@ impl RecordEncrypter for Tls13RecordEncrypter {
                 payload.extend_from_chunks(&record.payload);
                 payload.extend_from_slice(&record.typ.to_array());
                 self.provider
-                    .encrypt(nonce, aad, &mut payload)?;
+                    .encrypt(nonce, &aad, &mut payload)?;
                 payload.into_written()
             }
         };
@@ -90,16 +87,13 @@ impl RecordEncrypter for Tls13RecordEncrypter {
 /// This struct implements TLS 1.3 protocol-level details but relies on implementations of
 /// [`RecordDecryptionProvider`] for crypto primitives.
 pub struct Tls13RecordDecrypter {
-    provider: Box<dyn RecordDecryptionProvider<TLS13_AAD_SIZE>>,
+    provider: Box<dyn RecordDecryptionProvider>,
     iv: Iv,
 }
 
 impl Tls13RecordDecrypter {
     /// Create a new `Tls13RecordDecrypter`.
-    ///
-    /// Values should be created via [`Tls13AeadAlgorithm::decrypter`] instead of call this
-    /// directly.
-    pub(crate) fn new(provider: Box<dyn RecordDecryptionProvider<TLS13_AAD_SIZE>>, iv: Iv) -> Self {
+    pub fn new(provider: Box<dyn RecordDecryptionProvider>, iv: Iv) -> Self {
         Self { provider, iv }
     }
 }
@@ -120,7 +114,7 @@ impl RecordDecrypter for Tls13RecordDecrypter {
 
         let plain_len = self
             .provider
-            .decrypt(nonce, aad, payload.as_mut(), 0..)?;
+            .decrypt(nonce, &aad, payload.as_mut(), 0..)?;
 
         payload.truncate(plain_len);
         record.into_tls13_unpadded_record()
@@ -151,5 +145,5 @@ fn make_tls13_aad(
 
 /// TLS 1.3 AAD length.
 ///
-/// 1 byte for content type, two bytes for version, two bytes for payload length.
-pub const TLS13_AAD_SIZE: usize = 1 + 2 + 2;
+/// 1 byte for content type, 2 bytes for version, 2 bytes for payload length.
+const TLS13_AAD_SIZE: usize = 1 + 2 + 2;

@@ -7,8 +7,8 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerVerifier;
 use rustls::crypto::cipher::{
     AeadKey, EncryptBuffer, Iv, KeyBlockShape, Nonce, RecordDecrypter, RecordDecryptionProvider,
-    RecordEncrypter, RecordEncryptionProvider, TLS12_AAD_SIZE, TLS13_AAD_SIZE, Tls12AeadAlgorithm,
-    Tls12GcmRecordDecrypter, Tls12GcmRecordEncrypter, Tls13AeadAlgorithm,
+    RecordEncrypter, RecordEncryptionProvider, Tls12AeadAlgorithm, Tls12GcmRecordDecrypter,
+    Tls12GcmRecordEncrypter, Tls13AeadAlgorithm, Tls13RecordDecrypter, Tls13RecordEncrypter,
     UnsupportedOperationError,
 };
 use rustls::crypto::kx::{
@@ -268,11 +268,26 @@ const KX_SHARED_SECRET: &[u8] = b"KxSharedSecretKxSharedSecret";
 struct Aead;
 
 impl Tls13AeadAlgorithm for Aead {
-    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS13_AAD_SIZE>> {
+    fn record_encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(Tls13RecordEncrypter::new(
+            Tls13AeadAlgorithm::encrypter(self, key.clone()),
+            Tls13AeadAlgorithm::contiguous_encrypter(self, key),
+            iv,
+        ))
+    }
+
+    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         Box::new(Tls13Cipher)
     }
 
-    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS13_AAD_SIZE>> {
+    fn record_decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
+        Box::new(Tls13RecordDecrypter::new(
+            Tls13AeadAlgorithm::decrypter(self, key.clone()),
+            iv,
+        ))
+    }
+
+    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         Box::new(Tls13Cipher)
     }
 
@@ -299,7 +314,7 @@ impl Tls12AeadAlgorithm for Aead {
         ))
     }
 
-    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>> {
+    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         Box::new(Tls12Cipher)
     }
 
@@ -310,7 +325,7 @@ impl Tls12AeadAlgorithm for Aead {
         ))
     }
 
-    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>> {
+    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         Box::new(Tls12Cipher)
     }
 
@@ -334,11 +349,11 @@ impl Tls12AeadAlgorithm for Aead {
 
 struct Tls13Cipher;
 
-impl RecordEncryptionProvider<5> for Tls13Cipher {
+impl RecordEncryptionProvider for Tls13Cipher {
     fn encrypt(
         &mut self,
         nonce: Nonce,
-        _aad: [u8; 5],
+        _aad: &[u8],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
         for (p, mask) in payload
@@ -360,11 +375,11 @@ impl RecordEncryptionProvider<5> for Tls13Cipher {
     }
 }
 
-impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13Cipher {
+impl RecordDecryptionProvider for Tls13Cipher {
     fn decrypt(
         &mut self,
         nonce: Nonce,
-        _aad: [u8; AAD_LEN],
+        _aad: &[u8],
         payload: &mut [u8],
         _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {
@@ -396,11 +411,11 @@ impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13Cipher {
 
 struct Tls12Cipher;
 
-impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for Tls12Cipher {
+impl RecordEncryptionProvider for Tls12Cipher {
     fn encrypt(
         &mut self,
         nonce: Nonce,
-        _aad: [u8; AAD_LEN],
+        _aad: &[u8],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
         for (p, mask) in payload
@@ -422,11 +437,11 @@ impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for Tls12Cipher {
     }
 }
 
-impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls12Cipher {
+impl RecordDecryptionProvider for Tls12Cipher {
     fn decrypt(
         &mut self,
         nonce: Nonce,
-        _aad: [u8; AAD_LEN],
+        _aad: &[u8],
         payload: &mut [u8],
         _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {

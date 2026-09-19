@@ -7,8 +7,7 @@ use std::borrow::Cow;
 use crate::crypto::cipher::{
     AeadKey, EncryptBuffer, InboundOpaque, Iv, KeyBlockShape, OutboundPlain, Record,
     RecordDecrypter, RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider,
-    TLS12_AAD_SIZE, TLS13_AAD_SIZE, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
-    UnsupportedOperationError,
+    Tls12AeadAlgorithm, Tls13AeadAlgorithm, UnsupportedOperationError,
 };
 use crate::crypto::kx::{
     KeyExchangeAlgorithm, NamedGroup, SharedSecret, StartedKeyExchange, SupportedKxGroup,
@@ -321,7 +320,7 @@ impl Tls13AeadAlgorithm for Aead {
         Box::new(Tls13Cipher)
     }
 
-    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS13_AAD_SIZE>> {
+    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         unreachable!()
     }
 
@@ -329,7 +328,7 @@ impl Tls13AeadAlgorithm for Aead {
         Box::new(Tls13Cipher)
     }
 
-    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS13_AAD_SIZE>> {
+    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         unreachable!()
     }
 
@@ -356,7 +355,7 @@ impl Tls12AeadAlgorithm for Aead {
         Box::new(Tls12Cipher)
     }
 
-    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider<TLS12_AAD_SIZE>> {
+    fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         unreachable!()
     }
 
@@ -364,7 +363,7 @@ impl Tls12AeadAlgorithm for Aead {
         Box::new(Tls12Cipher)
     }
 
-    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider<TLS12_AAD_SIZE>> {
+    fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         unreachable!()
     }
 

@@ -5,9 +5,9 @@ use aws_lc_rs::hkdf::KeyType;
 use aws_lc_rs::{aead, hkdf, hmac};
 use pki_types::FipsStatus;
 use rustls::crypto::cipher::{
-    AeadKey, ContiguousRecordEncryptionProvider, EncryptBuffer, Iv, Nonce,
-    RecordDecryptionProvider, RecordEncryptionProvider, Tls13AeadAlgorithm,
-    UnsupportedOperationError,
+    AeadKey, ContiguousRecordEncryptionProvider, EncryptBuffer, Iv, Nonce, RecordDecrypter,
+    RecordDecryptionProvider, RecordEncrypter, RecordEncryptionProvider, Tls13AeadAlgorithm,
+    Tls13RecordDecrypter, Tls13RecordEncrypter, UnsupportedOperationError,
 };
 use rustls::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use rustls::crypto::{self, CipherSuite};
@@ -106,7 +106,15 @@ impl Chacha20Poly1305Aead {
 }
 
 impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
-    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+    fn record_encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(Tls13RecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+        ))
+    }
+
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         Box::new(AeadRecordEncryptionProvider {
             enc_key: self.less_safe_key(key),
         })
@@ -115,13 +123,17 @@ impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
     fn contiguous_encrypter(
         &self,
         key: AeadKey,
-    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<5>>> {
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider>> {
         Some(Box::new(AeadRecordEncryptionProvider {
             enc_key: self.less_safe_key(key),
         }))
     }
 
-    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+    fn record_decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
+        Box::new(Tls13RecordDecrypter::new(self.decrypter(key), iv))
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         Box::new(AeadRecordDecrypter {
             dec_key: self.less_safe_key(key),
         })
@@ -147,18 +159,30 @@ impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
 struct Aes256GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes256GcmAead {
-    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+    fn record_encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(Tls13RecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+        ))
+    }
+
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         self.0.encrypter(key)
     }
 
     fn contiguous_encrypter(
         &self,
         key: AeadKey,
-    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<5>>> {
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider>> {
         self.0.contiguous_encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+    fn record_decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
+        Box::new(Tls13RecordDecrypter::new(self.decrypter(key), iv))
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         self.0.decrypter(key)
     }
 
@@ -182,18 +206,30 @@ impl Tls13AeadAlgorithm for Aes256GcmAead {
 struct Aes128GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes128GcmAead {
-    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+    fn record_encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(Tls13RecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+        ))
+    }
+
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         self.0.encrypter(key)
     }
 
     fn contiguous_encrypter(
         &self,
         key: AeadKey,
-    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<5>>> {
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider>> {
         self.0.contiguous_encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+    fn record_decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordDecrypter> {
+        Box::new(Tls13RecordDecrypter::new(self.decrypter(key), iv))
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         self.0.decrypter(key)
     }
 
@@ -226,7 +262,7 @@ impl AeadAlgorithm {
         aead::TlsRecordSealingKey::new(self.0, aead::TlsProtocolId::TLS13, key.as_ref()).unwrap()
     }
 
-    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         Box::new(GcmRecordEncyptionProvider {
             enc_key: self.sealing_key(key),
         })
@@ -235,14 +271,14 @@ impl AeadAlgorithm {
     fn contiguous_encrypter(
         &self,
         key: AeadKey,
-    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider<5>>> {
+    ) -> Option<Box<dyn ContiguousRecordEncryptionProvider>> {
         Some(Box::new(GcmRecordEncyptionProvider {
             enc_key: self.sealing_key(key),
         }))
     }
 
     // using aead::TlsRecordOpeningKey
-    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         // safety:
         // - the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
         // - this function should only be used for `Algorithm::AES_128_GCM` or `Algorithm::AES_256_GCM`
@@ -265,11 +301,11 @@ struct AeadRecordEncryptionProvider {
     enc_key: aead::LessSafeKey,
 }
 
-impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for AeadRecordEncryptionProvider {
+impl RecordEncryptionProvider for AeadRecordEncryptionProvider {
     fn encrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_LEN],
+        aad: &[u8],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
         let tag = self
@@ -280,6 +316,10 @@ impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for AeadRecordEncry
                 payload.as_mut(),
             )
             .map_err(|_| Error::EncryptError)?;
+        // TODO: every single RecordEncryptionProvider::encrypt implementation currently has to
+        // append the tag. The tag should be returned from this function and appending should be
+        // hoisted up into RecordEncrypter::encrypt implementations. That requires some const
+        // generic gymnastics so we can return tags as arrays.
         payload.extend_from_slice(tag.as_ref());
 
         Ok(())
@@ -290,13 +330,11 @@ impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for AeadRecordEncry
     }
 }
 
-impl<const AAD_LEN: usize> ContiguousRecordEncryptionProvider<AAD_LEN>
-    for AeadRecordEncryptionProvider
-{
+impl ContiguousRecordEncryptionProvider for AeadRecordEncryptionProvider {
     fn encrypt_contiguous<'a>(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_LEN],
+        aad: &[u8],
         plaintext: &[u8],
         extra_plaintext: &[u8],
         ciphertext: &'a mut [u8],
@@ -325,11 +363,11 @@ struct AeadRecordDecrypter {
     dec_key: aead::LessSafeKey,
 }
 
-impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for AeadRecordDecrypter {
+impl RecordDecryptionProvider for AeadRecordDecrypter {
     fn decrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_LEN],
+        aad: &[u8],
         payload: &mut [u8],
         _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {
@@ -355,11 +393,11 @@ struct GcmRecordEncyptionProvider {
     enc_key: aead::TlsRecordSealingKey,
 }
 
-impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for GcmRecordEncyptionProvider {
+impl RecordEncryptionProvider for GcmRecordEncyptionProvider {
     fn encrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_LEN],
+        aad: &[u8],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
         let tag = self
@@ -380,13 +418,11 @@ impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for GcmRecordEncypt
     }
 }
 
-impl<const AAD_LEN: usize> ContiguousRecordEncryptionProvider<AAD_LEN>
-    for GcmRecordEncyptionProvider
-{
+impl ContiguousRecordEncryptionProvider for GcmRecordEncyptionProvider {
     fn encrypt_contiguous<'a>(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_LEN],
+        aad: &[u8],
         plaintext: &[u8],
         extra_plaintext: &[u8],
         ciphertext: &'a mut [u8],
@@ -415,11 +451,11 @@ struct GcmRecordDecrypter {
     dec_key: aead::TlsRecordOpeningKey,
 }
 
-impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for GcmRecordDecrypter {
+impl RecordDecryptionProvider for GcmRecordDecrypter {
     fn decrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_LEN],
+        aad: &[u8],
         payload: &mut [u8],
         _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {

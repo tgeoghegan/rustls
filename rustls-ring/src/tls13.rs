@@ -7,8 +7,8 @@ use ring::hkdf::{self, KeyType};
 use ring::{aead, hmac};
 use rustls::crypto::CipherSuite;
 use rustls::crypto::cipher::{
-    AeadKey, EncryptBuffer, Iv, Nonce, RecordDecryptionProvider, RecordEncryptionProvider,
-    Tls13AeadAlgorithm, UnsupportedOperationError,
+    self, AeadKey, EncryptBuffer, Iv, Nonce, RecordDecryptionProvider, RecordEncrypter,
+    RecordEncryptionProvider, Tls13AeadAlgorithm, UnsupportedOperationError,
 };
 use rustls::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use rustls::error::Error;
@@ -92,11 +92,23 @@ pub static TLS13_AES_128_GCM_SHA256: &Tls13CipherSuite = &Tls13CipherSuite {
 struct Chacha20Poly1305Aead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
-    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+    fn record_encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(cipher::Tls13RecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+        ))
+    }
+
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         self.0.encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+    fn record_decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn cipher::RecordDecrypter> {
+        Box::new(cipher::Tls13RecordDecrypter::new(self.decrypter(key), iv))
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         self.0.decrypter(key)
     }
 
@@ -120,11 +132,23 @@ impl Tls13AeadAlgorithm for Chacha20Poly1305Aead {
 struct Aes256GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes256GcmAead {
-    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+    fn record_encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(cipher::Tls13RecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+        ))
+    }
+
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         self.0.encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+    fn record_decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn cipher::RecordDecrypter> {
+        Box::new(cipher::Tls13RecordDecrypter::new(self.decrypter(key), iv))
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         self.0.decrypter(key)
     }
 
@@ -148,11 +172,23 @@ impl Tls13AeadAlgorithm for Aes256GcmAead {
 struct Aes128GcmAead(AeadAlgorithm);
 
 impl Tls13AeadAlgorithm for Aes128GcmAead {
-    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+    fn record_encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn RecordEncrypter> {
+        Box::new(cipher::Tls13RecordEncrypter::new(
+            self.encrypter(key.clone()),
+            self.contiguous_encrypter(key),
+            iv,
+        ))
+    }
+
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         self.0.encrypter(key)
     }
 
-    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+    fn record_decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn cipher::RecordDecrypter> {
+        Box::new(cipher::Tls13RecordDecrypter::new(self.decrypter(key), iv))
+    }
+
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         self.0.decrypter(key)
     }
 
@@ -177,14 +213,14 @@ impl Tls13AeadAlgorithm for Aes128GcmAead {
 struct AeadAlgorithm(&'static aead::Algorithm);
 
 impl AeadAlgorithm {
-    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+    fn encrypter(&self, key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
         // safety: the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
         Box::new(Tls13RecordEncrypter {
             enc_key: aead::LessSafeKey::new(aead::UnboundKey::new(self.0, key.as_ref()).unwrap()),
         })
     }
 
-    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+    fn decrypter(&self, key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
         // safety: the caller arranges that `key` is `key_len()` in bytes, so this unwrap is safe.
         Box::new(Tls13RecordDecrypter {
             dec_key: aead::LessSafeKey::new(aead::UnboundKey::new(self.0, key.as_ref()).unwrap()),
@@ -204,11 +240,11 @@ struct Tls13RecordDecrypter {
     dec_key: aead::LessSafeKey,
 }
 
-impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for Tls13RecordEncrypter {
+impl RecordEncryptionProvider for Tls13RecordEncrypter {
     fn encrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_LEN],
+        aad: &[u8],
         payload: &mut EncryptBuffer<'_>,
     ) -> Result<(), Error> {
         match self.enc_key.seal_in_place_separate_tag(
@@ -228,11 +264,11 @@ impl<const AAD_LEN: usize> RecordEncryptionProvider<AAD_LEN> for Tls13RecordEncr
     }
 }
 
-impl<const AAD_LEN: usize> RecordDecryptionProvider<AAD_LEN> for Tls13RecordDecrypter {
+impl RecordDecryptionProvider for Tls13RecordDecrypter {
     fn decrypt(
         &mut self,
         nonce: Nonce,
-        aad: [u8; AAD_LEN],
+        aad: &[u8],
         payload: &mut [u8],
         _ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<usize, Error> {

@@ -1990,7 +1990,7 @@ mod plaintext {
             Box::new(Encrypter)
         }
 
-        fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider<5>> {
+        fn encrypter(&self, _key: AeadKey) -> Box<dyn RecordEncryptionProvider> {
             unreachable!()
         }
 
@@ -1998,7 +1998,7 @@ mod plaintext {
             Box::new(Decrypter)
         }
 
-        fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider<5>> {
+        fn decrypter(&self, _key: AeadKey) -> Box<dyn RecordDecryptionProvider> {
             unreachable!()
         }
 
