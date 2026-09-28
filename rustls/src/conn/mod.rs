@@ -161,7 +161,7 @@ impl<Side: SideData> ConnectionCommon<Side> {
     pub(crate) fn process_new_packets<'a, 'm>(
         &'a mut self,
         input: &'m mut dyn TlsInputBuffer,
-        tls: &'a mut Vec<u8>,
+        tls: &'a mut dyn TlsOutput,
     ) -> MessageHandler<'a, 'm, Side> {
         MessageHandler::new(input, tls, self)
     }
@@ -322,7 +322,7 @@ pub struct MessageHandler<'a, 'm, Side: SideData> {
 impl<'a, 'm, Side: SideData> MessageHandler<'a, 'm, Side> {
     pub(crate) fn new(
         input: &'m mut dyn TlsInputBuffer,
-        tls: &'a mut Vec<u8>,
+        tls: &'a mut dyn TlsOutput,
         core: &'a mut ConnectionCommon<Side>,
     ) -> Self {
         Self {
@@ -506,14 +506,14 @@ impl IoState {
     }
 }
 
-pub(crate) struct SideCommonOutput<'a, 'q> {
+pub(crate) struct SideCommonOutput<'a, 'q, Deframer: DeframerCore> {
     pub(crate) side: &'a mut dyn SideOutput,
     pub(crate) quic: Option<&'q mut dyn QuicOutput>,
-    pub(crate) common: &'a mut CommonState<StreamDeframerCore>,
-    pub(crate) tls: &'a mut Vec<u8>,
+    pub(crate) common: &'a mut CommonState<Deframer>,
+    pub(crate) tls: &'a mut dyn TlsOutput,
 }
 
-impl<'q> Output<'_> for SideCommonOutput<'_, 'q> {
+impl<'q, Deframer: DeframerCore> Output<'_> for SideCommonOutput<'_, 'q, Deframer> {
     fn emit(&mut self, ev: Event<'_>) {
         self.side.emit(ev);
     }
@@ -606,4 +606,42 @@ pub(crate) trait StateMachine: Sized {
         self,
         send_keys: &Option<Box<KeyScheduleTrafficSend>>,
     ) -> Result<(PartiallyExtractedSecrets, Box<dyn KernelState + 'static>), Error>;
+}
+
+/// Buffers to which `rustls` can append TLS ciphertext to be sent.
+///
+/// When using a streaming transport (TCP or QUIC), outbound ciphertext is appended to a plain
+/// `Vec<u8>` with no boundaries between records. When using a datagram transport (UDP), outbound
+/// records are appended to a `Vec<Vec<u8>>`. Each element of the outer `Vec` is a record that
+/// should be transmitted, and whose timeouts and retransmission should be managed independently.
+pub trait TlsOutput {
+    /// Reserve (preallocate) room in the output buffer.
+    ///
+    /// Reserves enough room for `count` elements, each occupying `size` bytes.
+    fn reserve(&mut self, count: usize, size: usize);
+    /// Get a mutable byte vector to which outbound ciphertext can be appended.
+    fn appendable(&mut self) -> &mut Vec<u8>;
+}
+
+impl TlsOutput for Vec<u8> {
+    fn reserve(&mut self, count: usize, size: usize) {
+        self.reserve(count * size);
+    }
+
+    fn appendable(&mut self) -> &mut Vec<u8> {
+        self
+    }
+}
+
+// TODO: something richer than this? if we preallocate vecs in reserve, then we need to track where
+// the first unoccupied vec is.
+impl TlsOutput for Vec<Vec<u8>> {
+    fn reserve(&mut self, _count: usize, _size: usize) {
+        // TODO: preallocate vecs
+    }
+
+    fn appendable(&mut self) -> &mut Vec<u8> {
+        // TODO: check if there is a preallocated vec
+        self.push_mut(Vec::new())
+    }
 }

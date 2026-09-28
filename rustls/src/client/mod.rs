@@ -33,6 +33,9 @@ pub use config::{
 mod connection;
 pub use connection::{ClientConnection, ClientConnectionBuilder, ClientSide, WriteEarlyData};
 
+mod datagram;
+pub use datagram::ClientSocket;
+
 mod ech;
 pub use ech::{EchConfig, EchGreaseConfig, EchMode, EchStatus};
 

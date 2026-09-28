@@ -9,7 +9,9 @@ use crate::TlsInputBuffer;
 use crate::client::{ClientConfig, ClientSide};
 pub use crate::common_state::Side;
 use crate::common_state::{CommonState, ConnectionOutputs, Protocol};
-use crate::conn::{ConnectionCommon, KeyingMaterialExporter, MessageIter, SideData, StateMachine};
+use crate::conn::{
+    ConnectionCommon, KeyingMaterialExporter, MessageIter, SideData, StateMachine,
+};
 use crate::crypto::VerifiedIdentity;
 use crate::crypto::cipher::{AeadKey, Iv, Payload};
 use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock};
@@ -705,7 +707,7 @@ impl<Side: SideData> QuicCommon<Side> {
             .deframer
             .input_quic(input.slice_mut())?;
 
-        let mut tls = Vec::new();
+        let mut tls = Vec::<u8>::new();
         let mut iter = MessageIter::<_, _, StreamDeframerCore>::new(
             input,
             &mut tls,

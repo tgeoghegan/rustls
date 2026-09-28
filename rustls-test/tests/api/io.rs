@@ -2078,7 +2078,7 @@ fn test_server_handshake() {
 
         let receive = ServerHandshake::start();
         let mut acceptor_input = VecInput::default();
-        let mut output = vec![];
+        let mut output = Vec::<u8>::new();
         let ServerHandshake::NeedsInput(receive) = receive
             .process(&mut acceptor_input, &mut output)
             .unwrap()

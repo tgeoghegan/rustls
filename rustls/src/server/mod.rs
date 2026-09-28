@@ -26,6 +26,9 @@ pub use connection::{
     VerifyClientIdentity,
 };
 
+mod datagram;
+pub use datagram::ServerSocket;
+
 pub(crate) mod handy;
 #[cfg(feature = "webpki")]
 pub use handy::ServerNameResolver;

@@ -13,8 +13,9 @@ use crate::common_state::{
 };
 use crate::conn::private::SideOutput;
 use crate::conn::unacked_list::UnackedRecords;
-use crate::conn::{ConnectionCommon, StateMachine};
+use crate::conn::{ConnectionCommon, StateMachine, TlsOutput};
 use crate::crypto::cipher::{Decrypted, DecryptionState, EncodableVersion, Payload, Record};
+use crate::datagram::SocketCommon;
 use crate::enums::{ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{AlertDescription, Error, InvalidMessage, PeerMisbehaved};
 use crate::msgs::dtls::{
@@ -22,8 +23,8 @@ use crate::msgs::dtls::{
 };
 use crate::msgs::{
     AlertLevel, AlertLevelName, AlertMessagePayload, Deframed, Deframer, DeframerCore, Delocator,
-    Epoch, HandshakeAlignedProof, HandshakeMessagePayload, HandshakeSequenceNumber, Locator,
-    Message, MessagePayload, StreamDeframerCore,
+    DtlsDeframerCore, Epoch, HandshakeAlignedProof, HandshakeMessagePayload,
+    HandshakeSequenceNumber, Locator, Message, MessagePayload, StreamDeframerCore,
 };
 use crate::quic::QuicOutput;
 use crate::tracing::{trace, warn};
@@ -31,7 +32,7 @@ use crate::tracing::{trace, warn};
 pub(crate) struct MessageIter<'a, 'm, Side: SideData, Send: SendOutput + 'a, Deframe: DeframerCore>
 {
     pub(super) input: &'m mut dyn TlsInputBuffer,
-    pub(super) tls: &'a mut Vec<u8>,
+    pub(super) tls: &'a mut dyn TlsOutput,
     pub(super) recv: &'a mut ReceivePath<Deframe>,
     pub(super) state: &'a mut Result<Side::State, Error>,
     pub(super) output: JoinOutput<'a, Send>,
@@ -41,7 +42,7 @@ pub(crate) struct MessageIter<'a, 'm, Side: SideData, Send: SendOutput + 'a, Def
 impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side, SendPath, StreamDeframerCore> {
     pub(crate) fn new(
         input: &'m mut dyn TlsInputBuffer,
-        tls: &'a mut Vec<u8>,
+        tls: &'a mut dyn TlsOutput,
         quic: Option<&'a mut dyn QuicOutput>,
         conn: &'a mut ConnectionCommon<Side>,
         advance: bool,
@@ -62,12 +63,35 @@ impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side, SendPath, StreamDeframerC
     }
 }
 
+impl<'a, 'm, Side: SideData> MessageIter<'a, 'm, Side, SendPath, DtlsDeframerCore> {
+    pub(crate) fn new_datagram(
+        input: &'m mut dyn TlsInputBuffer,
+        tls: &'a mut dyn TlsOutput,
+        socket: &'a mut SocketCommon<Side>,
+        advance: bool,
+    ) -> Self {
+        Self {
+            input,
+            tls,
+            recv: &mut socket.common.recv,
+            state: &mut socket.state,
+            output: JoinOutput {
+                outputs: &mut socket.common.outputs,
+                quic: None,
+                send: &mut socket.common.send,
+                side: &mut socket.side,
+            },
+            advance,
+        }
+    }
+}
+
 impl<'a, 'm, 's, Side: SideData, Deframe: DeframerCore>
     MessageIter<'a, 'm, Side, SendAdapter<'s>, Deframe>
 {
     pub(super) fn receive(
         input: &'m mut dyn TlsInputBuffer,
-        tls: &'a mut Vec<u8>,
+        tls: &'a mut dyn TlsOutput,
         state: &'a mut Result<Side::State, Error>,
         recv: &'a mut ReceivePath<Deframe>,
         output: JoinOutput<'a, SendAdapter<'s>>,
@@ -477,7 +501,7 @@ impl<Deframe: DeframerCore> ReceivePath<Deframe> {
         &mut self,
         record: Record<&'a [u8]>,
         aligned_handshake: Option<HandshakeAlignedProof>,
-        tls: &mut Vec<u8>,
+        tls: &mut dyn TlsOutput,
         send: &mut dyn SendOutput,
     ) -> Result<Option<Input<'a>>, Error> {
         // Drop CCS messages during handshake in TLS1.3
@@ -532,7 +556,7 @@ impl<Deframe: DeframerCore> ReceivePath<Deframe> {
     fn reject_renegotiation_request(
         &mut self,
         msg: &Message<'_>,
-        tls: &mut Vec<u8>,
+        tls: &mut dyn TlsOutput,
         send: &mut dyn SendOutput,
     ) -> Result<bool, Error> {
         if !self.may_receive_application_data
@@ -638,7 +662,7 @@ impl<Deframe: DeframerCore> ReceivePath<Deframe> {
         &mut self,
         accepted_message: Option<(HandshakeSequenceNumber, HandshakeType)>,
         send: &mut dyn SendOutput,
-        tls: &mut Vec<u8>,
+        tls: &mut dyn TlsOutput,
     ) {
         if let Some(to_ack) = self
             .handshake_acks
@@ -663,7 +687,7 @@ enum DeframeResult<'b> {
 struct CaptureAppData<'a, 'j, 'm, Send: SendOutput + 'a, Deframe: DeframerCore> {
     recv: &'a mut ReceivePath<Deframe>,
     other: &'a mut JoinOutput<'j, Send>,
-    tls: &'a mut Vec<u8>,
+    tls: &'a mut dyn TlsOutput,
     /// Store a [`Locator`] initialized from the current receive buffer
     ///
     /// Allows received plaintext data to be unborrowed and stored in

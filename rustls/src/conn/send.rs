@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::common_state::{Protocol, Side};
+use crate::conn::TlsOutput;
 use crate::crypto::cipher::{
     EncodableVersion, EncodingContext, EncryptionState, OutboundPlain, Payload, PreEncryptAction,
     Record, RecordEncrypter, RecordSequenceNumberEncrypter,
@@ -53,7 +54,7 @@ impl SendPath {
         }
     }
 
-    pub(crate) fn send_close_notify(&mut self, tls: &mut Vec<u8>) {
+    pub(crate) fn send_close_notify(&mut self, tls: &mut dyn TlsOutput) {
         if self.has_sent_close_notify {
             return;
         }
@@ -62,7 +63,7 @@ impl SendPath {
         self.send_alert(AlertLevel::Warning, AlertDescription::CloseNotify, tls);
     }
 
-    fn preflight_encrypt(&mut self, n: usize, tls: &mut Vec<u8>) -> Result<(), Error> {
+    fn preflight_encrypt(&mut self, n: usize, tls: &mut dyn TlsOutput) -> Result<(), Error> {
         match self
             .encrypt_state
             .pre_encrypt_action(n as u64)
@@ -96,7 +97,7 @@ impl SendPath {
     pub(crate) fn send_appdata_encrypt(
         &mut self,
         payload: OutboundPlain<'_>,
-        tls: &mut Vec<u8>,
+        tls: &mut dyn TlsOutput,
     ) -> usize {
         let len = payload.len();
         if self.version().is_datagram_tls() {
@@ -131,7 +132,7 @@ impl SendPath {
     fn send_records<'a, const MUST_ENCRYPT: bool>(
         &mut self,
         iter: impl ExactSizeIterator<Item = Record<OutboundPlain<'a>>>,
-        tls: &mut Vec<u8>,
+        tls: &mut dyn TlsOutput,
     ) {
         self.perhaps_write_key_update(tls);
         let count = iter.len();
@@ -155,7 +156,7 @@ impl SendPath {
                         + first.payload.len()
                 }
             };
-            tls.reserve(count * record_len);
+            tls.reserve(count, record_len);
         }
 
         for record in iter {
@@ -170,10 +171,10 @@ impl SendPath {
             match MUST_ENCRYPT {
                 true => self
                     .encrypt_state
-                    .encrypt_outgoing(record, tls),
+                    .encrypt_outgoing(record, tls.appendable()),
                 false => {
                     record.encode_unencrypted(
-                        tls,
+                        tls.appendable(),
                         EncodingContext {
                             payload_is_encrypted: false,
                             // Despite the message being unencrypted, we still indicate the current
@@ -196,11 +197,11 @@ impl SendPath {
         debug_assert!(self.encrypt_state.is_encrypting());
     }
 
-    fn perhaps_write_key_update(&mut self, tls: &mut Vec<u8>) {
+    fn perhaps_write_key_update(&mut self, tls: &mut dyn TlsOutput) {
         let KeyUpdateRemote::Queued(message) = &mut self.key_update_remote else {
             return;
         };
-        tls.append(message);
+        tls.appendable().append(message);
         self.key_update_remote = KeyUpdateRemote::Idle;
     }
 
@@ -210,20 +211,20 @@ impl SendPath {
     }
 
     /// Trigger a `refresh_traffic_keys` if requested.
-    fn maybe_refresh_traffic_keys(&mut self, tls: &mut Vec<u8>) {
+    fn maybe_refresh_traffic_keys(&mut self, tls: &mut dyn TlsOutput) {
         if let KeyUpdateLocal::Requested = self.key_update_local {
             let _ = self.send_key_update_request(tls);
         }
     }
 
-    pub(crate) fn refresh_traffic_keys(&mut self, tls: &mut Vec<u8>) -> Result<(), Error> {
+    pub(crate) fn refresh_traffic_keys(&mut self, tls: &mut dyn TlsOutput) -> Result<(), Error> {
         if let KeyUpdateLocal::Outstanding = self.key_update_local {
             return Ok(());
         }
         self.send_key_update_request(tls)
     }
 
-    fn send_key_update_request(&mut self, tls: &mut Vec<u8>) -> Result<(), Error> {
+    fn send_key_update_request(&mut self, tls: &mut dyn TlsOutput) -> Result<(), Error> {
         let ks = self.tls13_key_schedule.take();
 
         let Some(mut ks) = ks else {
@@ -262,7 +263,7 @@ impl SendPath {
         m: &Message<'_>,
         encoded: &[(HandshakeType, HandshakeSequenceNumber, E)],
         must_encrypt: bool,
-        tls: &mut Vec<u8>,
+        tls: &mut dyn TlsOutput,
     ) {
         let messages: Vec<_> = self
             .fragmenter
@@ -379,7 +380,7 @@ impl SendOutput for SendPath {
         self.tls13_key_schedule = Some(schedule);
     }
 
-    fn send_alert(&mut self, level: AlertLevel, desc: AlertDescription, tls: &mut Vec<u8>) {
+    fn send_alert(&mut self, level: AlertLevel, desc: AlertDescription, tls: &mut dyn TlsOutput) {
         match level {
             AlertLevel::Fatal if self.has_sent_fatal_alert => return,
             AlertLevel::Fatal => self.has_sent_fatal_alert = true,
@@ -399,7 +400,7 @@ impl SendOutput for SendPath {
     }
 
     /// Send a raw TLS message, fragmenting it if needed.
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, tls: &mut Vec<u8>) {
+    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, tls: &mut dyn TlsOutput) {
         match (self.protocol, &m.payload) {
             // DTLS handshake messages can be fragmented into multiple records which contain
             // information necessary for reassembly.
@@ -468,7 +469,7 @@ impl SendOutput for SendPath {
         self.handshake_sequence.increment()
     }
 
-    fn ack_flight(&mut self, record_seqs: &[AckRecordSequenceNumber], tls: &mut Vec<u8>) {
+    fn ack_flight(&mut self, record_seqs: &[AckRecordSequenceNumber], tls: &mut dyn TlsOutput) {
         self.send_msg(Message::build_ack(record_seqs), false, tls);
     }
 }
@@ -519,13 +520,13 @@ pub(crate) trait SendOutput {
 
     fn update_key_schedule(&mut self, schedule: Box<KeyScheduleTrafficSend>);
 
-    fn send_alert(&mut self, level: AlertLevel, desc: AlertDescription, tls: &mut Vec<u8>);
+    fn send_alert(&mut self, level: AlertLevel, desc: AlertDescription, tls: &mut dyn TlsOutput);
 
     fn start_traffic(&mut self);
 
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, tls: &mut Vec<u8>);
+    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, tls: &mut dyn TlsOutput);
 
     fn outbound_handshake_seq(&mut self) -> HandshakeSequenceNumber;
 
-    fn ack_flight(&mut self, record_seqs: &[AckRecordSequenceNumber], tls: &mut Vec<u8>);
+    fn ack_flight(&mut self, record_seqs: &[AckRecordSequenceNumber], tls: &mut dyn TlsOutput);
 }

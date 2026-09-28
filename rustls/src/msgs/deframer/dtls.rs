@@ -12,7 +12,7 @@ use crate::msgs::dtls::{
     DtlsHandshakeFragment, DtlsMessageHeader, RecordSequenceNumber, UnifiedHeader,
     is_unified_header, read_dtls_record_header,
 };
-use crate::msgs::{Deframed, DeframerCore, Epoch, HEADER_SIZE, HandshakeSequenceNumber};
+use crate::msgs::{Deframed, DeframerCore, Epoch, HandshakeSequenceNumber};
 
 pub(crate) type DtlsDeframer = Deframer<DtlsDeframerCore>;
 
@@ -200,7 +200,7 @@ impl DeframerCore for DtlsDeframerCore {
         // fragments is fallible: if there isn't enough room for a handshake fragment header, we
         // have a short read.
         let mut bound_start = bounds.start;
-        let mut reader = Reader::new(buf);
+        let mut reader = Reader::new(&buf[bounds.start..bounds.end]);
         while reader.any_left() {
             let handshake_fragment = DtlsHandshakeFragment::read(&mut reader)?;
             let fragment_len =

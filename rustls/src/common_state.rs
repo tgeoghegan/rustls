@@ -6,7 +6,7 @@ use core::ops::{Deref, DerefMut, Range};
 use pki_types::{DnsName, FipsStatus};
 
 use crate::client::EchStatus;
-use crate::conn::{Exporter, KeyingMaterialExporter, ReceivePath, SendOutput, SendPath};
+use crate::conn::{Exporter, KeyingMaterialExporter, ReceivePath, SendOutput, SendPath, TlsOutput};
 use crate::crypto::cipher::{DecryptionState, EncodableVersion, Payload};
 use crate::crypto::kx::SupportedKxGroup;
 use crate::enums::{ApplicationProtocol, HandshakeType, ProtocolVersion};
@@ -238,7 +238,11 @@ impl fmt::Debug for ConnectionOutputs {
 }
 
 /// Send an alert via `output` if `error` specifies one.
-pub(crate) fn maybe_send_fatal_alert(send: &mut dyn SendOutput, error: &Error, tls: &mut Vec<u8>) {
+pub(crate) fn maybe_send_fatal_alert(
+    send: &mut dyn SendOutput,
+    error: &Error,
+    tls: &mut dyn TlsOutput,
+) {
     let Ok(alert) = AlertDescription::try_from(error) else {
         return;
     };

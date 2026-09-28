@@ -9,7 +9,7 @@ use crate::client::ClientSide;
 use crate::common_state::UnborrowedPayload;
 use crate::conn::kernel::KernelConnection;
 use crate::conn::{
-    ConnectionCommon, MessageIter, ReceivePath, SendOutput, SendPath, TlsInputBuffer,
+    ConnectionCommon, MessageIter, ReceivePath, SendOutput, SendPath, TlsInputBuffer, TlsOutput,
 };
 use crate::crypto::cipher::{OutboundPlain, RecordEncrypter, RecordSequenceNumberEncrypter};
 use crate::enums::ProtocolVersion;
@@ -522,7 +522,7 @@ impl SendOutput for SendAdapter<'_> {
             .update_key_schedule(schedule);
     }
 
-    fn send_alert(&mut self, level: AlertLevel, desc: AlertDescription, tls: &mut Vec<u8>) {
+    fn send_alert(&mut self, level: AlertLevel, desc: AlertDescription, tls: &mut dyn TlsOutput) {
         self.as_locked(true)
             .send_alert(level, desc, tls)
     }
@@ -531,7 +531,7 @@ impl SendOutput for SendAdapter<'_> {
         self.as_locked(false).start_traffic();
     }
 
-    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, tls: &mut Vec<u8>) {
+    fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool, tls: &mut dyn TlsOutput) {
         self.as_locked(true)
             .send_msg(m, must_encrypt, tls)
     }
@@ -541,7 +541,7 @@ impl SendOutput for SendAdapter<'_> {
             .outbound_handshake_seq()
     }
 
-    fn ack_flight(&mut self, seqs: &[AckRecordSequenceNumber], tls: &mut Vec<u8>) {
+    fn ack_flight(&mut self, seqs: &[AckRecordSequenceNumber], tls: &mut dyn TlsOutput) {
         self.as_locked(true)
             .ack_flight(seqs, tls);
     }
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn send_adapter_flag() {
-        let mut tls = Vec::new();
+        let mut tls = Vec::<u8>::new();
         assert!(!send_flag_for(
             |adapter| adapter.set_negotiated_version(ProtocolVersion::TLSv1_3)
         ));

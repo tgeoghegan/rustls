@@ -14,7 +14,7 @@ use crate::conn::private::SideOutput;
 use crate::conn::split::SplitConnection;
 use crate::conn::{
     Connection, ConnectionCommon, KeyingMaterialExporter, MessageHandler, MessageIter, SideData,
-    StateMachine, TlsInputBuffer,
+    StateMachine, TlsInputBuffer, TlsOutput,
 };
 #[cfg(doc)]
 use crate::crypto;
@@ -41,16 +41,11 @@ impl ServerConnection {
     /// Make a new ServerConnection.  `config` controls how
     /// we behave in the TLS protocol.
     pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
-        Self::new_with_protocol(config, Protocol::Tcp)
-    }
-
-    /// Make a new ServerConnection over the specified transport protocol.
-    pub fn new_with_protocol(config: Arc<ServerConfig>, protocol: Protocol) -> Result<Self, Error> {
         Ok(Self {
             inner: ConnectionCommon::for_server(
                 config,
                 ServerExtensionsInput::default(),
-                protocol,
+                Protocol::Tcp,
             )?,
         })
     }
@@ -140,10 +135,6 @@ impl ServerConnection {
         } else {
             None
         }
-    }
-
-    pub fn records_acked_by_peer(&self) -> &[AckRecordSequenceNumber] {
-        self.inner.common.recv.acked_by_peer()
     }
 }
 
@@ -303,7 +294,7 @@ impl NeedsInput {
     pub fn process(
         mut self,
         input: &mut dyn TlsInputBuffer,
-        tls: &mut Vec<u8>,
+        tls: &mut dyn TlsOutput,
     ) -> Result<ServerHandshake, Error> {
         let mut iter =
             MessageIter::<_, _, StreamDeframerCore>::new(input, tls, None, &mut self.inner, false);
